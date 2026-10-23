@@ -1,0 +1,9 @@
+# 从绫开始 —— 运行期依赖
+# 设计目标：零强制依赖。
+#   - 存储：标准库 sqlite3（WAL）+ asyncio.to_thread
+#   - 检索：内置字符 bigram + BM25 兜底；装了 jieba 自动升级
+#   - 网络：aiohttp（AstrBot 自带）
+# 可选增强（不装也能跑，功能降级）：
+#   jieba>=0.42.1        # 中文分词，显著提升 BM25 召回
+#   numpy                # 向量检索加速
+#   pillow               # 资料卡/图集渲染

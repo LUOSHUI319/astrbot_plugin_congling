@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <span class="brand-cn">从绫开始</span>
+        <span class="brand-en">congling</span>
+      </div>
+      <nav id="nav">
+        <button class="nav-item is-active" data-view="overview">概览</button>
+        <button class="nav-item" data-view="persona">人格</button>
+        <button class="nav-item" data-view="behavior">行为</button>
+        <button class="nav-item" data-view="memory">记忆</button>
+        <button class="nav-item" data-view="tools">工具</button>
+        <button class="nav-item" data-view="qq">QQ</button>
+        <button class="nav-item" data-view="system">系统</button>
+      </nav>
+      <div class="side-foot">
+        <div id="compat-line" class="mono">探测中…</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="notice">
+        <span class="notice-dot"></span>
+        <span>本插件由 <b>梦半何时醒</b> 定制使用 · 除授权外不许外用</span>
+      </div>
+      <header class="head">
+        <h1 id="title">概览</h1>
+        <div class="head-right">
+          <span id="persona-tag" class="tag mono">—</span>
+          <button id="refresh" class="ghost" title="刷新">刷新</button>
+        </div>
+      </header>
+      <section id="view" class="view">
+        <div class="empty">加载中…</div>
+      </section>
+    </main>
+  </div>
+  <script src="./app.js" defer></script>
+</body>
+</html>

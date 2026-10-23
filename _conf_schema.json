@@ -1,0 +1,561 @@
+{
+  "basic": {
+    "description": "基础设置",
+    "hint": "启用范围与管理员。改动后需重载插件才完全生效。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用插件",
+        "type": "bool",
+        "default": true
+      },
+      "enable_private": {
+        "description": "私聊生效",
+        "type": "bool",
+        "default": true
+      },
+      "enable_group": {
+        "description": "群聊生效",
+        "type": "bool",
+        "default": true
+      },
+      "platforms": {
+        "description": "生效平台",
+        "hint": "默认只对 aiocqhttp（OneBot v11）生效",
+        "type": "list",
+        "default": [
+          "aiocqhttp"
+        ]
+      },
+      "extra_admins": {
+        "description": "额外管理员",
+        "hint": "一行一个 QQ 号。AstrBot 全局管理员自动算在内，这里只补额外的人",
+        "type": "list",
+        "default": []
+      },
+      "include_group_role": {
+        "description": "群主/群管也算管理员",
+        "hint": "默认不算。开了之后群里任何管理员都能发说说、看到管理信息",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "persona": {
+    "description": "人格档案",
+    "hint": "「绫」的人格内核。UI 里改更直观，这里只是默认值。",
+    "type": "object",
+    "items": {
+      "mode": {
+        "description": "人设来源",
+        "hint": "builtin=使用本插件内置的「绫」；astrbot=使用 AstrBot 里已有的人格；none=完全交给 AstrBot 默认人设，本插件不注入任何人设文本",
+        "type": "string",
+        "options": [
+          "builtin",
+          "astrbot",
+          "none"
+        ],
+        "default": "builtin"
+      },
+      "astrbot_persona_id": {
+        "description": "选择 AstrBot 人格",
+        "hint": "仅当人设来源为 astrbot 时生效。留空表示使用 AstrBot 的默认人格",
+        "type": "string",
+        "default": ""
+      },
+      "persona_id": {
+        "description": "人格 ID",
+        "hint": "所有模块用这个字段区分不同人格，默认 ling",
+        "type": "string",
+        "default": "ling"
+      },
+      "name": {
+        "description": "名字",
+        "type": "string",
+        "default": "绫"
+      },
+      "identity": {
+        "description": "身份设定",
+        "hint": "用自然语言写清她是谁、怎么说话、在意什么。留空则使用内置默认人设。",
+        "type": "text",
+        "default": ""
+      },
+      "active_hours": {
+        "description": "活跃时段",
+        "hint": "格式 start-end，如 09:00-03:30。用于静默判断，不做强制拦截。",
+        "type": "string",
+        "default": "09:00-03:30"
+      },
+      "version_history_limit": {
+        "description": "人格历史版本保留数",
+        "type": "int",
+        "default": 20
+      }
+    }
+  },
+  "humanize": {
+    "description": "拟人化表达",
+    "hint": "决定它回不回、分几句、隔多久。这些参数直接决定「像不像人」。",
+    "type": "object",
+    "items": {
+      "enable_persona_inject": {
+        "description": "注入人格提示词",
+        "hint": "若同时运行 private_companion，建议关闭本项由对方负责人格，本插件只做表达层",
+        "type": "bool",
+        "default": true
+      },
+      "reply_threshold": {
+        "description": "回复阈值",
+        "hint": "判断得分 ≥ 该值才回复；低于阈值按概率抽签。默认 35",
+        "type": "int",
+        "default": 35
+      },
+      "reply_window_seconds": {
+        "description": "连续对话窗口（秒）",
+        "hint": "刚回过一次后，窗口内阈值降低，形成「聊起来」的连贯感",
+        "type": "int",
+        "default": 300
+      },
+      "max_bubbles_private": {
+        "description": "私聊最多分几条",
+        "type": "int",
+        "default": 3
+      },
+      "max_bubbles_group": {
+        "description": "群聊最多分几条",
+        "type": "int",
+        "default": 2
+      },
+      "think_delay_base": {
+        "description": "首条思考延迟基准（秒）",
+        "hint": "实际延迟 = 基准 + 0.02 * 输入字数，随机扰动 ±30%",
+        "type": "float",
+        "default": 1.2
+      },
+      "bubble_delay_factor": {
+        "description": "逐条延迟系数（秒/字）",
+        "hint": "实际延迟 = 0.6 + 系数 * 本条字数",
+        "type": "float",
+        "default": 0.09
+      },
+      "quote_probability": {
+        "description": "引用概率基准",
+        "hint": "被回复/话题切换/长消息会动态上调，上限由下一项决定",
+        "type": "float",
+        "default": 0.08
+      },
+      "quote_probability_max": {
+        "description": "引用概率上限",
+        "hint": "动态加成后能到的最高值。设 1 就是该引就引，不再压到 0.35",
+        "type": "float",
+        "default": 0.35
+      },
+      "quote_cooldown_seconds": {
+        "description": "同一会话引用冷却（秒）",
+        "hint": "刚引用过就别再引用，0 表示不冷却",
+        "type": "int",
+        "default": 30
+      },
+      "typo_probability": {
+        "description": "打错再改概率",
+        "hint": "0.03~0.08 比较自然，别调高，高了就假",
+        "type": "float",
+        "default": 0.04
+      },
+      "sticker_enabled": {
+        "description": "发送表情包",
+        "hint": "需安装「表情包小偷」插件，按其情绪标签检索，未命中则不发",
+        "type": "bool",
+        "default": true
+      },
+      "voice_enabled": {
+        "description": "允许语音条",
+        "type": "bool",
+        "default": true
+      },
+      "voice_id": {
+        "description": "语音音色",
+        "type": "string",
+        "default": "zhangzixin"
+      }
+    }
+  },
+  "guard": {
+    "description": "输出守卫",
+    "hint": "发送前的硬性清理规则。与 no_newline / quote_probability 同时存在时，本插件会自动关闭同名规则避免互相覆盖。",
+    "type": "object",
+    "items": {
+      "strip_emoji": {
+        "description": "移除 emoji",
+        "type": "bool",
+        "default": true
+      },
+      "strip_trailing_period": {
+        "description": "去掉句末句号",
+        "hint": "只去「。」，保留问号、感叹号、省略号",
+        "type": "bool",
+        "default": true
+      },
+      "flatten_newline": {
+        "description": "压平换行",
+        "type": "bool",
+        "default": true
+      },
+      "max_chars_per_bubble": {
+        "description": "单条最大字数",
+        "type": "int",
+        "default": 60
+      },
+      "forbid_phrases": {
+        "description": "禁用短语",
+        "type": "list",
+        "default": [
+          "作为AI",
+          "作为一个AI",
+          "希望对你有帮助",
+          "总结一下",
+          "有什么可以帮你"
+        ]
+      },
+      "self_repeat_guard": {
+        "description": "重复自检",
+        "hint": "与最近 5 条相似度过高时重写或丢弃",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "perception": {
+    "description": "特殊消息感知",
+    "hint": "合并转发、引用、卡片、图片、语音的解析。这是它「真的看懂了」的基础。",
+    "type": "object",
+    "items": {
+      "expand_forward": {
+        "description": "展开合并转发",
+        "type": "bool",
+        "default": true
+      },
+      "forward_max_nodes": {
+        "description": "转发最多展开条数",
+        "type": "int",
+        "default": 60
+      },
+      "forward_max_depth": {
+        "description": "转发最大递归层数",
+        "type": "int",
+        "default": 2
+      },
+      "forward_summary_threshold": {
+        "description": "转发摘要阈值（字）",
+        "hint": "超过此长度先摘要再注入，原文仍入库可查",
+        "type": "int",
+        "default": 1200
+      },
+      "quote_depth": {
+        "description": "引用链展开层数",
+        "type": "int",
+        "default": 3
+      },
+      "image_describe": {
+        "description": "图片理解",
+        "hint": "需配置视觉模型（如 MiniMax）；未配置时只标注「一张图片」",
+        "type": "bool",
+        "default": true
+      },
+      "voice_transcribe": {
+        "description": "语音转文字",
+        "type": "bool",
+        "default": true
+      },
+      "card_parse": {
+        "description": "解析卡片与小程序",
+        "type": "bool",
+        "default": true
+      },
+      "recent_context_count": {
+        "description": "补几条最近的会话上下文",
+        "hint": "群聊里没被叫到的时候消息不进对话历史，这里把最近几条（含已展开的转发）补进 prompt。0 关闭",
+        "type": "int",
+        "default": 6
+      },
+      "recent_context_chars": {
+        "description": "上下文注入字数上限",
+        "hint": "超了就只保留最近的几条，防止把上下文吃满",
+        "type": "int",
+        "default": 1500
+      }
+    }
+  },
+  "memory": {
+    "description": "长期记忆",
+    "hint": "档位 auto 会自动探测：有 embedding 用全功能，没有就降级，不报错。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用记忆",
+        "type": "bool",
+        "default": true
+      },
+      "tier": {
+        "description": "检索档位",
+        "type": "string",
+        "options": [
+          "auto",
+          "A",
+          "B",
+          "C",
+          "D"
+        ],
+        "default": "auto"
+      },
+      "embedding_provider_id": {
+        "description": "Embedding 模型 ID",
+        "hint": "留空则不走向量检索",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "llm_provider_id": {
+        "description": "记忆抽取模型 ID",
+        "hint": "用于抽取原子记忆与生成摘要，留空用默认模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "idle_extract_seconds": {
+        "description": "静默多久后抽取（秒）",
+        "type": "int",
+        "default": 90
+      },
+      "batch_extract_size": {
+        "description": "累计多少条触发抽取",
+        "type": "int",
+        "default": 30
+      },
+      "inject_top_k": {
+        "description": "注入记忆条数",
+        "type": "int",
+        "default": 5
+      },
+      "inject_budget_ratio": {
+        "description": "记忆占上下文预算比例",
+        "type": "float",
+        "default": 0.25
+      },
+      "decay_factor": {
+        "description": "每日衰减系数",
+        "type": "float",
+        "default": 0.985
+      },
+      "archive_after_days": {
+        "description": "多少天未命中转归档",
+        "type": "int",
+        "default": 30
+      },
+      "forget_after_days": {
+        "description": "多少天未命中转遗忘",
+        "type": "int",
+        "default": 90
+      },
+      "reflect_hour": {
+        "description": "每日反思时间（小时）",
+        "type": "int",
+        "default": 4
+      }
+    }
+  },
+  "capability": {
+    "description": "实用查询能力",
+    "hint": "每个能力都能在 UI「工具」页单独开关与试跑。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用工具集",
+        "type": "bool",
+        "default": true
+      },
+      "groups": {
+        "description": "启用的能力分组",
+        "type": "list",
+        "default": [
+          "life",
+          "entertain",
+          "knowledge",
+          "game",
+          "self",
+          "qzone"
+        ],
+        "hint": "可选 life / entertain / knowledge / game / self / qzone；qzone 里的发说说需要管理员"
+      },
+      "default_timeout": {
+        "description": "默认超时（秒）",
+        "type": "float",
+        "default": 8.0
+      },
+      "rate_limit_per_min": {
+        "description": "每会话每分钟调用上限",
+        "type": "int",
+        "default": 20
+      },
+      "web_search_enabled": {
+        "description": "允许联网搜索",
+        "hint": "默认关闭，开启后注意成本",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "qq_extra": {
+    "description": "QQ 扩展",
+    "hint": "写操作（发说说/改签名）默认关闭，避免风控。",
+    "type": "object",
+    "items": {
+      "qzone_mode": {
+        "description": "空间模式",
+        "type": "string",
+        "options": [
+          "auto",
+          "builtin",
+          "off"
+        ],
+        "default": "auto",
+        "hint": "auto/builtin 都是本插件自己打空间接口（登录态从 OneBot 取）；off 完全不碰"
+      },
+      "qzone_allow_write": {
+        "description": "允许写入空间",
+        "hint": "发说说需要，默认关闭",
+        "type": "bool",
+        "default": false
+      },
+      "qzone_cookie": {
+        "description": "手动填空间 Cookie",
+        "hint": "留空即可，会自动从 OneBot 取。只有在协议端拿不到 cookie 时才需要手填（uin、skey、p_skey）",
+        "type": "text",
+        "default": ""
+      },
+      "qzone_page_size": {
+        "description": "每次读几条动态",
+        "type": "int",
+        "default": 5
+      },
+      "qzone_read_others": {
+        "description": "允许看别人的空间",
+        "hint": "关掉后只能看说话人自己的空间。注意空间主页动态读的是公开可见部分",
+        "type": "bool",
+        "default": true
+      },
+      "qzone_auto_post": {
+        "description": "每日自动发一条说说",
+        "type": "bool",
+        "default": false
+      },
+      "signature_auto_update": {
+        "description": "自动更新个性签名",
+        "type": "bool",
+        "default": false
+      },
+      "poke_enabled": {
+        "description": "戳一戳互动",
+        "hint": "关掉后既不监听别人戳，也不会主动戳人",
+        "type": "bool",
+        "default": true
+      },
+      "poke_antipoke": {
+        "description": "被戳时反戳回去",
+        "hint": "关掉就只可能说句话，不戳回去",
+        "type": "bool",
+        "default": true
+      },
+      "poke_talk_probability": {
+        "description": "反戳后补一句话的概率",
+        "hint": "0 就是只反戳不说话；0.45 大概一半不到；1 每次都接一句",
+        "type": "float",
+        "default": 0.45
+      },
+      "poke_talk_when_no_antipoke": {
+        "description": "不反戳时也尝试说话",
+        "hint": "反戳关掉后，这个概率就是被戳时说话的概率",
+        "type": "bool",
+        "default": true
+      },
+      "poke_follow_probability": {
+        "description": "别人被戳时跟戳的概率",
+        "hint": "群里图个乐用的，调 0 就完全不管别人的事",
+        "type": "float",
+        "default": 0.2
+      },
+      "poke_cooldown_seconds": {
+        "description": "同一个人戳我的冷却（秒）",
+        "hint": "0 表示不冷却，连戳就连回",
+        "type": "int",
+        "default": 15
+      },
+      "poke_notice_in_prompt": {
+        "description": "让模型知道这是戳一戳",
+        "hint": "关掉后模型只会收到一句泛泛的提示，不知道发生了什么",
+        "type": "bool",
+        "default": true
+      },
+      "profile_card_enabled": {
+        "description": "生成资料卡",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "compat": {
+    "description": "兼容性",
+    "hint": "默认 auto：检测到别的插件负责某块能力就让位，避免双人格/双延时/记忆双写。",
+    "type": "object",
+    "items": {
+      "mode": {
+        "description": "让位模式",
+        "type": "string",
+        "options": [
+          "auto",
+          "force_local",
+          "force_yield"
+        ],
+        "default": "auto"
+      },
+      "yield_humanize": {
+        "description": "拟人主链路让位",
+        "type": "bool",
+        "default": true
+      },
+      "yield_memory": {
+        "description": "记忆让位",
+        "type": "bool",
+        "default": true
+      },
+      "yield_rhythm": {
+        "description": "发送节奏让位",
+        "hint": "检测到 reply_delay 在跑时停止包装 event.send",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "debug": {
+    "description": "调试",
+    "type": "object",
+    "items": {
+      "decision_log": {
+        "description": "记录决策日志",
+        "hint": "记录「为什么回/不回」「分了几句」「花了多少 token」，UI 可查",
+        "type": "bool",
+        "default": true
+      },
+      "log_retention_days": {
+        "description": "日志保留天数",
+        "type": "int",
+        "default": 7
+      },
+      "verbose": {
+        "description": "详细日志",
+        "type": "bool",
+        "default": false
+      }
+    }
+  }
+}
