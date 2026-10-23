@@ -1,0 +1,297 @@
+# 从绫开始
+
+> [!IMPORTANT]
+> **本插件由「梦半何时醒」定制使用，除授权外不许外用。**
+> 未经授权不得转载、分发、二次售卖或在其他实例上部署。拿到这份代码只代表你有使用权，不代表你有分发权。
+
+> 把「会聊天」这件事做到像人。拟人化表达、分句节奏、长期记忆、特殊消息解析、实用查询、QQ 扩展，再加上一整套可视化配置面板，全都长在一个插件里。
+
+- 插件 ID：`astrbot_plugin_congling`
+- 版本：0.3.0
+- 平台：`aiocqhttp`（OneBot v11）
+- 依赖：零强制依赖（标准库 sqlite3；可选 `jieba` 提升中文召回）
+- 面板：`pages/fromling`，纯静态前端，跟随 AstrBot 插件页面机制托管
+
+---
+
+## 一、它解决什么
+
+AstrBot 原本的通病：
+
+1. **回复像机器**：一次吐一大段，没有停顿，句末带句号，还爱加 emoji。
+2. **没有记忆**：三天前说过的事，第四天完全不记得。
+3. **看不懂特殊消息**：合并转发、引用、卡片、语音，进模型时全成了空白。
+4. **不会用工具**：天气、番剧、MC 状态都得用户自己去查。
+5. **碰不到 QQ 原生能力**：签名、名片、资料、空间，全在插件之外。
+
+这个插件就是逐条补这五个洞。
+
+---
+
+## 二、五个模块
+
+### 1. 拟人化（`humanize/`）
+
+- **回不回**：打分制。私聊必回；群聊看是否被点名、是否问句、群里是否太吵、是不是刚回过。分不够就按概率抽签——所以它有时候看到了不说话。
+- **连续对话窗口**：回过一次后 5 分钟内阈值降低 15，形成"聊起来"的连贯感。
+- **分句**：按句号问号切，短碎片合并，长句按逗号二次切，20% 概率把两句并成一句，15% 概率拆开一句。短回复不切（一两句话本来就该一口气说完）。
+- **节奏**：首条前 `1.2 + 0.02×字数` 秒（1.0~4.5），条与条之间 `0.6 + 0.09×字数` 秒，随机 ±30%。用替换 `event.send` 的方式实现，一条一抽。
+- **引用**：基准 0.08，被回复 +0.15，长消息 +0.10，上限 0.35，30 秒冷却。
+- **输出守卫**：去 emoji、去句末句号（保留问号感叹号）、压平换行、禁用语、重复自检。
+
+### 2. 长期记忆（`memory/`）
+
+```
+采集 → LLM 抽取原子 → 去重合并 → 打分 → 入库
+     → 召回（BM25 + 可选向量，RRF 融合）→ 注入 → 每日衰减 → 归档/遗忘 → 反思
+```
+
+- 只从**用户发言**抽事实，模型自己的话不作为事实来源（防自我强化）。
+- 相似度 ≥0.86 视为重复（只强化不新增）；0.6~0.86 且带否定冲突时，新条 supersedes 旧条，旧的转归档不删。
+- `importance ≥ 0.85` 自动保护，永不衰减（生日、禁忌、承诺）。
+- 注入带时间戳 + "与当前对话冲突时以当前对话为准"，同一原子 24 小时内不重复注入。
+- 每日 04:00 前后反思一次，生成"我对这个人的新认识"。
+
+### 3. 特殊消息（`perception/`）
+
+| 类型 | 处理 |
+|---|---|
+| 合并转发 | `get_forward_msg` 展开，递归 2 层、最多 60 条，超 1200 字先摘要；**明确标注"说话人是记录里的人，不是当前用户"** |
+| 引用 | 展开 3 层，区分当前发言者 / 被引用作者 / 第三方 |
+| 图片 | 视觉模型描述 + 缓存（30 天同图不重复烧） |
+| 语音 | STT 转写，超时降级为 `[语音]` |
+| 卡片/小程序 | 解析标题与来源域名（B 站/抖音/网易云…） |
+| 其他 | @、表情、戳一戳、位置、文件 |
+
+所有增强带 6 秒总超时：宁可这轮少看一点，也不能让首响拖到十几秒。
+
+### 4. 实用查询（`capability/`）
+
+| 能力 | 说明 |
+|---|---|
+| `life.time` | 时间、日期、星期、倒计时 |
+| `life.weather` | open-meteo 免 key，当前 + 未来 1~3 天 |
+| `life.translate` | 走当前 LLM |
+| `game.mc_status` | MC 服务器在线状态 |
+| `knowledge.web_peek` | 网页标题 + 简介 |
+| `self.status` | 自身运行状态、记忆条数、能力数 |
+
+统一执行器负责：参数校验 → 限流（每会话每分钟 20）→ 缓存 → 超时 → 异常吞掉 → 返回人话。
+**任何能力都不把异常抛给模型。**
+
+### 5. QQ 扩展（`qqext/`）
+
+- 个性签名（`set_self_longnick` / `set_qq_profile` 兼容探测）
+- 群名片、资料查询（可带"我和 TA 的关系"）
+- 戳一戳（60 秒冷却）
+- QQ 空间：优先桥接 `qzone_ultra`，未安装则诚实提示
+
+写操作（改签名、发说说）默认关闭，需要显式打开。
+
+---
+
+## 三、和现有插件共存（重要）
+
+本插件**不自建对话主循环**，是一层可插拔增强。启动时探测：
+
+| 检测到 | 本插件行为 |
+|---|---|
+| `private_companion` | 拟人主链路让位，只做分句/节奏/守卫 |
+| `livingmemory` / `memory_companion` | 记忆让位，不重复注入 |
+| `reply_delay` | 不包装 `event.send`，避免延时叠加 |
+| `no_newline` / `quote_probability` | 同名守卫规则让位 |
+| 都没有 | 全部自己顶上 |
+
+用 `/绫 兼容` 或插件页面「设置」页可以看到当前让位结果。
+强制本插件负责某块：配置 `compat.mode = force_local`。
+
+---
+
+## 四、用法
+
+### 人设来源（三选一）
+
+人格页顶部可以选：
+
+| 模式 | 行为 |
+|---|---|
+| `builtin`（默认） | 用插件自带「绫」的人设：短句、少解释、有点懒。页面里可直接编辑、可回滚 |
+| `astrbot` | 下拉选 AstrBot 里已有的人格（含默认人格）。**本插件不再注入自己的人设文本**，只补关系、当前状态、场景这三层增强 |
+| `none` | 完全交给 AstrBot 默认人设，本插件连风格约束都不加 |
+
+选 `astrbot` 时不会和框架的人设打架：人设归 AstrBot，插件只加"它知道什么"（关系远近、现在几点、在群聊还是私聊）。
+
+### 指令
+
+```
+/绫 状态              运行状态、模块、记忆条数、让位情况
+/绫 记忆 <词>         翻相关记忆
+/绫 记住 <内容>       手动记一条（管理员）
+/绫 忘掉 <词>         忘掉相关记忆（管理员）
+/绫 空间 看           看空间动态
+/绫 空间 发 <内容>    发一条说说（管理员）
+/绫 兼容              查看共存状态
+/绫 调试 开/关        决策日志
+```
+
+### 插件页面
+
+AstrBot 后台 → 插件 → 从绫开始 → 打开页面（`pages/fromling`）。
+
+**结构原则：每个板块的设置就在它自己的页面里，不堆在最后。** 每张配置卡只摆核心几项，
+其余收进「高级设置」折叠；每页底部一个保存按钮，一次提交本页所有改动。
+
+| 页签 | 内容 |
+|---|---|
+| 概览 | 活跃记忆 / 归档消息 / 决策记录 / 运行时长，模块状态，六个板块入口，最近 6 条决策 |
+| 人格 | 人设来源三选一 + **随选择切换的内容区**：内置人设可编辑 / AstrBot 人格只读全文 / 默认人设说明；人格附加设置 |
+| 行为 | 什么情况下回（阈值、分句、延迟、引用）、输出风格（emoji/句号/换行/字数）、看得懂什么（转发/图片/语音/卡片） |
+| 记忆 | 记忆设置（注入条数、抽取间隔、向量模型）、记忆内容列表（搜索/忘记）、归档消息折叠区 |
+| 工具 | 工具设置（分组、限流）、已注册能力清单与试跑 |
+| QQ | QQ 扩展设置、空间状态（模式/可用/写权限）与读取 |
+| 系统 | 生效范围、与外部插件共存矩阵、让位策略、调试日志 |
+
+配置项共 68 个，分布在 10 个 schema 分区里，按上面的归属拆到各页。
+
+### QQ 空间（内置实现，不依赖其它插件）
+
+协议细节对照 `astrbot_plugin_qzone_ultra` 与 `astrbot_plugin_private_companion` 的实现，
+本插件自己直连空间接口，不必再装空间插件。
+
+**登录态从哪来**（按优先级）：
+
+1. 设置里手填的 `qq_extra.qzone_cookie`（协议端拿不到 cookie 时才需要）
+2. 上一次拿到的 cookie（存在本地库，重启可复用）
+3. 现场向 OneBot 客户端要：`get_cookies` → 退到 `get_credentials`，都没有就报错说人话
+
+**能做什么**：
+
+| 动作 | 接口 | 说明 |
+|---|---|---|
+| 读某人空间 | `GET page/qzone/feed?target=` | 走 `emotion_cgi_msglist_v6`，自己/别人都行 |
+| 读好友动态流 | — | 走 `feeds3_html_more`（"最近大家发了啥"） |
+| 发说说 | `POST page/qzone/publish` | 走 `emotion_cgi_publish_v6`，上限 1000 字，需先开写权限 |
+| 刷新登录态 | `POST page/qzone/auth` | 重新向协议端要 cookie |
+
+写操作默认关闭（`qq_extra.qzone_allow_write=false`），要在 QQ 页里手动打开。
+登录态失效时会自动重拉一次再重试，仍然不行就把原因原样显示出来。
+
+**给模型的两个工具**（受 `capability.groups` 控制）：
+
+- `qzone.feed`（分组 `life`）：读某人空间，`target` 留空 = 当前说话人
+- `qzone.publish`（分组 `qzone`，需要管理员）：发说说，只在用户明确要求时才用
+
+**"看谁的空间"怎么认人**（`qqext/targets.py`）：
+
+| 用户说的 | 解析成 |
+|---|---|
+| 直接给号：`看看 10001 的空间` | 10001 |
+| `看看我的空间` / `我空间` | 当前说话人 |
+| 没说是谁，但 @ 了某人 | 被 @ 的人 |
+| 没说也没 @（群里有人问"看他的空间"） | 当前说话人 |
+| 昵称：`看看小山的空间` | 群成员（群名片/昵称/备注）→ 好友（备注/昵称） |
+
+昵称是**精确优先**：有人正好叫这个就用他；只有部分匹配且命中多人时会明确报"有好几个人"
+并列出候选，不会瞎猜。群成员列表和好友列表都缓存 5 分钟。
+
+`qq_extra.qzone_read_others`（默认开）关掉后只能看说话人自己的空间。
+
+### 管理员是谁
+
+判定顺序（`main.py: is_admin`）：
+
+1. **AstrBot 全局管理员**：WebUI 全局配置里的 `admins_id`，一定算
+2. **插件额外管理员**：`basic.extra_admins`，一行一个 QQ 号，只作补充
+3. **群主 / 群管**：默认**不算**，要开 `basic.include_group_role`
+
+为什么不给插件单独一套完整名单：两套名单一定会打架——你在 WebUI 加了人，
+插件里没加，结果他"是管理员又不是"。所以插件只存"额外的"，主名单永远跟着 AstrBot。
+
+UI 里的位置：**系统 → 管理员**。上面只读显示 AstrBot 名单和当前生效的人，
+下面可以填额外管理员、开关群管权限。
+
+### 关键配置
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `basic.extra_admins` | 空 | 插件额外管理员（AstrBot 名单自动算） |
+| `basic.include_group_role` | false | 群主/群管是否算管理员 |
+| `qq_extra.qzone_read_others` | true | 允许看别人的空间 |
+| `qq_extra.qzone_mode` | auto | `auto`/`builtin` 都是内置直连；`off` 关闭 |
+| `qq_extra.qzone_allow_write` | false | 允许发说说 |
+| `qq_extra.qzone_cookie` | 空 | 手动填的 cookie（一般留空） |
+| `qq_extra.qzone_page_size` | 5 | 每次读几条动态 |
+| `persona.mode` | builtin | 人设来源：`builtin` / `astrbot` / `none` |
+| `persona.astrbot_persona_id` | 空 | 选定的 AstrBot 人格 ID，空表示用它的默认人格 |
+| `humanize.reply_threshold` | 35 | 群聊主动接话的门槛 |
+| `humanize.max_bubbles_group` | 2 | 群聊最多分几条 |
+| `humanize.think_delay_base` | 1.2 | 首条思考延迟 |
+| `humanize.quote_probability` | 0.08 | 引用基准概率 |
+| `memory.inject_top_k` | 5 | 注入几条记忆 |
+| `memory.embedding_provider_id` | 空 | 填了才走向量检索 |
+| `perception.forward_summary_threshold` | 1200 | 长转发摘要阈值 |
+| `compat.mode` | auto | `auto` / `force_local` / `force_yield` |
+| `qq_extra.qzone_allow_write` | false | 允许写空间 |
+
+---
+
+## 五、已知限制（v0.1）
+
+诚实列出来，避免误期待：
+
+1. **向量检索需要手动配置 embedding provider**，没配就走 BM25（中文 bigram，装了 jieba 更好）。
+2. **群聊主动插话尚未接入**：`Decider` 的打分能力已经完整，但"自己发起一轮对话"没做（需要额外的主动消息链路）。
+3. **语音条未接入**：配置位和 TTS 调用点留好了，当前不会主动发语音。
+4. **表情包依赖 `stealer` 插件**：接口位留了，尚未转接它的检索方法。
+5. **QQ 空间发布**：桥接模式依赖 `qzone_ultra` 暴露的方法名；内置模式只做了读的骨架，发布未完成。
+6. **资料卡是文本**，没有渲染成图片。
+7. **流式输出不分句**（会把流式体验撕碎），只做清理。
+
+---
+
+## 六、测试
+
+```powershell
+cd E:\BotLauncher\AstrBot\AstrBot
+
+# 纯逻辑单测（守卫、预算、相似度、转发解析）
+& "E:\BotLauncher\python\python.exe" -m unittest discover `
+  -s data/plugins/astrbot_plugin_congling/tests `
+  -t data/plugins/astrbot_plugin_congling -v
+
+# 装配冒烟（假 Context 走完整初始化，检查模块/路由/让位）
+& "E:\BotLauncher\python\python.exe" data\plugins\astrbot_plugin_congling\tests\smoke_boot.py
+
+# 页面接口冒烟（路由匹配 + handler 返回结构）
+& "E:\BotLauncher\python\python.exe" data\plugins\astrbot_plugin_congling\tests\smoke_page_api.py
+
+# 配置分区与类型转换
+& "E:\BotLauncher\python\python.exe" data\plugins\astrbot_plugin_congling\tests\check_settings.py
+
+# 人设来源切换行为
+& "E:\BotLauncher\python\python.exe" data\plugins\astrbot_plugin_congling\tests\check_persona_mode.py
+
+# 页面渲染自检（每页结构、设置是否分散、人格页联动）
+& "E:\BotLauncher\python\python.exe" data\plugins\astrbot_plugin_congling\tests\render_check.py
+```
+
+---
+
+## 七、目录
+
+```
+core/        内核：配置、存储、契约、事件总线、守卫、节奏、预算、探测
+perception/  感知：转发、引用、媒体、卡片、渲染
+memory/      记忆：原子、抽取、检索、服务、维护
+humanize/    表达：人格、判断、分句
+capability/  能力：注册表、内置实现、工具包装
+qqext/       QQ：签名/名片/资料/戳一戳/空间
+commands/    指令
+page_api/    页面后端接口
+pages/       插件页面（原生 JS，无构建）
+tests/       单测与冒烟
+```
+
+---
+
+*设计文档见 `E:\AI工作区\64_从绫开始_定制插件_20261021\从绫开始_插件制作计划_v1.md`*
