@@ -371,7 +371,7 @@ function nightHero(s) {
       <div class="night-hero is-off">
         <div class="hero-main">
           <div class="hero-line"><span class="hero-pip"></span><span class="hero-title">长夜如梦没开</span></div>
-          <div class="hero-sub">在「睡眠」里打开总开关，它才会累会睡</div>
+          <div class="hero-sub">去「设置」里把总开关打开，它才会累会睡</div>
         </div>
       </div>`;
   }
@@ -791,6 +791,7 @@ let settingsCache = null;
 
 function setView(name) {
   if (!VIEWS[name]) return;
+  settingsCache = null;
   currentView = name;
   titleEl.textContent = VIEWS[name].title;
   document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -942,8 +943,11 @@ function bindPageSave() {
     if (msg) msg.textContent = "保存中…";
     try {
       const result = await post("page/settings/save", { changes: collectChanges(view) });
-      if (msg) msg.textContent = `已保存 ${result.applied} 项${result.saved ? "" : "（未写入文件）"}`;
       settingsCache = null;
+      const note = `已保存 ${result.applied} 项${result.saved ? "" : "（未写入文件）"}`;
+      if (currentView === "night") await renderNight();
+      const again = document.getElementById("page-msg");
+      if (again) again.textContent = note;
     } catch (err) {
       if (msg) msg.textContent = err.message;
     }
