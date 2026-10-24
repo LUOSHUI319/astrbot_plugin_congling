@@ -196,3 +196,158 @@ class ReplyDecision:
     reason: str = ""
     in_window: bool = False
     roll: float = 0.0
+
+
+# --------------------------------------------------------------------- 长夜如梦
+# /*congling:night*/
+NIGHT_AWAKE = "awake"
+NIGHT_ASLEEP = "asleep"
+NIGHT_WAKING = "waking"
+
+
+@dataclass
+class NightState:
+    """全局作息状态。精力是全局一份，不按会话分。
+
+    mode       awake / asleep / waking
+    energy     0~100，疲劳期内消耗
+    sleep_at   入睡时间戳，0 表示没睡
+    wake_at    计划醒来时间戳（固定点 ± 浮动算出来的）
+    reason     入睡原因：talk / energy / latest / manual
+    """
+
+    mode: str = NIGHT_AWAKE
+    energy: float = 100.0
+    sleep_at: int = 0
+    wake_at: int = 0
+    reason: str = ""
+    last_tick: int = 0
+    dream_count_today: int = 0
+    dream_skip: bool = False
+    version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "energy": round(self.energy, 2),
+            "sleep_at": self.sleep_at,
+            "wake_at": self.wake_at,
+            "reason": self.reason,
+            "last_tick": self.last_tick,
+            "dream_count_today": self.dream_count_today,
+            "dream_skip": self.dream_skip,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> NightState:
+        if not data:
+            return cls()
+        state = cls()
+        state.mode = str(data.get("mode") or NIGHT_AWAKE)
+        try:
+            state.energy = float(data.get("energy", 100.0))
+        except (TypeError, ValueError):
+            state.energy = 100.0
+        state.sleep_at = int(data.get("sleep_at") or 0)
+        state.wake_at = int(data.get("wake_at") or 0)
+        state.reason = str(data.get("reason") or "")
+        state.last_tick = int(data.get("last_tick") or 0)
+        state.dream_count_today = int(data.get("dream_count_today") or 0)
+        state.dream_skip = bool(data.get("dream_skip"))
+        return state
+
+    def is_asleep(self) -> bool:
+        return self.mode in (NIGHT_ASLEEP, NIGHT_WAKING)
+
+
+@dataclass
+class WakeAttempt:
+    """一次唤醒掷骰的结果，便于面板展示和日志排查。"""
+
+    allowed: bool = False
+    woke: bool = False
+    count: int = 0
+    needed: int = 0
+    chance: float = 0.0
+    roll: float = 0.0
+    reason: str = ""
+
+
+def night_key_of(ts: int) -> str:
+    """一段梦属于哪一夜。
+
+    中午之前的梦算前一晚：凌晨三点做的梦，人是归到"昨晚"的。
+    中午之后算当天，方便白天午睡也不串夜。
+    """
+    import datetime as _dt
+
+    if ts <= 0:
+        return ""
+    moment = _dt.datetime.fromtimestamp(ts)
+    if moment.hour < 12:
+        moment = moment - _dt.timedelta(days=1)
+    return moment.strftime("%Y-%m-%d")
+
+
+@dataclass
+class DreamEntry:
+    """一段梦。独立于普通记忆，按天衰减。"""
+
+    dream_id: str = ""
+    session_id: str = ""
+    created_at: int = 0
+    level: int = 3
+    tags: list[str] = field(default_factory=list)
+    text: str = ""
+    importance: float = 0.6
+    decay_per_day: float = 0.15
+    strength: float = 1.0
+    expired: bool = False
+    mentioned: bool = False
+    night_key: str = ""
+    pinned: bool = False
+
+    def remaining_days(self) -> int:
+        if self.decay_per_day <= 0:
+            return 999
+        import math
+
+        if self.strength <= 0.15:
+            return 0
+        return max(0, int(math.log(0.15 / max(self.strength, 0.0001)) / math.log(1 - self.decay_per_day)))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dream_id": self.dream_id,
+            "session_id": self.session_id,
+            "created_at": self.created_at,
+            "level": self.level,
+            "tags": list(self.tags),
+            "text": self.text,
+            "importance": self.importance,
+            "decay_per_day": self.decay_per_day,
+            "strength": round(self.strength, 4),
+            "expired": self.expired,
+            "mentioned": self.mentioned,
+            "night_key": self.night_key,
+            "pinned": self.pinned,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DreamEntry:
+        return cls(
+            dream_id=str(data.get("dream_id") or ""),
+            session_id=str(data.get("session_id") or ""),
+            created_at=int(data.get("created_at") or 0),
+            level=int(data.get("level") or 3),
+            tags=list(data.get("tags") or []),
+            text=str(data.get("text") or ""),
+            importance=float(data.get("importance") or 0.6),
+            decay_per_day=float(data.get("decay_per_day") or 0.15),
+            strength=float(data.get("strength", 1.0)),
+            expired=bool(data.get("expired")),
+            mentioned=bool(data.get("mentioned")),
+            night_key=str(data.get("night_key") or ""),
+            pinned=bool(data.get("pinned")),
+        )
+# /*congling:night:end*/

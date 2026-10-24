@@ -11,6 +11,119 @@ const compatLine = document.getElementById("compat-line");
 /* ------------------------------------------------------------------ 桥接 */
 let bridgePromise = null;
 
+
+/* ------------------------------------------------------------------ 外观 */
+const THEMES = [
+  { id: "moon", name: "月白", color: "#35685a" },
+  { id: "mist", name: "雾蓝", color: "#35617d" },
+  { id: "sand", name: "暖砂", color: "#8a6b3f" },
+  { id: "lotus", name: "藕荷", color: "#6d5a80" },
+  { id: "celadon", name: "青瓷", color: "#3f7a72" },
+  { id: "graphite", name: "墨灰", color: "#3d4450" },
+  { id: "dark", name: "深色", color: "#16171a" },
+];
+
+const FONTS = [
+  { id: "sans", name: "黑体", sample: "从" },
+  { id: "serif", name: "宋体", sample: "从" },
+  { id: "kai", name: "楷体", sample: "从" },
+  { id: "round", name: "圆润", sample: "从" },
+  { id: "mono", name: "等宽", sample: "从" },
+];
+
+const LOOK_KEY = "congling.look";
+
+function readLook() {
+  try {
+    const raw = localStorage.getItem(LOOK_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return { theme: data.theme || "moon", font: data.font || "sans" };
+  } catch (err) {
+    return { theme: "moon", font: "sans" };
+  }
+}
+
+function applyLook(look) {
+  const root = document.documentElement;
+  if (look.theme && look.theme !== "moon") root.dataset.theme = look.theme;
+  else root.removeAttribute("data-theme");
+  if (look.font && look.font !== "sans") root.dataset.font = look.font;
+  else root.removeAttribute("data-font");
+  try {
+    localStorage.setItem(LOOK_KEY, JSON.stringify(look));
+  } catch (err) {
+    /* 存不了就算了 */
+  }
+}
+
+function paintPickers(look) {
+  const theme = THEMES.find((t) => t.id === look.theme) || THEMES[0];
+  const dot = document.querySelector("#theme-picker .picker-dot");
+  if (dot) dot.style.background = theme.color;
+
+  const themeMenu = document.getElementById("theme-menu");
+  if (themeMenu) {
+    themeMenu.innerHTML = THEMES.map(
+      (item) => `<button class="picker-item ${item.id === look.theme ? "is-on" : ""}" data-theme-id="${item.id}">
+        <span class="picker-swatch" style="background:${item.color}"></span>${esc(item.name)}
+      </button>`
+    ).join("");
+  }
+
+  const fontMenu = document.getElementById("font-menu");
+  if (fontMenu) {
+    fontMenu.innerHTML = FONTS.map(
+      (item) => `<button class="picker-item ${item.id === look.font ? "is-on" : ""}" data-font-id="${item.id}">
+        <span style="font-size:13px;">${esc(item.sample)}</span>${esc(item.name)}
+      </button>`
+    ).join("");
+  }
+}
+
+function initLook() {
+  const look = readLook();
+  applyLook(look);
+  paintPickers(look);
+
+  const pickers = [
+    ["theme-picker", "theme", "theme-menu"],
+    ["font-picker", "font", "font-menu"],
+  ];
+
+  pickers.forEach(([pickerId, field, menuId]) => {
+    const picker = document.getElementById(pickerId);
+    const btn = picker ? picker.querySelector(".picker-btn") : null;
+    if (!picker || !btn) return;
+
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      document.querySelectorAll(".picker.is-open").forEach((node) => {
+        if (node !== picker) node.classList.remove("is-open");
+      });
+      picker.classList.toggle("is-open");
+    };
+
+    picker.querySelectorAll(".picker-item").forEach((item) => {});
+  });
+
+  document.addEventListener("click", (event) => {
+    const themeBtn = event.target.closest("[data-theme-id]");
+    const fontBtn = event.target.closest("[data-font-id]");
+    if (themeBtn || fontBtn) {
+      const next = readLook();
+      if (themeBtn) next.theme = themeBtn.dataset.themeId;
+      if (fontBtn) next.font = fontBtn.dataset.fontId;
+      applyLook(next);
+      paintPickers(next);
+      document.querySelectorAll(".picker.is-open").forEach((node) => node.classList.remove("is-open"));
+      return;
+    }
+    if (!event.target.closest(".picker")) {
+      document.querySelectorAll(".picker.is-open").forEach((node) => node.classList.remove("is-open"));
+    }
+  });
+}
+
 function ensureBridge() {
   if (bridgePromise) return bridgePromise;
   bridgePromise = (async () => {
@@ -73,12 +186,600 @@ function firstSentence(text, limit) {
   return out.length > (limit || 42) ? out.slice(0, limit || 42) + "…" : out;
 }
 
+/* ------------------------------------------------------------------ 长夜 */
+const NIGHT_LEVEL_TONE = [
+  "",
+  "var(--ink-faint)",
+  "#8fa39b",
+  "#6b8f83",
+  "#4a7264",
+  "var(--accent)",
+];
+
+/* 睡眠页要的配置项（其余归梦境/记忆） */
+const NIGHT_SLEEP_KEYS = [
+  "noon_fatigue",
+  "night_fatigue",
+  "wake_time",
+  "wake_jitter_minutes",
+  "latest_sleep_time",
+  "wake_mode",
+  "wake_window_minutes",
+  "wake_start_count",
+  "wake_step_count",
+  "farewell_before_sleep",
+  "farewell_same",
+  "farewell_random",
+  "farewell_use_llm",
+  "min_turns_before_sleep",
+];
+const NIGHT_ENERGY_KEYS = [
+  "energy_max",
+  "energy_per_message",
+  "energy_per_minute",
+  "energy_recover_per_minute",
+  "energy_after_wake",
+];
+const NIGHT_MEMORY_KEYS = ["crawl_enabled", "crawl_use_llm"];
+const NIGHT_DREAM_KEYS = [
+  "dream_enabled",
+  "dream_start_after_minutes",
+  "dream_interval_minutes",
+  "dream_max_per_sleep",
+  "noon_dream_chance",
+  "dream_remember_by_level",
+  "dream_tags",
+  "dream_extra_tags",
+];
+
+let nightTab = "state";
+
+function energyTone(percent) {
+  if (percent > 60) return "is-good";
+  if (percent > 25) return "is-mid";
+  return "is-low";
+}
+
+function energyWord(percent) {
+  if (percent > 75) return "精神不错";
+  if (percent > 55) return "有点乏了";
+  if (percent > 30) return "开始犯困";
+  return "快撑不住了";
+}
+
+function levelStars(level) {
+  const n = Math.max(0, Math.min(5, Number(level) || 0));
+  let html = "";
+  for (let i = 1; i <= 5; i += 1) {
+    html += `<i class="${i <= n ? "on" : "off"}">★</i>`;
+  }
+  return html;
+}
+
+function clockOf(ts) {
+  if (!ts) return "";
+  const d = new Date(Number(ts) * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 从分组里挑出指定 key，包成一个伪分组 */
+function sliceItems(group, keys) {
+  if (!group) return [];
+  return group.items.filter((item) => keys.includes(item.key));
+}
+
+/** 长夜的设置卡：全部平铺，不折进「高级」 */
+
+/* ---- 长夜：不给手填，全用控件 ---- */
+const NIGHT_NUM_RANGE = {
+  wake_jitter_minutes: [0, 90, 1],
+  wake_window_minutes: [1, 60, 1],
+  wake_start_count: [1, 10, 1],
+  wake_step_count: [1, 10, 1],
+  energy_max: [10, 200, 10],
+  energy_per_message: [0, 20, 0.5],
+  energy_per_minute: [0, 10, 0.1],
+  energy_recover_per_minute: [0, 10, 0.1],
+  energy_after_wake: [0, 100, 5],
+  min_turns_before_sleep: [0, 30, 1],
+  dream_start_after_minutes: [10, 300, 10],
+  dream_interval_minutes: [10, 180, 5],
+  dream_max_per_sleep: [1, 12, 1],
+};
+
+const NIGHT_PERCENT_KEYS = ["noon_dream_chance"];
+
+function splitTimeRange(raw) {
+  const text = String(raw == null ? "" : raw).trim();
+  const match = text.match(/^\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$/);
+  if (!match) return [text.match(/^\d{1,2}:\d{2}$/) ? text : "", ""];
+  return [match[1], match[2]];
+}
+
+function timeRangeControl(item) {
+  const [start, end] = splitTimeRange(item.value);
+  return `<span class="time-range" data-path="${esc(item.path)}" data-type="timerange">
+    <input type="time" class="tr-a" value="${esc(start)}" />
+    <span class="tr-sep">到</span>
+    <input type="time" class="tr-b" value="${esc(end)}" />
+  </span>`;
+}
+
+function percentControl(item) {
+  const raw = Number(item.value);
+  const value = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0.5;
+  return `<span class="pct-wrap">
+    <input type="range" min="0" max="1" step="0.05" value="${value}"
+      data-path="${esc(item.path)}" data-type="float" class="pct-input" />
+    <span class="pct-num mono">${Math.round(value * 100)}%</span>
+  </span>`;
+}
+
+function nightControl(item) {
+  const key = item.key;
+  if (item.type === "bool" || (Array.isArray(item.options) && item.options.length)) {
+    return controlHtml(item);
+  }
+  if (key.endsWith("_fatigue")) return timeRangeControl(item);
+  if (key === "wake_time" || key === "latest_sleep_time") {
+    const value = String(item.value || "").match(/^\d{1,2}:\d{2}$/) ? item.value : "";
+    return `<input type="time" data-path="${esc(item.path)}" data-type="string" value="${esc(value)}" />`;
+  }
+  if (NIGHT_PERCENT_KEYS.includes(key)) return percentControl(item);
+  if (item.type === "int" || item.type === "float") {
+    const range = NIGHT_NUM_RANGE[key];
+    const min = range ? range[0] : 0;
+    const max = range ? range[1] : 999;
+    const step = range ? range[2] : item.type === "int" ? 1 : 0.1;
+    return `<input type="number" min="${min}" max="${max}" step="${step}"
+      data-path="${esc(item.path)}" data-type="${esc(item.type)}" value="${esc(item.value)}" />`;
+  }
+  return controlHtml(item);
+}
+
+function nightRowHtml(item) {
+  const hint = item.hint ? `<span class="hint">${esc(firstSentence(item.hint))}</span>` : "";
+  return `<div class="cfg-row">
+    <div class="cfg-label">${esc(item.label)}${hint}</div>
+    <div>${nightControl(item)}</div>
+  </div>`;
+}
+
+function nightCard(title, desc, items) {
+  if (!items || !items.length) return "";
+  return `<section class="cfg-group">
+    <div class="cfg-head">
+      <h3>${esc(title)}</h3>
+      <p>${esc(desc)}</p>
+    </div>
+    ${items.map((item) => nightRowHtml(item)).join("")}
+  </section>`;
+}
+
+/* ---- 状态区 ---- */
+function nightHero(s) {
+  const enabled = !!(s && s.enabled);
+  const mode = (s && s.mode) || "awake";
+  const energy = Number((s && s.energy) || 0);
+  const max = Number((s && s.energy_max) || 100) || 100;
+  const percent = Math.max(0, Math.min(100, Math.round((energy / max) * 100)));
+  const tone = energyTone(percent);
+
+  if (!enabled) {
+    return `
+      <div class="night-hero is-off">
+        <div class="hero-main">
+          <div class="hero-line"><span class="hero-pip"></span><span class="hero-title">长夜如梦没开</span></div>
+          <div class="hero-sub">在「睡眠」里打开总开关，它才会累会睡</div>
+        </div>
+      </div>`;
+  }
+
+  const asleep = mode === "asleep";
+  const waking = mode === "waking";
+  const title = asleep ? "睡着中" : waking ? "刚醒，还没爬起来" : s.fatigue ? "醒着 · 疲劳期" : "醒着";
+  const sub = asleep
+    ? `还剩 ${esc(s.remaining_text || "—")}，预计 ${esc(s.wake_window || "")} 醒`
+    : waking
+      ? "正在翻昨晚的消息"
+      : `起床点 ${esc(s.wake_time || "08:00")}，浮动 ±${esc(s.wake_jitter || 0)} 分钟`;
+
+  return `
+    <div class="night-hero ${asleep ? "is-asleep" : ""}">
+      <div class="hero-main">
+        <div class="hero-line">
+          <span class="hero-pip"></span>
+          <span class="hero-title">${esc(title)}</span>
+          ${s.fatigue && !asleep ? '<span class="hero-flag">疲劳</span>' : ""}
+        </div>
+        <div class="hero-sub">${sub}</div>
+      </div>
+      <div class="hero-energy">
+        <div class="energy-top">
+          <span class="energy-word">${esc(energyWord(percent))}</span>
+          <span class="energy-num mono">${energy.toFixed(0)}<em>/${max}</em></span>
+        </div>
+        <div class="energy-bar ${tone}"><span style="width:${percent}%"></span></div>
+      </div>
+      <div class="hero-acts">
+        <button class="ghost" id="night-wake">唤醒</button>
+        <button class="ghost" id="night-sleep">去睡</button>
+      </div>
+    </div>`;
+}
+
+/* ---- 梦境 ---- */
+function dreamRow(dream) {
+  const level = Math.max(1, Math.min(5, Number(dream.level) || 1));
+  const tone = NIGHT_LEVEL_TONE[level] || "var(--ink-faint)";
+  const tags = (dream.tags || []).map((t) => `<span class="dream-tag">${esc(t)}</span>`).join("");
+  const days = Number(dream.remaining_days || 0);
+  const fade = dream.expired ? "已经忘了" : days <= 0 ? "明天就忘" : `还能记 ${days} 天`;
+  return `
+    <div class="dream-row" style="--lvl:${tone}">
+      <div class="dream-body">
+        <div class="dream-top">
+          <span class="dream-stars">${levelStars(level)}</span>
+          ${tags}
+          <span class="dream-fade mono">${esc(fade)}</span>
+        </div>
+        <div class="dream-text">${esc(firstSentence(dream.text, 88))}</div>
+        <div class="dream-time mono">${fmtTime(dream.created_at)}</div>
+      </div>
+      <button class="dream-del" data-id="${esc(dream.dream_id)}" title="删掉">×</button>
+    </div>`;
+}
+
+function unreadRow(item) {
+  return `
+    <div class="unread-row">
+      <span class="unread-clock mono">${clockOf(item.unread_since)}</span>
+      <span class="unread-text">${esc(firstSentence(item.text, 56))}</span>
+    </div>`;
+}
+
+/* ---- 各页内容 ---- */
+function nightStatePage(data, unread) {
+  return `
+    ${nightHero(data)}
+    <div class="night-block">
+      <div class="block-head">
+        <span class="block-title">未曾爬楼</span>
+        <span class="block-note">${unread.length} 条没看</span>
+        ${unread.length ? '<button class="mini" id="night-crawl">标记已爬</button>' : ""}
+      </div>
+      ${unread.length ? `<div class="unread-list">${unread.slice(0, 6).map(unreadRow).join("")}</div>` : '<div class="night-empty">没有没爬的消息</div>'}
+    </div>`;
+}
+
+function infoRow(label, value, hint) {
+  return `<div class="info-row">
+    <span class="info-label">${esc(label)}</span>
+    <span class="info-value">${esc(value)}</span>
+    ${hint ? `<span class="info-hint">${esc(hint)}</span>` : ""}
+  </div>`;
+}
+
+
+function nightSleepPage(state) {
+  const s = state || {};
+  const enabled = !!s.enabled;
+  const mode = s.mode || "awake";
+  const asleep = mode === "asleep";
+  const energy = Number(s.energy || 0);
+  const max = Number(s.energy_max || 100) || 100;
+  const percent = max ? Math.round((energy / max) * 100) : 0;
+
+  const fatigueText = s.fatigue === "night" ? "夜间疲劳期" : s.fatigue === "noon" ? "午间疲劳期" : "不在疲劳期";
+
+  return `
+    <div class="settings-intro">这里是它现在的作息，改设置去「设置」那一页。</div>
+    ${nightHero(s)}
+    <div class="info-card">
+      ${infoRow("当前时段", fatigueText)}
+      ${infoRow("夜间疲劳", s.night_fatigue || "—", "这个时段里精力往下掉")}
+      ${infoRow("午间疲劳", s.noon_fatigue || "—")}
+      ${infoRow("最晚睡觉", s.latest_sleep_time || "—", "到点无论如何都睡")}
+      ${infoRow("起床点", `${s.wake_time || "08:00"} ± ${s.wake_jitter || 0} 分钟`)}
+      ${infoRow("唤醒档位", s.wake_mode === "both" ? "私聊和群聊都能叫" : s.wake_mode === "never" ? "叫不醒" : "只在私聊里能叫", s.wake_window ? `叫醒窗口 ${s.wake_window}` : "")}
+      ${infoRow("睡前道别", s.farewell_on ? "会道别" : "不说，直接睡")}
+      ${infoRow("做梦", s.dream_on ? "开着" : "关着")}
+      ${infoRow("爬楼", s.crawl_on ? "开着" : "关着")}
+    </div>
+    ${!enabled ? '<div class="night-empty">长夜如梦没开，这些设置都不生效</div>' : ""}
+    <div class="info-bar">
+      <span class="info-bar-label">精力</span>
+      <span class="info-bar-num mono">${energy.toFixed(0)}<em>/${max}</em></span>
+      <div class="info-bar-track"><span class="${energyTone(percent)}" style="width:${percent}%"></span></div>
+      <span class="info-bar-word">${esc(energyWord(percent))}</span>
+    </div>
+  `;
+}
+
+
+function nightMemoryPage(unread, state) {
+  const s = state || {};
+  return `
+    <div class="settings-intro">睡着期间进记忆的话会打上「未曾爬楼」，醒来先翻一遍才算真的看过。</div>
+    <div class="info-card">
+      ${infoRow("爬楼机制", s.crawl_on ? "开着" : "关着")}
+      ${infoRow("没看的条数", `${unread.length} 条`)}
+    </div>
+    <div class="night-block">
+      <div class="block-head">
+        <span class="block-title">未曾爬楼</span>
+        <span class="block-note">${unread.length} 条</span>
+        ${unread.length ? '<button class="mini" id="night-crawl">标记已爬</button>' : ""}
+      </div>
+      ${unread.length ? `<div class="unread-list">${unread.map(unreadRow).join("")}</div>` : '<div class="night-empty">没有没爬的消息</div>'}
+    </div>
+  `;
+}
+
+
+const DREAM_TAG_CLASS = {
+  噩梦: "t-nightmare",
+  美梦: "t-dream",
+  反映现实: "t-real",
+  天马行空: "t-weird",
+};
+
+function fadeBand(days, total) {
+  const ratio = total > 0 ? Number(days) / Number(total) : 0;
+  if (ratio > 0.8) return 0;
+  if (ratio > 0.6) return 1;
+  if (ratio > 0.4) return 2;
+  if (ratio > 0.18) return 3;
+  return 4;
+}
+
+function dreamLead(text) {
+  const clean = String(text || "").trim();
+  const cut = clean.split("。")[0];
+  if (!cut) return clean;
+  return cut.length > 26 ? clean.slice(0, 26) + "…" : cut + "。";
+}
+
+function dreamRest(text) {
+  const clean = String(text || "").trim();
+  const lead = dreamLead(clean);
+  return clean.startsWith(lead) ? clean.slice(lead.length).trim() : clean;
+}
+
+function nightTitle(key) {
+  const parts = String(key || "").split("-");
+  if (parts.length < 3) return key || "不知哪一夜";
+  const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  const week = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][d.getDay()];
+  return `${Number(parts[1])}月${Number(parts[2])}日`;
+}
+
+function nightWeekday(key) {
+  const parts = String(key || "").split("-");
+  if (parts.length < 3) return "";
+  const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][d.getDay()];
+}
+
+function clockOfTs(ts) {
+  if (!ts) return "";
+  const d = new Date(Number(ts) * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function dreamSegHtml(seg) {
+  const band = fadeBand(seg.remaining_days, seg.total_days);
+  const tags = (seg.tags || [])
+    .map((name) => `<span class="seg-tag ${DREAM_TAG_CLASS[name] || ""}">${esc(name)}</span>`)
+    .join("");
+  const pinned = seg.pinned ? '<span class="seg-hold is-on">已拽住</span>' : "";
+  const clock = clockOfTs(seg.created_at);
+  const lead = dreamLead(seg.text);
+  const rest = dreamRest(seg.text);
+  return `
+    <article class="seg lv${Math.max(1, Math.min(5, Number(seg.level) || 3))} fade-${band}">
+      <div class="seg-top">
+        <span class="seg-time mono">${esc(clock)}</span>
+        ${tags}
+        <span class="seg-left mono">还能记 ${esc(seg.remaining_days)} 天</span>
+        <button class="seg-hold ${seg.pinned ? "is-on" : ""}" data-id="${esc(seg.dream_id)}" data-pin="${seg.pinned ? "1" : "0"}">${seg.pinned ? "松开" : "拽住"}</button>
+      </div>
+      <p class="seg-lead">${esc(lead)}</p>
+      <p class="seg-text">${esc(rest)}</p>
+      <div class="trace"></div>
+    </article>`;
+}
+
+function nightBlockHtml(night) {
+  const segs = night.segments || [];
+  const first = segs[0] || {};
+  const last = segs[segs.length - 1] || {};
+  const range = segs.length > 1
+    ? `${clockOfTs(first.created_at)}–${clockOfTs(last.created_at)}`
+    : clockOfTs(first.created_at);
+  const subtitle = `${nightWeekday(night.night_key)} · ${segs.length} 段 · ${range}`;
+  return `
+    <section class="dream-night" data-key="${esc(night.night_key)}">
+      <div class="dream-night-head">
+        <span class="dn-date">${esc(nightTitle(night.night_key))}</span>
+        <span class="dn-rule"></span>
+        <span class="dn-meta">${esc(subtitle)}</span>
+      </div>
+      <div class="dn-body">
+        ${segs.map(dreamSegHtml).join("")}
+      </div>
+    </section>`;
+}
+
+function nightDreamPage(dreamData) {
+  const nights = (dreamData && dreamData.nights) || [];
+  const stats = (dreamData && dreamData.stats) || {};
+  const alive = Number(stats.living || 0);
+  return `
+    <div class="settings-intro">睡着满一小时开始做梦，之后每小时一段。梦会按等级一天天淡掉，拽住了就不会散。</div>
+    <div class="night-block">
+      <div class="block-head">
+        <span class="block-title">做过的梦</span>
+        <span class="block-note">${alive} 段还在 / 共 ${esc(stats.total || 0)} 段</span>
+      </div>
+      ${nights.length ? `<div class="dream-nights">${nights.map(nightBlockHtml).join("")}</div>` : '<div class="night-empty">还没做过梦</div>'}
+    </div>
+  `;
+}
+
+
+function nightSettingsPage(settings) {
+  const night = pickGroup(settings, "night");
+  const close = pickGroup(settings, "close");
+  return `
+    <div class="settings-intro">所有开关和参数都在这一页，改完点下面的保存。</div>
+    ${nightCard("总开关", "关掉之后它就不知道累，也不会自己睡", sliceItems(night, ["enabled"]))}
+    ${nightCard("疲劳时段", "这两个时段里它会犯困、精力往下掉", sliceItems(night, ["noon_fatigue", "night_fatigue", "latest_sleep_time"]))}
+    ${nightCard("起床", "固定起床点上下浮动，浮动上限 90 分钟", sliceItems(night, ["wake_time", "wake_jitter_minutes"]))}
+    ${nightCard("唤醒", "睡着之后有多难叫醒。y 到 y+n 之间概率平分 100%", sliceItems(night, ["wake_mode", "wake_window_minutes", "wake_start_count", "wake_step_count"]))}
+    ${nightCard("入睡前的道别", "多个会话一起道别时，要不要说同一句", sliceItems(night, ["farewell_before_sleep", "farewell_same", "farewell_random", "farewell_use_llm"]))}
+    ${nightCard("精力", "疲劳期里怎么掉、平时怎么回", sliceItems(night, [...NIGHT_ENERGY_KEYS, "min_turns_before_sleep"]))}
+    ${nightCard("爬楼", "关掉之后睡着的记忆就直接可读了", sliceItems(night, NIGHT_MEMORY_KEYS))}
+    ${nightCard("梦境", "关掉就不做梦，开着 token 消耗会明显增加", sliceItems(night, NIGHT_DREAM_KEYS))}
+    ${configCard(close, { title: "收线静默", desc: "聊到晚安、拜拜这种话就真的停下来" })}
+    ${pageActions("保存本页设置")}
+  `;
+}
+
+/* ---- 主渲染 ---- */
+async function renderNight() {
+  const TABS = [
+    ["state", "状态"],
+    ["sleep", "睡眠"],
+    ["memory", "记忆"],
+    ["dream", "梦境"],
+    ["config", "设置"],
+  ];
+  if (!TABS.some(([key]) => key === nightTab)) nightTab = "state";
+
+  const tabsHtml = `<div class="sub-tabs">${TABS.map(
+    ([key, label]) =>
+      `<button class="sub-tab ${nightTab === key ? "is-on" : ""}" data-tab="${key}">${label}</button>`
+  ).join("")}</div>`;
+
+  let body = "";
+  let needSettings = nightTab === "config";
+  let needDreams = nightTab === "dream";
+  let needUnread = nightTab === "state" || nightTab === "memory";
+  let needState = nightTab === "state" || nightTab === "sleep" || nightTab === "memory";
+
+  const [stateData, settings, dreamData, unreadData] = await Promise.all([
+    needState ? get("/night/state").catch(() => ({})) : Promise.resolve({}),
+    needSettings ? loadSettings() : Promise.resolve(null),
+    needDreams ? get("/night/dreams", { limit: 40 }).catch(() => ({ items: [], nights: [], stats: {} })) : Promise.resolve(null),
+    needUnread ? get("/night/unread", { limit: 40 }).catch(() => ({ items: [] })) : Promise.resolve(null),
+  ]);
+
+  const dreams = (dreamData && dreamData.items) || [];
+  const stats = (dreamData && dreamData.stats) || {};
+  const unread = (unreadData && unreadData.items) || [];
+
+  if (nightTab === "sleep") body = nightSleepPage(stateData);
+  else if (nightTab === "memory") body = nightMemoryPage(unread, stateData);
+  else if (nightTab === "dream") body = nightDreamPage(dreamData);
+  else if (nightTab === "config") body = nightSettingsPage(settings);
+  else body = nightStatePage(stateData, unread);
+
+  view.innerHTML = `<div class="night-page">${tabsHtml}${body}</div>`;
+
+  /* 子标签切换 */
+  view.querySelectorAll(".sub-tab").forEach((btn) => {
+    btn.onclick = () => {
+      nightTab = btn.dataset.tab;
+      render();
+    };
+  });
+
+  /* 保存 */
+  bindConfigCards(view);
+  bindPageSave();
+
+  /* 快捷操作 */
+  const wakeBtn = document.getElementById("night-wake");
+  if (wakeBtn) {
+    wakeBtn.onclick = async () => {
+      wakeBtn.disabled = true;
+      try {
+        await post("/night/wake");
+        await renderNight();
+      } catch (err) {
+        alert(err.message || "唤醒失败");
+        wakeBtn.disabled = false;
+      }
+    };
+  }
+
+  const sleepBtn = document.getElementById("night-sleep");
+  if (sleepBtn) {
+    sleepBtn.onclick = async () => {
+      sleepBtn.disabled = true;
+      try {
+        await post("/night/sleep", { kind: "night" });
+        await renderNight();
+      } catch (err) {
+        alert(err.message || "入睡失败");
+        sleepBtn.disabled = false;
+      }
+    };
+  }
+
+  const crawlBtn = document.getElementById("night-crawl");
+  if (crawlBtn) {
+    crawlBtn.onclick = async () => {
+      crawlBtn.disabled = true;
+      try {
+        await post("/night/crawl", {});
+        settingsCache = null;
+        await renderNight();
+      } catch (err) {
+        alert(err.message || "操作失败");
+        crawlBtn.disabled = false;
+      }
+    };
+  }
+
+  view.querySelectorAll(".seg-hold").forEach((btn) => {
+    btn.onclick = async () => {
+      const pinned = btn.dataset.pin === "1";
+      btn.disabled = true;
+      try {
+        await post("/night/dream/pin", { dream_id: btn.dataset.id, pinned: !pinned });
+        await renderNight();
+      } catch (err) {
+        alert(err.message || "操作失败");
+        btn.disabled = false;
+      }
+    };
+  });
+
+  view.querySelectorAll(".dream-del").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await post("/night/dream/delete", { dream_id: btn.dataset.id });
+        await renderNight();
+      } catch (err) {
+        alert(err.message || "删除失败");
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
 /* ------------------------------------------------------------------ 路由 */
 const VIEWS = {
   overview: { title: "概览", render: renderOverview },
   persona: { title: "人格", render: renderPersona },
   behavior: { title: "行为", render: renderBehavior },
   memory: { title: "记忆", render: renderMemory },
+  night: { title: "长夜", render: renderNight },
   tools: { title: "工具", render: renderTools },
   qq: { title: "QQ", render: renderQQ },
   system: { title: "系统", render: renderSystem },
@@ -205,7 +906,13 @@ function collectChanges(root) {
     const type = el.dataset.type;
     if (type === "bool") changes[path] = el.checked;
     else if (type === "int" || type === "float") changes[path] = Number(el.value);
-    else changes[path] = el.value;
+    else if (type === "timerange") {
+      const a = el.querySelector(".tr-a");
+      const b = el.querySelector(".tr-b");
+      const start = a ? a.value : "";
+      const end = b ? b.value : "";
+      changes[path] = start && end ? `${start}-${end}` : start || end || "";
+    } else changes[path] = el.value;
   });
   return changes;
 }
@@ -215,6 +922,13 @@ function bindConfigCards(root) {
     box.onchange = () => {
       const label = box.parentElement.querySelector("span");
       if (label) label.textContent = box.checked ? "开" : "关";
+    };
+  });
+  // 概率滑块：拖的时候数字跟着走
+  root.querySelectorAll(".pct-input").forEach((slider) => {
+    const num = slider.parentElement.querySelector(".pct-num");
+    slider.oninput = () => {
+      if (num) num.textContent = Math.round(Number(slider.value) * 100) + "%";
     };
   });
 }
@@ -1057,6 +1771,12 @@ document.getElementById("refresh").onclick = () => {
   settingsCache = null;
   render();
 };
+
+try {
+  initLook();
+} catch (err) {
+  /* 外观起不来不影响主流程 */
+}
 
 (async function boot() {
   try {

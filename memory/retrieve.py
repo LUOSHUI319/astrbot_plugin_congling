@@ -128,7 +128,7 @@ class Retriever:
             rows = await self.store.fetch_all(
                 "SELECT id, text, kind, keywords, importance, decay, created_at, source_msg_ids, "
                 "subject_id, scope, last_hit_at, session_id, session_kind, session_label FROM mem_atom "
-                "WHERE persona_id=? AND status='active' AND decay>=0.15 "
+                "WHERE persona_id=? AND status='active' AND decay>=0.15 AND (unread IS NULL OR unread=0) "
                 "ORDER BY importance DESC, id DESC LIMIT 800",
                 (persona_id,),
             )
@@ -136,7 +136,7 @@ class Retriever:
         rows = await self.store.fetch_all(
             "SELECT id, text, kind, keywords, importance, decay, created_at, source_msg_ids, "
             "subject_id, scope, last_hit_at, session_id, session_kind, session_label FROM mem_atom "
-            "WHERE persona_id=? AND status='active' AND decay>=0.15 "
+            "WHERE persona_id=? AND status='active' AND decay>=0.15 AND (unread IS NULL OR unread=0) "
             "AND (scope='global' OR (scope=? AND subject_id=?) OR (scope=? AND subject_id='')) "
             "ORDER BY importance DESC, id DESC LIMIT 800",
             (persona_id, scope, subject, "user"),

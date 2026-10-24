@@ -557,5 +557,264 @@
         "default": false
       }
     }
+  },
+  "night": {
+    "description": "长夜如梦",
+    "hint": "作息、睡眠、唤醒、爬楼、做梦。开启后它会累会困会睡，睡着时叫不醒（或很难叫醒）。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用长夜如梦",
+        "hint": "总开关。关掉则完全不生效，行为跟以前一样",
+        "type": "bool",
+        "default": false
+      },
+      "noon_fatigue": {
+        "description": "午间疲劳期",
+        "hint": "格式 HH:MM-HH:MM，留空表示没有午间疲劳",
+        "type": "string",
+        "default": "13:00-14:30"
+      },
+      "night_fatigue": {
+        "description": "夜间疲劳期",
+        "hint": "格式 HH:MM-HH:MM，支持跨午夜",
+        "type": "string",
+        "default": "23:30-07:00"
+      },
+      "energy_max": {
+        "description": "精力上限",
+        "type": "int",
+        "default": 100
+      },
+      "energy_per_message": {
+        "description": "每条消息消耗精力",
+        "type": "float",
+        "default": 4.0
+      },
+      "energy_per_minute": {
+        "description": "每分钟消耗精力",
+        "hint": "只在疲劳期内扣",
+        "type": "float",
+        "default": 0.8
+      },
+      "energy_recover_per_minute": {
+        "description": "非疲劳期每分钟恢复",
+        "type": "float",
+        "default": 1.5
+      },
+      "energy_after_wake": {
+        "description": "被强行叫醒后的精力",
+        "hint": "正常睡醒会直接恢复满，这个是没睡够的情况",
+        "type": "int",
+        "default": 35
+      },
+      "min_turns_before_sleep": {
+        "description": "疲劳期最少撑几轮",
+        "hint": "防止一进疲劳期就秒睡",
+        "type": "int",
+        "default": 8
+      },
+      "wake_time": {
+        "description": "固定起床时间",
+        "hint": "格式 HH:MM",
+        "type": "string",
+        "default": "08:00"
+      },
+      "wake_jitter_minutes": {
+        "description": "起床浮动分钟",
+        "hint": "在固定点上下随机浮动，上限 90，填 0 表示不浮动",
+        "type": "int",
+        "default": 90
+      },
+      "latest_sleep_time": {
+        "description": "最晚睡觉时间",
+        "hint": "到点无论如何都睡，格式 HH:MM",
+        "type": "string",
+        "default": "02:30"
+      },
+      "farewell_before_sleep": {
+        "description": "入睡前发道别",
+        "type": "bool",
+        "default": true
+      },
+      "farewell_same": {
+        "description": "多会话道别语统一",
+        "hint": "开启后所有会话发同一句",
+        "type": "bool",
+        "default": false
+      },
+      "farewell_random": {
+        "description": "道别语随机决定",
+        "hint": "开启后由它自己决定这次统一还是各说各的",
+        "type": "bool",
+        "default": true
+      },
+      "farewell_use_llm": {
+        "description": "道别语用模型生成",
+        "hint": "更自然，但每次入睡多一次调用",
+        "type": "bool",
+        "default": false
+      },
+      "wake_mode": {
+        "description": "唤醒档位",
+        "hint": "never 不可唤醒 / private_only 仅私聊 / both 私聊与群聊被@都能唤醒",
+        "type": "string",
+        "default": "private_only"
+      },
+      "wake_window_minutes": {
+        "description": "唤醒计数窗口（分钟）",
+        "type": "int",
+        "default": 10
+      },
+      "wake_start_count": {
+        "description": "开始掷骰的条数 y",
+        "hint": "窗口内攒到这么多条才开始按概率掷骰",
+        "type": "int",
+        "default": 2
+      },
+      "wake_step_count": {
+        "description": "概率递增档数 n",
+        "hint": "y 到 y+n 之间概率平分 100%，攒到 y+n 必醒",
+        "type": "int",
+        "default": 4
+      },
+      "crawl_enabled": {
+        "description": "爬楼机制",
+        "hint": "睡着期间的消息要「爬楼」后才能读取",
+        "type": "bool",
+        "default": true
+      },
+      "crawl_use_llm": {
+        "description": "爬楼语用模型生成",
+        "hint": "更活，但多一次调用",
+        "type": "bool",
+        "default": false
+      },
+      "dream_enabled": {
+        "description": "做梦",
+        "hint": "⚠️ 开启后 token 消耗会明显增加",
+        "type": "bool",
+        "default": false
+      },
+      "dream_start_after_minutes": {
+        "description": "入睡多久开始做梦（分钟）",
+        "type": "int",
+        "default": 60
+      },
+      "dream_interval_minutes": {
+        "description": "每隔多久做一段（分钟）",
+        "type": "int",
+        "default": 60
+      },
+      "dream_max_per_sleep": {
+        "description": "单次睡眠最多几段",
+        "type": "int",
+        "default": 8
+      },
+      "noon_dream_chance": {
+        "description": "午睡做梦概率",
+        "type": "float",
+        "default": 0.5
+      },
+      "dream_tags": {
+        "description": "梦境标签池",
+        "type": "list",
+        "default": [
+          "美梦",
+          "噩梦",
+          "反映现实",
+          "天马行空"
+        ]
+      },
+      "dream_extra_tags": {
+        "description": "自定义梦境标签",
+        "hint": "比如 修仙、鬼怪",
+        "type": "list",
+        "default": []
+      },
+      "dream_remember_by_level": {
+        "description": "醒后提梦按等级给概率",
+        "hint": "1 级 20%，逐级 +20%，5 级必说",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "close": {
+    "description": "收线静默",
+    "hint": "说了晚安/拜拜这类话之后真的停下来。长夜如梦不开时，这个也能单独起作用。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用收线静默",
+        "type": "bool",
+        "default": true
+      },
+      "strong_words": {
+        "description": "强档结束语",
+        "hint": "命中即静默到起床时间",
+        "type": "list",
+        "default": [
+          "晚安",
+          "我睡了",
+          "去睡了",
+          "先睡一步",
+          "我下了",
+          "下线了",
+          "关灯了",
+          "撑不住了",
+          "困死了",
+          "睡啦"
+        ]
+      },
+      "medium_words": {
+        "description": "中档结束语",
+        "hint": "命中静默一段时间",
+        "type": "list",
+        "default": [
+          "先这样",
+          "回头聊",
+          "有空再聊",
+          "去忙了",
+          "忙去了",
+          "拜拜",
+          "886",
+          "午安",
+          "午休了",
+          "眯一会儿",
+          "打个盹",
+          "先撤"
+        ]
+      },
+      "weak_words": {
+        "description": "弱档结束语",
+        "hint": "只降温，不静默",
+        "type": "list",
+        "default": [
+          "嗯",
+          "好",
+          "行",
+          "收到",
+          "ok",
+          "知道了",
+          "就这样"
+        ]
+      },
+      "noon_mute_minutes": {
+        "description": "午安静默分钟",
+        "type": "int",
+        "default": 75
+      },
+      "bye_mute_minutes": {
+        "description": "拜拜静默分钟",
+        "type": "int",
+        "default": 30
+      },
+      "max_closing_chars": {
+        "description": "收尾回复字数上限",
+        "type": "int",
+        "default": 12
+      }
+    }
   }
 }

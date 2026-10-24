@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any
 
@@ -84,7 +85,21 @@ GROUP_TITLES = {
     "qq_extra": "QQ 扩展",
     "compat": "兼容共存",
     "debug": "调试",
+    "night": "长夜如梦",
+    "close": "收线静默",
 }
+
+def _fallback_night_key(ts: int) -> str:
+    """没有 night_key 的老数据：按中午切分归夜。"""
+    import datetime as _dt
+
+    if ts <= 0:
+        return ""
+    moment = _dt.datetime.fromtimestamp(ts)
+    if moment.hour < 12:
+        moment = moment - _dt.timedelta(days=1)
+    return moment.strftime("%Y-%m-%d")
+
 
 _SCHEMA_CACHE: dict[str, Any] | None = None
 
@@ -265,6 +280,14 @@ class PageApi:
             ("/qzone/auth", self.qzone_auth, ["POST"]),
             ("/admins", self.admins, ["GET"]),
             ("/health", self.health, ["GET"]),
+            ("/night/state", self.night_state, ["GET"]),
+            ("/night/dreams", self.night_dreams, ["GET"]),
+            ("/night/wake", self.night_wake, ["POST"]),
+            ("/night/sleep", self.night_sleep, ["POST"]),
+            ("/night/dream/delete", self.night_dream_delete, ["POST"]),
+            ("/night/dream/pin", self.night_dream_pin, ["POST"]),
+            ("/night/unread", self.night_unread, ["GET"]),
+            ("/night/crawl", self.night_crawl, ["POST"]),
         ]
         for path, handler, methods in routes:
             try:
@@ -653,5 +676,146 @@ class PageApi:
     async def health(self) -> dict[str, Any]:
         try:
             return _ok(self.plugin.health())
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    # ================================================================ 长夜如梦
+    async def night_state(self) -> dict[str, Any]:
+        try:
+            if getattr(self.plugin, "night", None) is None:
+                return _ok({"enabled": False, "reason": "长夜如梦没有启用"})
+            return _ok(self.plugin.night.snapshot())
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_dreams(self) -> dict[str, Any]:
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None or getattr(night, "dreamer", None) is None:
+                return _ok({"items": [], "stats": {}})
+            params = await _params()
+            try:
+                limit = int(params.get("limit") or 20)
+            except (TypeError, ValueError):
+                limit = 20
+            dreams = night.dreamer.list_recent(max(1, min(100, limit)))
+            items = []
+            for dream in dreams:
+                total_days = 16
+                try:
+                    if 0 < dream.decay_per_day < 1:
+                        total_days = max(1, int(round(math.log(0.15) / math.log(1 - dream.decay_per_day))))
+                except Exception:
+                    total_days = 16
+                items.append(
+                    {
+                        **dream.to_dict(),
+                        "remaining_days": dream.remaining_days(),
+                        "total_days": total_days,
+                        "strength_text": f"{dream.strength:.0%}",
+                    }
+                )
+            # 按「夜」分组：中午之前的梦归前一晚
+            nights: dict[str, list[dict[str, Any]]] = {}
+            for item in items:
+                key = str(item.get("night_key") or "")
+                if not key:
+                    key = _fallback_night_key(int(item.get("created_at") or 0))
+                item["night_key"] = key
+                nights.setdefault(key, []).append(item)
+            for group in nights.values():
+                group.sort(key=lambda d: int(d.get("created_at") or 0))
+            night_list = [
+                {"night_key": key, "segments": group}
+                for key, group in sorted(nights.items(), reverse=True)
+            ]
+            return _ok({
+                "items": items,
+                "nights": night_list,
+                "stats": night.dreamer.stats(),
+            })
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_wake(self) -> dict[str, Any]:
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None:
+                return _err("长夜如梦没有启用")
+            await night.state.wake_now(reason="manual")
+            return _ok(night.snapshot())
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_sleep(self) -> dict[str, Any]:
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None:
+                return _err("长夜如梦没有启用")
+            body = await _body()
+            kind = str(body.get("kind") or "night")
+            await night.state.sleep_now(reason="manual", kind=kind)
+            return _ok(night.snapshot())
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_dream_delete(self) -> dict[str, Any]:
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None or getattr(night, "dreamer", None) is None:
+                return _err("长夜如梦没有启用")
+            body = await _body()
+            dream_id = str(body.get("dream_id") or "")
+            if not dream_id:
+                return _err("缺 dream_id")
+            removed = night.dreamer.forget(dream_id)
+            if removed:
+                await night.dreamer.save()
+            return _ok({"removed": removed})
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_dream_pin(self) -> dict[str, Any]:
+        """拽住一段梦：不再衰减，也不会被忘掉。"""
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None or getattr(night, "dreamer", None) is None:
+                return _err("长夜如梦没有启用")
+            body = await _body()
+            dream_id = str(body.get("dream_id") or "")
+            if not dream_id:
+                return _err("缺 dream_id")
+            pinned = bool(body.get("pinned", True))
+            changed = night.dreamer.set_pinned(dream_id, pinned)
+            if changed:
+                await night.dreamer.save()
+            return _ok({"changed": changed, "pinned": pinned})
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_unread(self) -> dict[str, Any]:
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None:
+                return _ok({"items": [], "count": 0})
+            params = await _params()
+            try:
+                limit = int(params.get("limit") or 20)
+            except (TypeError, ValueError):
+                limit = 20
+            items = await night.crawler.unread_atoms(max(1, min(100, limit)))
+            return _ok({"items": items, "count": len(items)})
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_crawl(self) -> dict[str, Any]:
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None:
+                return _err("长夜如梦没有启用")
+            body = await _body()
+            session_id = str(body.get("session_id") or "")
+            removed = await night.crawler.mark_read(session_id)
+            return _ok({"removed": removed})
         except Exception as exc:
             return _err(repr(exc)[:200])

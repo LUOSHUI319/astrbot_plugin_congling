@@ -19,7 +19,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = [
     """
@@ -73,7 +73,9 @@ _SCHEMA = [
         supersedes INTEGER,
         session_id TEXT DEFAULT '',
         session_kind TEXT DEFAULT '',
-        session_label TEXT DEFAULT ''
+        session_label TEXT DEFAULT '',
+        unread INTEGER DEFAULT 0,
+        unread_since INTEGER DEFAULT 0
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_atom_scope ON mem_atom(persona_id, scope, subject_id, status)",
@@ -192,6 +194,8 @@ class Store:
                 ("session_id", "ALTER TABLE mem_atom ADD COLUMN session_id TEXT DEFAULT ''"),
                 ("session_kind", "ALTER TABLE mem_atom ADD COLUMN session_kind TEXT DEFAULT ''"),
                 ("session_label", "ALTER TABLE mem_atom ADD COLUMN session_label TEXT DEFAULT ''"),
+                ("unread", "ALTER TABLE mem_atom ADD COLUMN unread INTEGER DEFAULT 0"),
+                ("unread_since", "ALTER TABLE mem_atom ADD COLUMN unread_since INTEGER DEFAULT 0"),
             ):
                 if name not in columns:
                     self._conn.execute(stmt)

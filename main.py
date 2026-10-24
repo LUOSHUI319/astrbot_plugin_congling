@@ -33,7 +33,9 @@ from .core.store import Store
 PLUGIN_VERSION = "0.3.0"
 PLUGIN_NAME = "从绫开始"
 
-# 钩子优先级（越小越晚执行）
+# 钩子优先级（数值越小越晚执行）
+# 长夜拦截要排在归档之后：睡着期间消息照样进库，只是不回复
+PRIO_NIGHT = maxsize - 130
 PRIO_PERCEIVE = maxsize - 100
 PRIO_MEMORY = maxsize - 90
 PRIO_PERSONA = maxsize - 80
@@ -75,6 +77,7 @@ class ConglingPlugin(Star):
         self.models: Any = None
         self.qqext: Any = None
         self.poke_inbox: Any = None
+        self.night: Any = None
         self.page_api: Any = None
         self.commands: Any = None
 
@@ -90,6 +93,7 @@ class ConglingPlugin(Star):
         await self._safe_boot("persona", self._boot_persona)
         await self._safe_boot("humanize", self._boot_humanize)
         await self._safe_boot("memory", self._boot_memory)
+        await self._safe_boot("night", self._boot_night)
         await self._safe_boot("capability", self._boot_capability)
         await self._safe_boot("qqext", self._boot_qqext)
         await self._safe_boot("commands", self._boot_commands)
@@ -106,6 +110,8 @@ class ConglingPlugin(Star):
 
         try:
             asyncio.get_running_loop().create_task(self._housekeeping())
+            if self.night is not None:
+                asyncio.get_running_loop().create_task(self._dream_loop())
         except RuntimeError:
             pass
 
@@ -163,6 +169,16 @@ class ConglingPlugin(Star):
         self.memory = MemoryService(self)
         await self.memory.start()
 
+    async def _boot_night(self) -> None:
+        # 长夜如梦没开、但收线静默开着时也要装起来：这时只有「说晚安就停」这一件事生效
+        if not self.cfg.bool("night.enabled", False) and not self.cfg.bool("close.enabled", True):
+            logger.info("[congling] 长夜如梦与收线静默都未启用")
+            return
+        from .night import NightModule
+
+        self.night = NightModule(self)
+        await self.night.start()
+
     async def _boot_capability(self) -> None:
         if not self.cfg.bool("capability.enabled", True):
             return
@@ -202,6 +218,19 @@ class ConglingPlugin(Star):
             except Exception as exc:
                 logger.debug(f"[congling] 维护任务出错: {exc!r}")
             await asyncio.sleep(3600)
+
+    async def _dream_loop(self) -> None:
+        """每 5 分钟看一次该不该做梦。比整点轮询细，开销可以忽略。"""
+        await asyncio.sleep(120)
+        while True:
+            try:
+                if self.night is not None:
+                    await self.night.dream_tick()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.debug(f"[congling] 做梦任务出错: {exc!r}")
+            await asyncio.sleep(300)
 
     async def _purge_cache(self) -> None:
         cutoff = int(time.time()) - 7 * 86400
@@ -330,10 +359,52 @@ class ConglingPlugin(Star):
         if self.perception is None or not self.enabled_for(event):
             return
         try:
-            msg = await self.perception.perceive(event)
+            msg = await self.perception.perceive(event, enrich=False)
             await self.perception.archive(msg)
         except Exception as exc:
             logger.debug(f"[congling] 全局归档失败: {exc!r}")
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=PRIO_NIGHT)
+    async def night_hook(self, event: AstrMessageEvent) -> None:
+        """睡着的时候，除了被叫醒，其余一律不接。
+
+        放在归档之后：睡着的这段消息照样进记忆（只是打上没爬楼的标记），
+        但不会叫模型、不会回复。唤醒是一条概率递增的路，攒到位才会醒。
+        """
+        if self.night is None or self.perception is None or not self.enabled_for(event):
+            return
+        try:
+            msg = await self.perception.perceive(event)
+            self_id = ""
+            for getter in ("get_self_id", "get_bot_id"):
+                func = getattr(event, getter, None)
+                if callable(func):
+                    try:
+                        value = func()
+                        if value:
+                            self_id = str(value)
+                            break
+                    except Exception:
+                        continue
+            result = await self.night.on_message(msg, self_id=self_id)
+            if result.get("block"):
+                # 记一条决策日志，方便你回头看成因为什么没理人
+                try:
+                    from .core.contracts import ReplyDecision
+
+                    self.decision.decide(
+                        ReplyDecision(
+                            should_reply=False,
+                            reason=f"长夜·{result.get('hint', '')}",
+                        ),
+                        session_id=msg.session_id,
+                        msg_id=msg.msg_id,
+                    )
+                except Exception:
+                    pass
+                event.stop_event()
+        except Exception as exc:
+            logger.debug(f"[congling] 长夜拦截失败: {exc!r}")
 
     @filter.on_llm_request(priority=PRIO_PERCEIVE)
     async def perceive_hook(self, event: AstrMessageEvent, req: Any) -> None:
@@ -360,6 +431,11 @@ class ConglingPlugin(Star):
         try:
             if self.persona is not None:
                 await self.persona.inject(event, req)
+            if self.night is not None:
+                hint = self.night.prompt_hint()
+                if hint:
+                    current = getattr(req, "system_prompt", "") or ""
+                    setattr(req, "system_prompt", f"{current}\n\n{hint}".strip())
             if self.capabilities is not None:
                 self.capabilities.attach_tools(req)
         except Exception as exc:
@@ -406,12 +482,24 @@ class ConglingPlugin(Star):
 
     @filter.after_message_sent()
     async def after_sent_hook(self, event: AstrMessageEvent) -> None:
-        if not self.enabled_for(event) or self.memory is None:
+        if not self.enabled_for(event):
             return
-        try:
-            await self.memory.after_sent(event)
-        except Exception as exc:
-            logger.debug(f"[congling] 记忆回写失败: {exc!r}")
+        if self.memory is not None:
+            try:
+                await self.memory.after_sent(event)
+            except Exception as exc:
+                logger.debug(f"[congling] 记忆回写失败: {exc!r}")
+        # 收线 / 爬楼：交给长夜模块判断现在该睡还是该先翻消息
+        if self.night is not None:
+            try:
+                session_id = ""
+                try:
+                    session_id = str(event.get_group_id() or event.get_sender_id() or "")
+                except Exception:
+                    session_id = ""
+                await self.night.after_reply(None, session_id=session_id)
+            except Exception as exc:
+                logger.debug(f"[congling] 长夜收尾失败: {exc!r}")
 
     # ================================================================ 指令
     @filter.command("绫")
@@ -442,6 +530,7 @@ class ConglingPlugin(Star):
                 "perception": self.perception is not None,
                 "persona": self.persona is not None,
                 "memory": self.memory is not None,
+                "night": self.night is not None,
                 "capability": self.capabilities is not None,
                 "models": self.models is not None,
                 "qqext": self.qqext is not None,

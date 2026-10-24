@@ -1,8 +1,8 @@
 name: astrbot_plugin_congling
 display_name: 从绫开始
 author: 洛水
-version: 0.3.0
-desc: 从绫开始——把「会聊天」做到像人。拟人化表达、分句节奏、长期记忆、特殊消息解析（合并转发/引用/卡片/语音）、实用查询工具集、QQ 扩展（空间/签名/资料卡），带一整套可视化配置面板。本插件由梦半何时醒定制使用，除授权外不许外用。
+version: 0.4.0
+desc: 从绫开始——把「会聊天」做到像人。拟人化表达、分句节奏、长期记忆、特殊消息解析（合并转发/引用/卡片/语音）、实用查询工具集、QQ 扩展（空间/签名/资料卡），带一整套可视化配置面板。
 repo: "https://github.com/LUOSHUI319/astrbot_plugin_congling"
 entry: main.py
 support_platforms:

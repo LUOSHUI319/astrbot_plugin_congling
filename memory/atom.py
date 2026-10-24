@@ -107,11 +107,26 @@ class AtomStore:
             supersedes = similar_id
 
         now = int(time.time())
+        # 睡着期间产生的记忆打上「未曾爬楼」，醒后要先爬楼才能读
+        unread = 0
+        unread_since = 0
+        night = getattr(self.plugin, "night", None)
+        if night is not None and getattr(self.plugin, "cfg", None) is not None:
+            try:
+                if (
+                    night.state.state.is_asleep()
+                    and self.plugin.cfg.bool("night.crawl_enabled", True)
+                ):
+                    unread = 1
+                    unread_since = now
+            except Exception:
+                unread = 0
+
         atom_id = await self.store.execute(
             "INSERT INTO mem_atom(persona_id, scope, subject_id, kind, text, norm_hash, keywords, "
             "importance, confidence, source_msg_ids, created_at, last_hit_at, hit_count, decay, status, protect, supersedes, "
-            "session_id, session_kind, session_label) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "session_id, session_kind, session_label, unread, unread_since) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 persona_id,
                 scope,
@@ -133,6 +148,8 @@ class AtomStore:
                 draft.session_id or "",
                 draft.session_kind or "",
                 draft.session_label or "",
+                unread,
+                unread_since,
             ),
         )
         if supersedes:
