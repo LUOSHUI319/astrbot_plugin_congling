@@ -242,7 +242,7 @@ class NightService:
         now = time.time()
         self.state.mode = NIGHT_ASLEEP
         self.state.sleep_at = int(now)
-        self.state.wake_at = energy_mod.next_wake_time(self.config, now)
+        self.state.wake_at = energy_mod.next_wake_time(self.config, now, kind=kind)
         self.state.reason = reason
         self.state.dream_count_today = 0
         # 午睡要掷一次骰：这一次到底做不做梦
@@ -272,8 +272,17 @@ class NightService:
         await self.save()
         logger.info(f"[congling] 醒来：原因={reason}")
 
-    async def sleep_now(self, *, reason: str = "manual", kind: str = "night") -> None:
-        """外部调用（面板/指令）强制入睡。"""
+    async def sleep_now(self, *, reason: str = "manual", kind: str | None = None) -> None:
+        """外部调用（面板/指令）强制入睡。
+
+        kind 不传时按当前时段自动判断：在午间疲劳窗口里就是午睡，
+        否则算夜里睡。免得下午手点一下「睡」，一路睡到第二天早上。
+        """
+        if not kind:
+            try:
+                kind = energy_mod.fatigue_kind(self.config) or "night"
+            except Exception:
+                kind = "night"
         await self._do_sleep(reason=reason, kind=kind, force=True)
 
     async def wake_now(self, *, reason: str = "manual") -> None:

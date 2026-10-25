@@ -118,15 +118,26 @@ def next_wake_time(
     config: Any,
     ts: float | None = None,
     *,
+    kind: str = "night",
     rng: random.Random | None = None,
 ) -> int:
     """算出这次该几点醒。
 
-    规则：固定起床点 ± 随机浮动，浮动值有上限（默认 90 分钟，硬上限也是 90）。
-    方向也随机，所以每天不一样。
+    夜里睡：固定起床点 ± 随机浮动，浮动值有上限（默认 90 分钟，硬上限 90）。
+    午睡：按固定时长（默认 60 分钟 ± 15）算，不跟着夜间起床点走，
+          否则下午睡下去会一路算到第二天早上八点。
     """
     base = ts if ts is not None else time.time()
     rng = rng or random
+
+    if (kind or "night") == "noon":
+        nap = config.int("night.noon_nap_minutes", 60)
+        nap = max(10, min(180, nap))
+        wobble = config.int("night.noon_nap_jitter_minutes", 15)
+        wobble = max(0, min(60, wobble))
+        offset = rng.randint(-wobble, wobble) * 60 if wobble else 0
+        return int(base + nap * 60 + offset)
+
     wake_minute = _parse_hhmm(config.str("night.wake_time", "08:00"))
     if wake_minute is None:
         wake_minute = 8 * 60

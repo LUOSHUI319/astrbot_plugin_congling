@@ -149,6 +149,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "dream_interval_minutes": 60,
         "dream_max_per_sleep": 8,
         "noon_dream_chance": 0.5,
+        "noon_nap_minutes": 60,
+        "noon_nap_jitter_minutes": 15,
         "dream_tags": ["美梦", "噩梦"],
         "dream_extra_tags": [],
     },

@@ -722,6 +722,18 @@
         "type": "float",
         "default": 0.5
       },
+      "noon_nap_minutes": {
+        "description": "午睡时长（分钟）",
+        "hint": "午睡按固定时长算，不跟夜间起床点走。默认 60，范围 10~180",
+        "type": "int",
+        "default": 60
+      },
+      "noon_nap_jitter_minutes": {
+        "description": "午睡浮动（分钟）",
+        "hint": "在午睡时长上上下浮动，默认 15，范围 0~60",
+        "type": "int",
+        "default": 15
+      },
       "dream_tags": {
         "description": "梦境标签池",
         "type": "list",
