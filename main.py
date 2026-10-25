@@ -30,7 +30,7 @@ from .core.probe import Probe
 from .core.rhythm import RhythmController
 from .core.store import Store
 
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.2"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）

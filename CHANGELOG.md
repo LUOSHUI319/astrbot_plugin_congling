@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## v0.4.2 · 2026-10-25
+
+上架审核反馈整改（prompt 缓存命中）。
+
+### 修复
+- **不再改写 `req.system_prompt`**：长期记忆、消息解析补充、关系/时段/场景、
+  长夜状态全部改为 `req.extra_user_content_parts` + `mark_as_temp()`，
+  只对本次请求生效、不落历史。系统提示词恢复静态，prefix cache 可以命中了
+- 人格注入拆成两层：人设正文、说话风格、禁忌清单属于静态，留在 system prompt
+  且只写一次；关系远近、当前时段、群聊/私聊属于动态，每轮跟着消息走
+- `night_selftest.py` 的 logger 改为优先 `from astrbot.api import logger`，
+  离线自检时再退回内置 logging
+
+### 新增
+- `core/prompt_parts.py`：统一封装临时上下文注入，marker 收口，避免再漏改
+- `tests/check_prompt_cache.py`：断言连续两次请求的 `system_prompt` 完全相等
+
+### 说明
+- 审核提到的 `make_as_temp()` 实际方法名是 `mark_as_temp()`
+
 ## v0.4.1 · 2026-10-25
 
 修掉「设置里开了，长夜还显示没开」。
