@@ -164,14 +164,14 @@ class TestQzoneClientHttp(unittest.TestCase):
                     "content": "在改插件的设置页",
                     "created_time": 1700000100,
                     "name": "望山",
-                    "uin": 3190568934,
+                    "uin": 10001,
                     "cmtnum": 1,
                     "likenum": 4,
                     "pic": [{"url1": "https://example.com/a.jpg"}],
                 }
             ],
         }
-        items = asyncio.run(self.client.user_feeds(3190568934, page=1, limit=5))
+        items = asyncio.run(self.client.user_feeds(10001, page=1, limit=5))
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["content"], "在改插件的设置页")
         self.assertEqual(items[0]["like_count"], 4)
@@ -180,12 +180,12 @@ class TestQzoneClientHttp(unittest.TestCase):
         req = self.recorder.requests[0]
         self.assertTrue(req["path"].endswith("/msglist"))
         # 目标 uin 必须是我们问的那个人，不是登录账号
-        self.assertEqual(req["query"]["uin"], "3190568934")
-        self.assertEqual(req["query"]["hostUin"], "3190568934")
+        self.assertEqual(req["query"]["uin"], "10001")
+        self.assertEqual(req["query"]["hostUin"], "10001")
         self.assertEqual(req["query"]["pos"], "0")
         self.assertEqual(req["query"]["num"], "5")
         self.assertEqual(req["query"]["format"], "json")
-        self.assertIn(f"user.qzone.qq.com/3190568934", req["headers"].get("referer", ""))
+        self.assertIn(f"user.qzone.qq.com/10001", req["headers"].get("referer", ""))
         self.assertIn("skey=abc", req["headers"].get("cookie", ""))
 
     def test_user_feeds_paging(self):

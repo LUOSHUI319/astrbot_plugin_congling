@@ -1691,7 +1691,7 @@ async function renderSystem() {
         </div>
         <div class="field" style="margin-bottom:16px">
           <label>插件额外管理员（一行一个 QQ 号）</label>
-          <textarea id="adm-extra" placeholder="3190568934" style="min-height:70px">${esc(
+          <textarea id="adm-extra" placeholder="123456789" style="min-height:70px">${esc(
             (admins.extra || []).join("\n")
           )}</textarea>
           <div class="hint">只补额外的人，AstrBot 名单里的自动算</div>

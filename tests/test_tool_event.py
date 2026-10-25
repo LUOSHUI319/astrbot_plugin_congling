@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from astrbot_plugin_congling.capability.tool import CapabilityTool
 from astrbot_plugin_congling.qqext.targets import TargetResolver
 
-SENDER = 3190568934
+SENDER = 10001
 
 
 class FakeAt:
@@ -120,8 +120,8 @@ class TestSessionId(unittest.TestCase):
         self.assertEqual(self._sid(event), "123456")
 
     def test_private_chat_uses_umo(self):
-        event = FakeEvent(sender=SENDER, group=None, umo="aiocqhttp:FriendMessage:3190568934")
-        self.assertEqual(self._sid(event), "aiocqhttp:FriendMessage:3190568934")
+        event = FakeEvent(sender=SENDER, group=None, umo="aiocqhttp:FriendMessage:10001")
+        self.assertEqual(self._sid(event), "aiocqhttp:FriendMessage:10001")
 
     def test_empty_group_does_not_swallow_umo(self):
         # 私聊时 get_group_id 返回空串/None，不能被当成有效群号

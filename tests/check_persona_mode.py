@@ -42,7 +42,7 @@ class FakeContext:
 
 class FakeEvent:
     def get_sender_id(self):
-        return "3190568934"
+        return "10001"
 
     def get_group_id(self):
         return None

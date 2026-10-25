@@ -13,8 +13,8 @@ from astrbot_plugin_congling.core.config import Config
 from astrbot_plugin_congling.main import ConglingPlugin
 from astrbot_plugin_congling.qqext.targets import Resolution, TargetResolver
 
-SENDER = 3190568934
-FRIEND = 3404044656
+SENDER = 10001
+FRIEND = 10086
 OTHER = 10001
 
 
@@ -177,7 +177,7 @@ class FakeRoleEvent(FakeEvent):
 
 class TestAdminRules(unittest.TestCase):
     def test_astrbot_admin_recognized(self):
-        fake_self = make_plugin_self(["3190568934"])
+        fake_self = make_plugin_self(["10001"])
         self.assertTrue(ConglingPlugin.is_admin(fake_self, FakeRoleEvent(SENDER)))
 
     def test_extra_admin_recognized(self):
@@ -185,7 +185,7 @@ class TestAdminRules(unittest.TestCase):
         self.assertTrue(ConglingPlugin.is_admin(fake_self, FakeRoleEvent(OTHER)))
 
     def test_regular_user_rejected(self):
-        fake_self = make_plugin_self(["3190568934"])
+        fake_self = make_plugin_self(["10001"])
         self.assertFalse(ConglingPlugin.is_admin(fake_self, FakeRoleEvent(OTHER)))
 
     def test_group_admin_ignored_by_default(self):
@@ -206,8 +206,8 @@ class TestAdminRules(unittest.TestCase):
         self.assertFalse(ConglingPlugin.is_admin(fake_self, FakeRoleEvent(OTHER)))
 
     def test_union_dedup(self):
-        fake_self = make_plugin_self(["3190568934"], extra=["3190568934", "10001"])
-        self.assertEqual(ConglingPlugin.admin_ids(fake_self), ["3190568934", "10001"])
+        fake_self = make_plugin_self(["10001"], extra=["10001", "10001"])
+        self.assertEqual(ConglingPlugin.admin_ids(fake_self), ["10001", "10001"])
 
 
 if __name__ == "__main__":
