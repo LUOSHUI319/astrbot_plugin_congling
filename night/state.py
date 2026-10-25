@@ -327,6 +327,9 @@ class NightService:
             "dream_on": self.config.bool("night.dream_enabled", False),
             "crawl_on": self.config.bool("night.crawl_enabled", True),
             "allow_sleep": self.config.bool("night.allow_sleep", True),
+            "noon_nap_minutes": max(10, min(180, self.config.int("night.noon_nap_minutes", 60))),
+            "noon_nap_jitter": max(0, min(60, self.config.int("night.noon_nap_jitter_minutes", 15))),
+            "sleep_kind": getattr(self, "_last_sleep_kind", "night"),
         }
         if state.is_asleep():
             data["sleep_at"] = state.sleep_at

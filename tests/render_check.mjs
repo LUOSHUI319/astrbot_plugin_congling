@@ -124,6 +124,16 @@ async function main() {
   if (summary.persona.rows > 6) problems.push("人格页核心项过多，不够简洁");
   if (results.overview.includes("模型能力")) problems.push("概览页还在显示模型能力块");
   if (!results.system.includes("MiniMax 多模态工具")) problems.push("系统页没有 mmx 工具状态");
+  if (!results.overview.includes("group-banner")) problems.push("概览页缺少官方群横幅");
+  if (!results.overview.includes("577084969")) problems.push("概览页没有显示官方群号");
+
+  // 长夜设置页：午睡时长必须能调，否则下午睡下去还是算到第二天
+  const appSrc = await import("node:fs").then((fs) =>
+    fs.readFileSync(new URL("../pages/fromling/app.js", import.meta.url), "utf-8")
+  );
+  if (!/noon_nap_minutes/.test(appSrc)) problems.push("长夜设置页缺少午睡时长");
+  if (!/noon_nap_jitter_minutes/.test(appSrc)) problems.push("长夜设置页缺少午睡浮动");
+  if (!/infoRow\("午睡时长"/.test(appSrc)) problems.push("睡眠页没有显示午睡时长");
 
   console.log("\n=== 人格页联动 ===");
   const personaBody = byId("persona-body");

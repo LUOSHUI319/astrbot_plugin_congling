@@ -2775,3 +2775,76 @@ html[data-theme="dark"] .brand-mark {
   border-color: var(--accent-line);
   color: var(--accent);
 }
+
+/* ---------------------------------------------------------------- 官方群 */
+.group-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 10px 11px;
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: border-color .15s, transform .1s, background .15s;
+}
+.group-card:hover { border-color: var(--accent); }
+.group-card:active { transform: scale(.985); }
+.group-card-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+.group-card-num {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.group-card-hint {
+  font-size: 10.5px;
+  color: var(--ink-soft);
+}
+.group-card.is-copied .group-card-hint { color: var(--accent); }
+
+.group-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  padding: 14px 18px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 9px;
+}
+.group-banner-main { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.group-banner-label { font-size: 12px; letter-spacing: 0.1em; color: var(--ink-soft); }
+.group-banner-num {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink);
+}
+.group-banner-desc { font-size: 12px; color: var(--ink-soft); }
+.group-banner-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 14px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.group-banner-btn:hover { background: var(--accent); color: #fff; }

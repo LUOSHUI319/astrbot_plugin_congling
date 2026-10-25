@@ -491,7 +491,8 @@ function nightSleepPage(state) {
       ${infoRow("夜间疲劳", s.night_fatigue || "—", "这个时段里精力往下掉")}
       ${infoRow("午间疲劳", s.noon_fatigue || "—")}
       ${infoRow("最晚睡觉", s.latest_sleep_time || "—", "到点无论如何都睡")}
-      ${infoRow("起床点", `${s.wake_time || "08:00"} ± ${s.wake_jitter || 0} 分钟`)}
+      ${infoRow("夜间起床点", `${s.wake_time || "08:00"} ± ${s.wake_jitter || 0} 分钟`, "只影响夜里那一觉")}
+      ${infoRow("午睡时长", `${s.noon_nap_minutes || 60} ± ${s.noon_nap_jitter || 0} 分钟`, "午睡按这个算，不跟夜间起床点")}
       ${infoRow("唤醒档位", s.wake_mode === "both" ? "私聊和群聊都能叫" : s.wake_mode === "never" ? "叫不醒" : "只在私聊里能叫", s.wake_window ? `叫醒窗口 ${s.wake_window}` : "")}
       ${infoRow("睡前道别", s.farewell_on ? "会道别" : "不说，直接睡")}
       ${infoRow("做梦", s.dream_on ? "开着" : "关着")}
@@ -648,7 +649,8 @@ function nightSettingsPage(settings) {
     <div class="settings-intro">所有开关和参数都在这一页，改完点下面的保存。</div>
     ${nightCard("总开关", "关掉之后它就不知道累，也不会自己睡", sliceItems(night, ["enabled"]))}
     ${nightCard("疲劳时段", "这两个时段里它会犯困、精力往下掉", sliceItems(night, ["noon_fatigue", "night_fatigue", "latest_sleep_time"]))}
-    ${nightCard("起床", "固定起床点上下浮动，浮动上限 90 分钟", sliceItems(night, ["wake_time", "wake_jitter_minutes"]))}
+    ${nightCard("起床", "夜里睡醒了在固定点上下浮动，浮动上限 90 分钟", sliceItems(night, ["wake_time", "wake_jitter_minutes"]))}
+    ${nightCard("午睡", "午睡按固定时长算，不跟夜里那个起床点走", sliceItems(night, ["noon_nap_minutes", "noon_nap_jitter_minutes"]))}
     ${nightCard("唤醒", "睡着之后有多难叫醒。y 到 y+n 之间概率平分 100%", sliceItems(night, ["wake_mode", "wake_window_minutes", "wake_start_count", "wake_step_count"]))}
     ${nightCard("入睡前的道别", "多个会话一起道别时，要不要说同一句", sliceItems(night, ["farewell_before_sleep", "farewell_same", "farewell_random", "farewell_use_llm"]))}
     ${nightCard("精力", "疲劳期里怎么掉、平时怎么回", sliceItems(night, [...NIGHT_ENERGY_KEYS, "min_turns_before_sleep"]))}
@@ -982,6 +984,15 @@ async function renderOverview() {
   personaTag.textContent = `${data.health.persona.name} · ${data.health.persona.id}`;
 
   view.innerHTML = `
+    <div class="group-banner">
+      <div class="group-banner-main">
+        <span class="group-banner-label">官方交流群</span>
+        <span class="group-banner-num">577084969</span>
+        <span class="group-banner-desc">用着有问题、想提需求、想看更新，都来群里说</span>
+      </div>
+      <button class="group-banner-btn" id="group-copy" type="button">复制群号</button>
+    </div>
+
     <div class="grid-stats">
       <div class="stat"><div class="num">${esc(data.memory_active)}</div><div class="lbl">活跃记忆</div></div>
       <div class="stat"><div class="num">${esc(stats.msg_archive || 0)}</div><div class="lbl">归档消息</div></div>
@@ -1793,7 +1804,77 @@ try {
   /* 外观起不来不影响主流程 */
 }
 
+/* 官方群：点一下把群号复制走 */
+const GROUP_NO = "577084969";
+
+async function copyGroupNo(btn) {
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(GROUP_NO);
+    ok = true;
+  } catch (err) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = GROUP_NO;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (err2) {
+      ok = false;
+    }
+  }
+  if (btn) {
+    const old = btn.textContent;
+    btn.textContent = ok ? "已复制" : GROUP_NO;
+    setTimeout(() => { btn.textContent = old; }, 2000);
+  }
+  return ok;
+}
+function bindGroupCard() {
+  const card = document.getElementById("group-card");
+  if (!card) return;
+  card.addEventListener("click", async () => {
+    const hint = card.querySelector(".group-card-hint");
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(GROUP_NO);
+      ok = true;
+    } catch (err) {
+      // 没权限（比如不在 https / 被 iframe 策略拦了）就退到老办法
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = GROUP_NO;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch (err2) {
+        ok = false;
+      }
+    }
+    if (hint) {
+      hint.textContent = ok ? `已复制 ${GROUP_NO}` : `群号 ${GROUP_NO}`;
+    }
+    card.classList.toggle("is-copied", ok);
+    setTimeout(() => {
+      if (hint) hint.textContent = "有问题来群里喊";
+      card.classList.remove("is-copied");
+    }, 2200);
+  });
+}
+
+view.addEventListener("click", (ev) => {
+  const btn = ev.target.closest && ev.target.closest("#group-copy");
+  if (btn) copyGroupNo(btn);
+});
+
 (async function boot() {
+  bindGroupCard();
   try {
     await ensureBridge();
   } catch (err) {
