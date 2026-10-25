@@ -753,7 +753,9 @@ class PageApi:
             if night is None:
                 return _err("长夜如梦没有启用")
             body = await _body()
-            kind = str(body.get("kind") or "night")
+            # 不传 kind 时交给 sleep_now 按当前时段自己判断，
+            # 否则下午在面板上点「睡」会按夜里那套算到第二天早上
+            kind = str(body.get("kind") or "") or None
             await night.state.sleep_now(reason="manual", kind=kind)
             return _ok(night.snapshot())
         except Exception as exc:

@@ -734,7 +734,9 @@ async function renderNight() {
     sleepBtn.onclick = async () => {
       sleepBtn.disabled = true;
       try {
-        await post("/night/sleep", { kind: "night" });
+        // 不传 kind：让后端按当前时段判断是午睡还是夜里睡，
+        // 写死 night 的话下午点一下会一路睡到第二天早上
+        await post("/night/sleep", {});
         await renderNight();
       } catch (err) {
         alert(err.message || "入睡失败");

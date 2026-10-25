@@ -111,7 +111,7 @@ class NightModule:
         self.pending_sleep = None
         self.morning_dream = None
         try:
-            await self.state.sleep_now(reason=pending.get("reason", "talk"), kind=pending.get("kind", "night"))
+            await self.state.sleep_now(reason=pending.get("reason", "talk"), kind=pending.get("kind") or None)
             logger.info(
                 f"[congling] 入睡：{pending.get('reason')} "
                 f"（{pending.get('word') or '精力耗尽'}）"
