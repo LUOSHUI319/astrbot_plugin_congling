@@ -152,14 +152,24 @@ function unwrap(resp) {
   return resp;
 }
 
+function apiPath(path) {
+  // AstrBot 新版的 bridge 走 /api/v1/plugins/extensions/{插件名}/{endpoint}，
+  // 而插件的 web api 一律注册在 /{插件名}/page/... 下面。
+  // endpoint 少这一层 page 就会 404，前端 catch 成空对象，
+  // 表现出来就是「设置能存但状态永远是关的」。
+  let p = String(path == null ? "" : path).replace(/^\/+/, "");
+  if (!p.startsWith("page/")) p = `page/${p}`;
+  return p;
+}
+
 async function get(path, params) {
   const api = await ensureBridge();
-  return unwrap(await api.apiGet(path, params || {}));
+  return unwrap(await api.apiGet(apiPath(path), params || {}));
 }
 
 async function post(path, body) {
   const api = await ensureBridge();
-  return unwrap(await api.apiPost(path, body || {}));
+  return unwrap(await api.apiPost(apiPath(path), body || {}));
 }
 
 /* ------------------------------------------------------------------ 工具 */
@@ -486,6 +496,7 @@ function nightSleepPage(state) {
       ${infoRow("睡前道别", s.farewell_on ? "会道别" : "不说，直接睡")}
       ${infoRow("做梦", s.dream_on ? "开着" : "关着")}
       ${infoRow("爬楼", s.crawl_on ? "开着" : "关着")}
+      ${infoRow("真的会睡", s.allow_sleep === false ? "不会，只是累" : "会", s.allow_sleep === false ? "「设置」里关掉了允许入睡" : "")}
     </div>
     ${!enabled ? '<div class="night-empty">长夜如梦没开，这些设置都不生效</div>' : ""}
     <div class="info-bar">

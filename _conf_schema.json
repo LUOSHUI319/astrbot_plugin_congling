@@ -569,6 +569,12 @@
         "type": "bool",
         "default": false
       },
+      "allow_sleep": {
+        "type": "bool",
+        "description": "允许真正入睡",
+        "hint": "关掉之后照样算精力、照样累，但永远不会睡过去，也不会拦消息。想聊天的时候关掉它。",
+        "default": true
+      },
       "noon_fatigue": {
         "description": "午间疲劳期",
         "hint": "格式 HH:MM-HH:MM，留空表示没有午间疲劳",

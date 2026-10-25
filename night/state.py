@@ -229,7 +229,16 @@ class NightService:
         }
 
     # ================================================================ 睡 / 醒
-    async def _do_sleep(self, *, reason: str, kind: str = "night") -> None:
+    async def _do_sleep(self, *, reason: str, kind: str = "night", force: bool = False) -> None:
+        # allow_sleep 关掉时只算精力、不真的睡：想聊天的时候把它关掉就行
+        # force=True 来自手动点的「睡」，不受这个开关影响
+        if not force and not self.config.bool("night.allow_sleep", True):
+            self.state.energy = max(
+                self.state.energy,
+                self.config.float("night.energy_after_wake", 35.0),
+            )
+            logger.info(f"[congling] 长夜如梦：allow_sleep 关闭，跳过入睡（本来原因={reason}）")
+            return
         now = time.time()
         self.state.mode = NIGHT_ASLEEP
         self.state.sleep_at = int(now)
@@ -265,7 +274,7 @@ class NightService:
 
     async def sleep_now(self, *, reason: str = "manual", kind: str = "night") -> None:
         """外部调用（面板/指令）强制入睡。"""
-        await self._do_sleep(reason=reason, kind=kind)
+        await self._do_sleep(reason=reason, kind=kind, force=True)
 
     async def wake_now(self, *, reason: str = "manual") -> None:
         """外部调用强制唤醒。"""
@@ -308,6 +317,7 @@ class NightService:
             "farewell_on": self.config.bool("night.farewell_before_sleep", True),
             "dream_on": self.config.bool("night.dream_enabled", False),
             "crawl_on": self.config.bool("night.crawl_enabled", True),
+            "allow_sleep": self.config.bool("night.allow_sleep", True),
         }
         if state.is_asleep():
             data["sleep_at"] = state.sleep_at
