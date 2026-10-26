@@ -26,11 +26,12 @@ from .core.config import Config
 from .core.contracts import Persona
 from .core.guard import OutputGuard
 from .core.log import DecisionLogger
+from .core.prompt_parts import add_temp_part
 from .core.probe import Probe
 from .core.rhythm import RhythmController
 from .core.store import Store
 
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.1"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -467,13 +468,11 @@ class ConglingPlugin(Star):
             if self.night is not None:
                 hint = self.night.prompt_hint()
                 if hint:
-                    current = getattr(req, "system_prompt", "") or ""
-                    setattr(req, "system_prompt", f"{current}\n\n{hint}".strip())
+                    add_temp_part(req, hint, "<!--congling:night-->")
             if self.qqext is not None:
                 avatar_hint = self.qqext.avatar_hint()
                 if avatar_hint:
-                    current = getattr(req, "system_prompt", "") or ""
-                    setattr(req, "system_prompt", f"{current}\n\n{avatar_hint}".strip())
+                    add_temp_part(req, avatar_hint, "<!--congling:avatar-->")
             if self.capabilities is not None:
                 self.capabilities.attach_tools(req)
         except Exception as exc:

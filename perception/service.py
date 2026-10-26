@@ -16,6 +16,8 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core.prompt_parts import add_temp_part
+
 from ..core.contracts import Block, PerceivedMessage
 from .card import parse_card
 from .forward import ForwardExpander, segments_to_text
@@ -133,9 +135,6 @@ class PerceptionService:
         await self.archive(msg)
 
         marker = f"{MARKER_PREFIX}{msg.msg_id}-->"
-        existing = getattr(req, "system_prompt", "") or ""
-        if marker in existing:
-            return
 
         sections = self._prompt_sections(msg)
         recent = await self._recent_context(msg)
@@ -147,13 +146,14 @@ class PerceptionService:
         if not sections:
             return
 
+        # 走临时内容块：system_prompt 保持不动，前缀缓存才不会被 msg_id 打散
         block = (
-            f"\n\n{marker}\n"
+            f"{marker}\n"
             "【消息解析补充 · 以下内容由系统自动展开，不是用户原话】\n"
             + "\n".join(sections)
             + "\n【补充结束】"
         )
-        req.system_prompt = existing + block
+        add_temp_part(req, block, marker)
 
     def _prompt_sections(self, msg: PerceivedMessage) -> list[str]:
         sections: list[str] = []

@@ -1,3 +1,52 @@
+# 0.6.1 · 2026-10-26
+
+审核整改：这一版只动 prompt 注入方式和日志，回复行为不变。
+
+## 整改 · 前缀缓存（不予上架项）
+
+**问题**：`on_llm_request` 里直接改写 `req.system_prompt`，注入的却是每轮都在变的内容——
+召回的长期记忆、当前消息的解析补充、长夜状态与头像提示。system prompt 每轮都不一样，
+厂商按前缀做的 prompt cache 全废，等于每轮全价重算。
+
+**改法**：新增 `core/prompt_parts.py`，动态内容一律走 `req.extra_user_content_parts` +
+`mark_as_temp()`，system prompt 保持一字不动。
+
+| 注入点 | 原来 | 现在 |
+|---|---|---|
+| `memory/service.py` 长期记忆 | 拼进 system_prompt，带 `<!--congling:memory-->` 判重 | `add_temp_part(req, block, MARKER)` |
+| `perception/service.py` 消息解析补充 | 以 `msg_id` 为 marker 逐条往 system_prompt 追加 | `add_temp_part(req, block, marker)` |
+| `main.py` 长夜 hint / 头像 hint | 两次字符串拼接写回 system_prompt | `add_temp_part()`，marker `<!--congling:night-->` / `<!--congling:avatar-->` |
+
+- 幂等仍在：同 marker 已存在就替换那一块，tool loop 重入不会叠加三份
+- 静态人设（`humanize/persona.py`）继续留在 system_prompt——它每轮内容一致，且有
+  `<!--congling:persona-->` 判重只写一次，不影响缓存
+- 新增退路 `append_user_pair()`：确实拿不到 `extra_user_content_parts` 的环境，
+  改成往 `req.contexts` 追加一对消息，不再回落到改 system_prompt
+
+## 整改 · 日志规范
+
+`night_selftest.py` 原来 `import logging` 并自建 `getLogger`，违反「日志只能走
+`astrbot.api.logger`」。改成文件内自带一个最小 `_ShimLogger`（只把消息打到 stdout），
+整个插件现在没有任何标准库 logging 的引用。顺带把这脚本里硬编码的绝对路径改成
+`os.path.dirname(__file__)` 推导。
+
+## 新增校验
+
+`tests/check_prompt_cache.py`，四组断言：
+
+1. `core.prompt_parts` 行为：system_prompt 不变、内容进 temp 块、marker 可查、同 marker 幂等、空内容不注入
+2. 注入点源码扫描：`memory/service.py`、`perception/service.py`、`main.py`、`night/state.py`、`qqext/avatar.py` 里不许再出现 `req.system_prompt` / `setattr(req, "system_prompt")`，且必须接入 `add_temp_part`
+3. 人设注入仍然幂等
+4. 全插件（含 tests、脚本）不许 `import logging`
+
+跑法：`python tests/check_prompt_cache.py`，当前 15 项全过。
+
+## 关于 0.4.2 那条 changelog
+
+v0.4.2 里写的「已改为 `extra_user_content_parts` + `mark_as_temp()`，新增
+`core/prompt_parts.py` 与 `tests/check_prompt_cache.py`」当时并没有落地，代码里从来没出现过
+`extra_user_content_parts`。这次是真落地了，上面两个文件现在都在仓库里。
+
 # 0.6.0 · 2026-10-26
 
 这一版只动界面和面板接口，回复逻辑、记忆判定、长夜状态机一行没改。

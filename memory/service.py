@@ -18,6 +18,8 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core.prompt_parts import add_temp_part
+
 from ..core.budget import BudgetSlice
 from ..core.contracts import MemoryDraft, MemoryHit, PerceivedMessage
 from .affinity import Affinity
@@ -296,19 +298,15 @@ class MemoryService:
         content = "\n".join(part for part in [*extras, body] if part).strip()
         if not content:
             return
+        # 动态内容一律走 extra_user_content_parts，绝不碰 system_prompt：
+        # system_prompt 每轮都变的话，厂商的 prefix cache 直接失效，全价重算。
         block = (
-            f"\n\n{MARKER}\n"
+            f"{MARKER}\n"
             "【长期记忆 · 仅供参考；与当前对话冲突时以当前对话为准】\n"
             f"{content}\n"
             "【记忆结束】"
         )
-        existing = getattr(req, "system_prompt", "") or ""
-        if MARKER in existing:
-            # 已经注入过：替换旧块，避免叠加
-            head = existing.split(MARKER)[0]
-            req.system_prompt = head + block
-        else:
-            req.system_prompt = existing + block
+        add_temp_part(req, block, MARKER)
 
         kept_names = {item.name for item in packed.kept} if packed is not None else set()
         hit_ids = [hit.atom_id for hit in hits if f"hit:{hit.atom_id}" in kept_names]

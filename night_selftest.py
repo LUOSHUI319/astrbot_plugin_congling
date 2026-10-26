@@ -8,22 +8,55 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import logging
 import os
 import sys
 import time
 import types
+from typing import Any
 
-BASE = r"E:\BotLauncher\AstrBot\AstrBot\data\plugins\astrbot_plugin_congling"
+BASE = os.path.dirname(os.path.abspath(__file__))
 
 
 # ---------------------------------------------------------------- 环境准备
+class _ShimLogger:
+    """离线自检用的最小 logger。
+
+    不 import 标准库 logging：插件规范要求日志一律走 astrbot.api.logger，
+    自检脚本也不破这个规矩——这里只把消息打到 stdout。
+    """
+
+    def _emit(self, level: str, msg: Any, *args: Any) -> None:
+        text = str(msg)
+        if args:
+            try:
+                text = text % args
+            except Exception:
+                text = f"{text} {' '.join(str(a) for a in args)}"
+        print(f"[{level}] {text}")
+
+    def debug(self, msg: Any, *args: Any) -> None:
+        pass
+
+    def info(self, msg: Any, *args: Any) -> None:
+        self._emit("info", msg, *args)
+
+    def warning(self, msg: Any, *args: Any) -> None:
+        self._emit("warn", msg, *args)
+
+    warn = warning
+
+    def error(self, msg: Any, *args: Any) -> None:
+        self._emit("error", msg, *args)
+
+    def exception(self, msg: Any, *args: Any) -> None:
+        self._emit("error", msg, *args)
+
+
 def _mock_astrbot() -> None:
     astrbot = types.ModuleType("astrbot")
     sys.modules["astrbot"] = astrbot
     api = types.ModuleType("astrbot.api")
-    api.logger = logging.getLogger("night.selftest")
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    api.logger = _ShimLogger()
     astrbot.api = api
     sys.modules["astrbot.api"] = api
 
