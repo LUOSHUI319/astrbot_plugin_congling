@@ -36,6 +36,26 @@ SKIP = {
     "qzone_publish",
     "models_probe",
     "qzone_auth",
+    # 0.5.0 新增：都靠请求体传参，脚本里没有 HTTP 上下文
+    "memory_levels_save",
+    "memory_set_level",
+    "memory_forgetting_save",
+    "memory_profile_build",
+    "memory_profile_save",
+    "memory_profile_delete",
+    "memory_profile_unblock",
+    "profile_save_config",
+    "affinity_save",
+    "affinity_save_config",
+    "avatar_set",
+    "avatar_pool_save",
+    "memory_subject_detail",
+    # 老接口同样靠请求体，之前一直漏在 SKIP 外面
+    "night_sleep",
+    "night_wake",
+    "night_dream_delete",
+    "night_dream_pin",
+    "night_crawl",
 }
 """这些 handler 依请求体或 query（astrbot.api.web.request），
 在无 HTTP 上下文的脚本里调不通；它们的异常兜底已经由 _err 覆盖。"""

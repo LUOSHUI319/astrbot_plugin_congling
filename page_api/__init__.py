@@ -17,6 +17,8 @@ from astrbot.api import logger
 from astrbot.api.web import request
 
 from ..core import paths
+from .memory_m3 import MemoryM3Mixin
+from .memory_v2 import MemoryV2Mixin
 
 PAGE_API_PREFIX = "/astrbot_plugin_congling/page"
 """必须与 metadata.yaml 的 name 完全一致。
@@ -221,7 +223,7 @@ def _schema_groups(config: Any) -> list[dict[str, Any]]:
     return groups
 
 
-class PageApi:
+class PageApi(MemoryM3Mixin, MemoryV2Mixin):
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self.cfg = plugin.cfg
@@ -288,6 +290,31 @@ class PageApi:
             ("/night/dream/pin", self.night_dream_pin, ["POST"]),
             ("/night/unread", self.night_unread, ["GET"]),
             ("/night/crawl", self.night_crawl, ["POST"]),
+            # ---- 0.5.0 记忆 2.0
+            ("/memory/levels", self.memory_levels, ["GET"]),
+            ("/memory/levels/save", self.memory_levels_save, ["POST"]),
+            ("/memory/level/set", self.memory_set_level, ["POST"]),
+            ("/memory/forgetting", self.memory_forgetting, ["GET"]),
+            ("/memory/forgetting/save", self.memory_forgetting_save, ["POST"]),
+            ("/memory/subjects", self.memory_subjects, ["GET"]),
+            # ---- 0.6.0 记忆三板块
+            ("/memory/m3/overview", self.memory_m3_overview, ["GET"]),
+            ("/memory/sessions", self.memory_sessions, ["GET"]),
+            ("/memory/session", self.memory_session_detail, ["GET"]),
+            ("/memory/subject", self.memory_subject_detail, ["GET"]),
+            ("/memory/profile/build", self.memory_profile_build, ["POST"]),
+            ("/memory/profile/save", self.memory_profile_save, ["POST"]),
+            ("/memory/profile/delete", self.memory_profile_delete, ["POST"]),
+            ("/memory/profile/unblock", self.memory_profile_unblock, ["POST"]),
+            ("/memory/profile/config", self.profile_save_config, ["POST"]),
+            ("/affinity", self.affinity_get, ["GET"]),
+            ("/affinity/save", self.affinity_save, ["POST"]),
+            ("/affinity/config", self.affinity_save_config, ["POST"]),
+            ("/affinity/settle", self.affinity_settle, ["POST"]),
+            # ---- 0.5.0 头像
+            ("/avatar", self.avatar_state, ["GET"]),
+            ("/avatar/set", self.avatar_set, ["POST"]),
+            ("/avatar/pool", self.avatar_pool_save, ["POST"]),
         ]
         for path, handler, methods in routes:
             try:

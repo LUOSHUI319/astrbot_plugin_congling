@@ -11,7 +11,10 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .avatar import AvatarService
+from .avatar_pool import AvatarPool
 from .qzone import QzoneBridge
+from .qzone_daily import QzoneDaily
 
 
 class QQExt:
@@ -19,6 +22,9 @@ class QQExt:
         self.plugin = plugin
         self.config = plugin.cfg
         self.qzone = QzoneBridge(plugin)
+        self.qzone_daily = QzoneDaily(plugin)
+        self.avatar = AvatarService(plugin)
+        self.avatar_pool = AvatarPool(plugin)
         self._last_poke: dict[str, float] = {}
 
     # ================================================================ 底层
@@ -136,4 +142,27 @@ class QQExt:
             "signature_write": self.config.bool("qq_extra.signature_auto_update", False),
             "poke": self.config.bool("qq_extra.poke_enabled", True),
             "profile_card": self.config.bool("qq_extra.profile_card_enabled", True),
+            "avatar": await self._avatar_state(),
         }
+
+    # ================================================================ 头像
+    def avatar_hint(self) -> str:
+        """给提示词的一段「换头像须知」。写短点，别占太多上下文。"""
+        if not self.config.bool("qq_extra.avatar_allow_user_request", True):
+            return ""
+        return (
+            "【换头像】用户让你换、或赶上换季节日生日时可以换。图优先用用户刚发的那张，"
+            "其次用头像库里用户允许过的（工具 avatar.change，参数 image_path 或 pool_id）。"
+            "库里没有允许过的图就直说，不许自己上网找图。主动换一天最多一次。"
+            "换不上就说人话让对方自己在手机上换，别报接口名。"
+        )
+
+    async def _avatar_state(self) -> dict[str, Any]:
+        try:
+            state = await self.avatar.state()
+            pool = await self.avatar_pool.state()
+            state["trusted"] = pool.get("trusted", 0)
+            state["pending"] = len(pool.get("pending") or [])
+            return state
+        except Exception as exc:
+            return {"available": False, "reason": repr(exc)[:120]}

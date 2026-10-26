@@ -56,6 +56,11 @@ def db_path() -> Path:
     return data_dir() / "congling.db"
 
 
+def avatar_dir() -> Path:
+    """头像库目录：用户上传的原图存在这里。"""
+    return _sub("avatar")
+
+
 def plugin_root() -> Path:
     return Path(__file__).resolve().parent.parent
 

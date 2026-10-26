@@ -401,6 +401,29 @@ def build_builtin(plugin: Any) -> list[Capability]:
             fallback="空间这会儿读不出来",
         ),
         Capability(
+            name="avatar.change",
+            description=(
+                "换掉自己的 QQ 头像。图片优先用用户刚发的那张（image_path 传路径），"
+                "或者说 pool_id 用头像库里第几张，传 pool_id=0 表示从库里随便挑一张能用的。"
+                "只有用户明确要求换头像、或你自己觉得该换个脸时才用，一天最多一次。"
+            ),
+            group="qzone",
+            auth="admin",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "本地图片路径，用户刚发的那张"},
+                    "pool_id": {"type": "integer", "description": "头像库里的编号，0 表示从库里随机挑"},
+                },
+            },
+            handler=lambda image_path="", pool_id=0: avatar_change(
+                plugin, image_path=image_path, pool_id=pool_id
+            ),
+            timeout=30.0,
+            cache_ttl=0,
+            fallback="头像没换成",
+        ),
+        Capability(
             name="qzone.publish",
             description="发一条 QQ 空间说说。只有用户明确让你发的时候才用，不要自己决定发。",
             group="qzone",
@@ -432,3 +455,45 @@ def build_builtin(plugin: Any) -> list[Capability]:
             timeout=20.0,
         ),
     ]
+
+
+# --------------------------------------------------------------------- 头像
+async def avatar_change(plugin: Any, *, image_path: str = "", pool_id: int = 0) -> dict[str, Any]:
+    """换头像：指定图片 > 指定库内编号 > 从库里随便挑。
+
+    规矩是从需求里来的：自动换只能用用户允许过的图，所以这里不联网找图。
+    """
+    ext = getattr(plugin, "qqext", None)
+    avatar = getattr(ext, "avatar", None) if ext is not None else None
+    pool = getattr(ext, "avatar_pool", None) if ext is not None else None
+    if avatar is None:
+        return {"text": "头像功能还没准备好", "data": {"ok": False}}
+
+    path = str(image_path or "").strip()
+    try:
+        wanted = int(pool_id or 0)
+    except (TypeError, ValueError):
+        wanted = 0
+
+    if path:
+        result = await avatar.set_from_file(path, reason="user")
+    elif wanted and pool is not None:
+        item = await pool.get(wanted)
+        if not item:
+            return {"text": "头像库里没有这一张", "data": {"ok": False}}
+        result = await avatar.set_from_file(str(item.get("path") or ""), reason="user")
+        if result.get("ok"):
+            await pool.mark_used(wanted)
+    elif pool is not None:
+        item = await pool.pick()
+        if not item:
+            return {"text": "头像库里还没有能用的图，先存几张进去", "data": {"ok": False}}
+        result = await avatar.set_from_file(str(item.get("path") or ""), reason="auto")
+        if result.get("ok"):
+            await pool.mark_used(int(item.get("id") or 0))
+    else:
+        return {"text": "头像库没就绪", "data": {"ok": False}}
+
+    if not result.get("ok"):
+        return {"text": f"换不上，{result.get('reason') or '通道可能不支持'}", "data": result}
+    return {"text": "头像换好了", "data": result}

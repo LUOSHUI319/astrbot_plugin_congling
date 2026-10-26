@@ -19,7 +19,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = [
     """
@@ -159,6 +159,78 @@ _SCHEMA = [
         updated_at INTEGER
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS mem_subject(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        persona_id TEXT DEFAULT 'ling',
+        user_id TEXT DEFAULT '',
+        display_name TEXT DEFAULT '',
+        aliases TEXT DEFAULT '[]',
+        confidence REAL DEFAULT 0.5,
+        source TEXT DEFAULT 'inferred',
+        note TEXT DEFAULT '',
+        first_seen_at INTEGER,
+        last_seen_at INTEGER,
+        msg_count INTEGER DEFAULT 0
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_subject_user ON mem_subject(persona_id, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_subject_name ON mem_subject(persona_id, display_name)",
+    """
+    CREATE TABLE IF NOT EXISTS mem_atom_tag(
+        atom_id INTEGER NOT NULL,
+        subject_key TEXT NOT NULL,
+        role TEXT DEFAULT 'subject',
+        created_at INTEGER,
+        PRIMARY KEY(atom_id, subject_key)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tag_subject ON mem_atom_tag(subject_key)",
+    """
+    CREATE TABLE IF NOT EXISTS mem_profile(
+        persona_id TEXT DEFAULT 'ling',
+        subject_key TEXT NOT NULL,
+        fields TEXT DEFAULT '{}',
+        keywords TEXT DEFAULT '[]',
+        summary TEXT DEFAULT '',
+        source_atom_ids TEXT DEFAULT '[]',
+        updated_at INTEGER,
+        PRIMARY KEY(persona_id, subject_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS affinity(
+        persona_id TEXT DEFAULT 'ling',
+        subject_key TEXT NOT NULL,
+        score REAL DEFAULT 0,
+        stage INTEGER DEFAULT 0,
+        delta_today REAL DEFAULT 0,
+        floor REAL DEFAULT 0,
+        last_talk_at INTEGER,
+        talk_days_30 INTEGER DEFAULT 0,
+        evidence_atom_ids TEXT DEFAULT '[]',
+        manual INTEGER DEFAULT 0,
+        updated_at INTEGER,
+        PRIMARY KEY(persona_id, subject_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS qq_avatar_pool(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        persona_id TEXT DEFAULT 'ling',
+        path TEXT NOT NULL,
+        sha1 TEXT DEFAULT '',
+        source TEXT DEFAULT 'bot_pending',
+        trusted INTEGER DEFAULT 0,
+        added_by TEXT DEFAULT '',
+        added_at INTEGER,
+        last_used_at INTEGER DEFAULT 0,
+        use_count INTEGER DEFAULT 0,
+        tags TEXT DEFAULT '[]',
+        note TEXT DEFAULT ''
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_avatar_sha ON qq_avatar_pool(persona_id, sha1)",
 ]
 
 
@@ -196,20 +268,59 @@ class Store:
                 ("session_label", "ALTER TABLE mem_atom ADD COLUMN session_label TEXT DEFAULT ''"),
                 ("unread", "ALTER TABLE mem_atom ADD COLUMN unread INTEGER DEFAULT 0"),
                 ("unread_since", "ALTER TABLE mem_atom ADD COLUMN unread_since INTEGER DEFAULT 0"),
+                ("mem_level", "ALTER TABLE mem_atom ADD COLUMN mem_level INTEGER DEFAULT 3"),
+                ("level_reason", "ALTER TABLE mem_atom ADD COLUMN level_reason TEXT DEFAULT ''"),
+                ("level_tags", "ALTER TABLE mem_atom ADD COLUMN level_tags TEXT DEFAULT '[]'"),
+                ("strength", "ALTER TABLE mem_atom ADD COLUMN strength REAL DEFAULT 0.65"),
+                ("next_review_at", "ALTER TABLE mem_atom ADD COLUMN next_review_at INTEGER DEFAULT 0"),
+                ("level_source", "ALTER TABLE mem_atom ADD COLUMN level_source TEXT DEFAULT 'llm'"),
             ):
                 if name not in columns:
                     self._conn.execute(stmt)
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_atom_session ON mem_atom(session_id, created_at)"
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_atom_level ON mem_atom(persona_id, mem_level, status)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_atom_review ON mem_atom(next_review_at)"
+            )
         except Exception as exc:
             logger.debug(f"[congling] mem_atom 补列失败: {exc!r}")
+        if current < 4:
+            self._backfill_levels()
         if current < SCHEMA_VERSION:
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self._conn.commit()
             logger.info(f"[congling] 数据库结构就绪（v{current} → v{SCHEMA_VERSION}）")
         else:
             self._conn.commit()
+
+    def _backfill_levels(self) -> None:
+        """0.4.x → 0.5.0 一次性回填：老记忆没有等级，按 importance 粗分。
+
+        保护过的（protect=1）直接进 0 级不可忘；其余按重要度切四段。
+        只跑一次，靠 PRAGMA user_version 记录。
+        """
+        assert self._conn is not None
+        try:
+            self._conn.execute(
+                "UPDATE mem_atom SET mem_level=0, level_source='migrated' WHERE protect=1"
+            )
+            self._conn.execute(
+                "UPDATE mem_atom SET mem_level=CASE "
+                "WHEN importance<0.4 THEN 2 WHEN importance<0.65 THEN 3 "
+                "WHEN importance<0.85 THEN 4 ELSE 5 END, level_source='migrated' "
+                "WHERE protect=0"
+            )
+            self._conn.execute(
+                "UPDATE mem_atom SET strength=COALESCE(decay,0.65) "
+                "WHERE strength IS NULL OR strength<=0"
+            )
+            logger.info("[congling] 记忆等级回填完成（0.4.x → 0.5.0）")
+        except Exception as exc:
+            logger.warning(f"[congling] 记忆等级回填失败: {exc!r}")
 
     async def open(self) -> None:
         await asyncio.to_thread(self._open_sync)

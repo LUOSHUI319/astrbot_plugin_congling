@@ -94,6 +94,8 @@ class MemoryHit:
     score: float = 0.0
     created_at: int = 0
     decay: float = 1.0
+    level: int = 3
+    strength: float = 0.65
     evidence: list[str] = field(default_factory=list)
     subject_id: str = ""
     scope: str = "user"
@@ -127,6 +129,12 @@ class MemoryDraft:
     session_id: str = ""
     session_kind: str = ""
     session_label: str = ""
+    # 0.5.0：等级由模型给基础档 + 标签压上下限 + 好感度微调，理由要留痕
+    level: int = 3
+    level_reason: str = ""
+    level_tags: list[str] = field(default_factory=list)
+    level_source: str = "llm"  # llm|rule|manual
+    subject_key: str = ""  # 识别库里的主体键（通常是 QQ 号），入 tag 表用
 
 
 # --------------------------------------------------------------------- 节奏

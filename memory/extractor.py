@@ -22,7 +22,7 @@ PROMPT = """你在帮一个聊天机器人整理长期记忆。下面是一段�
 请抽取值得长期记住的信息，输出 JSON 数组，不要输出任何其他文字。
 
 每条记录格式：
-{"kind":"fact|pref|event|promise|relation|emotion","text":"一句完整陈述","subject":"主体","keywords":["词"],"importance":0.0,"confidence":0.0,"time_hint":"","evidence":["消息序号"]}
+{"kind":"fact|pref|event|promise|relation|emotion","text":"一句完整陈述","subject":"主体","keywords":["词"],"importance":0.0,"confidence":0.0,"time_hint":"","evidence":["消息序号"],"level":3,"level_reason":"","level_tags":[]}
 
 规则：
 1. text 必须是一句能独立看懂的话，带主语，不出现"他/那个/上面说的"这类指代
@@ -32,6 +32,9 @@ PROMPT = """你在帮一个聊天机器人整理长期记忆。下面是一段�
 5. kind 含义：fact 客观事实，pref 喜好厌恶，event 发生过的事，promise 承诺或约定，relation 人际关系，emotion 情绪模式
 6. 最多 {max_atoms} 条；没有值得记的就输出 []
 7. 每行开头的名字是说话人。群聊里不同人的话要分开记，事实写清是谁说的（例如"清风说…"），不要一律写成"用户"
+8. level 是这条该记多久：1 随口一句（今天好热、在吗）/ 2 细节小事 / 3 平常事实（工作、爱好、常去的地方）/ 4 在意的事（偏好、雷点、约定、重要日期）/ 5 关键（身份、承诺、创伤、关系里程碑）
+9. level_tags 从这几个里挑，可以多选：identity 身份信息、promise 约定承诺、user_stress 用户强调、taboo 禁区底线、emotion_high 情绪浓度高、routine 日常寒暄、transient 一次性时效、preference 明确喜好、milestone 关系里程碑
+10. level_reason 用一句话写依据，例如「用户说别忘了这件事」「只是随口一问天气」；不要写空话
 
 聊天记录：
 {conversation}
@@ -115,11 +118,23 @@ class MemoryExtractor:
                     confidence=max(0.0, min(1.0, confidence)),
                     time_hint=str(item.get("time_hint") or "")[:40],
                     evidence_msg_ids=[str(x)[:40] for x in (item.get("evidence") or [])][:5],
+                    level=self._level_of(item),
+                    level_reason=str(item.get("level_reason") or "")[:160],
+                    level_tags=[str(t)[:20] for t in (item.get("level_tags") or []) if str(t).strip()][:6],
                 )
             )
         return drafts
 
     # ------------------------------------------------------------ 工具
+    @staticmethod
+    def _level_of(item: dict[str, Any]) -> int:
+        """模型给的等级只在 1~5 时可信；拿不准就返回 0，让 LevelJudge 从重要度推。"""
+        try:
+            value = int(float(item.get("level", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+        return value if 1 <= value <= 5 else 0
+
     def _provider(self) -> Any:
         provider_id = self.config.str("memory.llm_provider_id", "")
         try:

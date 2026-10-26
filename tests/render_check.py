@@ -128,11 +128,100 @@ def build_data() -> dict:
             "note": "",
             "last_error": "",
         },
+        # ---- 0.5.0 记忆 2.0 / 头像
+        "page/memory/levels": {
+            "enabled": True,
+            "manual_edit": True,
+            "total": 1581,
+            "forgetting_mode": "balanced",
+            "affinity_enabled": True,
+            "levels": [
+                {"level": 0, "name": "不可忘", "count": 77, "strength": 1.0},
+                {"level": 1, "name": "随口", "count": 2, "strength": 0.35},
+                {"level": 2, "name": "细节", "count": 341, "strength": 0.5},
+                {"level": 3, "name": "平常事实", "count": 1145, "strength": 0.65},
+                {"level": 4, "name": "在意的事", "count": 17, "strength": 0.82},
+                {"level": 5, "name": "关键", "count": 1, "strength": 0.95},
+            ],
+            "tags": [
+                {"tag": "identity", "label": "身份信息", "floor": 4, "cap": 0, "boost": 0, "fixed": -1}
+            ],
+        },
+        "page/memory/forgetting": {
+            "mode": "balanced",
+            "label": "均衡（默认）",
+            "days": 45,
+            "archive_ratio": 0.45,
+            "forget_ratio": 0.12,
+            "hit_boost": 1.5,
+            "due_now": 12,
+            "modes": ["off", "dream", "balanced", "ebbinghaus"],
+            "series": {str(lv): [max(0.02, 1 - i / 60.0) for i in range(46)] for lv in range(1, 6)},
+            "review_days": {str(lv): lv * 5 for lv in range(0, 6)},
+        },
+        "page/memory/subjects": {
+            "items": [
+                {
+                    "user_id": "3190568934",
+                    "display_name": "望山",
+                    "atom_count": 1200,
+                    "last_text": "2026-10-25 23:10",
+                    "has_profile": True,
+                    "affinity": {"score": 640.0, "stage": 3, "stage_name": "朋友"},
+                }
+            ],
+            "profile_enabled": True,
+            "whitelist_enabled": False,
+            "whitelist": [],
+            "blocklist": [],
+        },
+        "page/affinity": {
+            "enabled": True,
+            "editable": True,
+            "names": ["陌生", "眼熟", "熟人", "朋友", "亲近", "交心"],
+            "thresholds": [0, 100, 250, 450, 650, 850],
+            "max_daily_delta": 15.0,
+            "neglect_days": 3,
+            "ranking": [
+                {"subject_key": "3190568934", "name": "望山", "score": 640.0, "stage": 3, "stage_name": "朋友"}
+            ],
+        },
+        "page/avatar": {
+            "auto_change": True,
+            "daily_limit": 1,
+            "pool_limit": 30,
+            "allow_bot_inject": True,
+            "allow_user_request": True,
+            "max_kb": 512,
+            "available": True,
+            "items": [
+                {
+                    "id": 1,
+                    "path": "/demo/a.jpg",
+                    "source": "user_upload",
+                    "trusted": True,
+                    "used_text": "没用过",
+                }
+            ],
+            "pending": [
+                {
+                    "id": 2,
+                    "path": "/demo/b.jpg",
+                    "source": "bot_pending",
+                    "trusted": False,
+                    "used_text": "没用过",
+                }
+            ],
+            "trusted": 1,
+            "total": 2,
+            "last": {"at": 1792900000, "reason": "auto"},
+            "used_today": 0,
+        },
         "page/inbox": {"items": []},
         "page/admins": {
             "astrbot": ["10001"],
             "extra": ["10001"],
-            "effective": ["10001", "10001"],
+            "effective": ["10001"],
             "include_group_role": False,
             "roles_note": "AstrBot 名单在 WebUI 全局配置的 admins_id 里改",
         },

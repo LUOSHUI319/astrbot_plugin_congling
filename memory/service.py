@@ -20,9 +20,13 @@ from astrbot.api import logger
 
 from ..core.budget import BudgetSlice
 from ..core.contracts import MemoryDraft, MemoryHit, PerceivedMessage
-from .atom import AtomStore
+from .affinity import Affinity
+from .atom import AtomStore, norm_hash
 from .extractor import MemoryExtractor
+from .grade import LevelJudge
+from .profile import ProfileBook
 from .retrieve import Retriever
+from .subject import SubjectBook
 
 MARKER = "<!--congling:memory-->"
 MAX_BUFFER_TURNS = 60
@@ -36,6 +40,11 @@ class MemoryService:
         self.atoms = AtomStore(plugin)
         self.retriever = Retriever(plugin, self.atoms)
         self.extractor = MemoryExtractor(plugin)
+        # 0.5.0：等级判定 / 用户识别库 / 好感度 / 画像，四件套都挂在门面上
+        self.grades = LevelJudge(plugin)
+        self.subjects = SubjectBook(plugin)
+        self.affinity = Affinity(plugin)
+        self.profiles = ProfileBook(plugin, self.subjects, self.affinity)
         self._buffers: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._last_activity: dict[str, float] = {}
         self._extracting: set[str] = set()
@@ -255,7 +264,24 @@ class MemoryService:
                 hits = hits + [hit for hit in extra if hit.atom_id not in seen]
             except Exception as exc:
                 logger.debug(f"[congling] 跨会话召回失败: {exc!r}")
-        if not hits:
+        # 关系远近和已有画像：没有记忆命中时也要注入，这两块属于「我怎么看 TA」
+        speaker_key = str(ev_sender or (subject if scope == "user" else "") or "")
+        extras: list[str] = []
+        if speaker_key:
+            try:
+                aff = await self.affinity.prompt_hint(speaker_key)
+                if aff:
+                    extras.append(aff)
+            except Exception as exc:
+                logger.debug(f"[congling] 好感度注入失败: {exc!r}")
+            try:
+                prof = await self.profiles.prompt_hint(speaker_key)
+                if prof:
+                    extras.append(f"你对 TA 已有的认识：{prof}")
+            except Exception as exc:
+                logger.debug(f"[congling] 画像注入失败: {exc!r}")
+
+        if not hits and not extras:
             return
 
         # 预算裁剪：记忆最多占一定比例
@@ -265,15 +291,15 @@ class MemoryService:
             BudgetSlice(name=f"hit:{hit.atom_id}", priority=index, text=hit.line())
             for index, hit in enumerate(hits)
         ]
-        packed = self.plugin.budget.pack(slices, limit)
-        if not packed.kept:
+        packed = self.plugin.budget.pack(slices, limit) if hits else None
+        body = "\n".join(item.text for item in packed.kept) if packed is not None else ""
+        content = "\n".join(part for part in [*extras, body] if part).strip()
+        if not content:
             return
-
-        body = "\n".join(item.text for item in packed.kept)
         block = (
             f"\n\n{MARKER}\n"
             "【长期记忆 · 仅供参考；与当前对话冲突时以当前对话为准】\n"
-            f"{body}\n"
+            f"{content}\n"
             "【记忆结束】"
         )
         existing = getattr(req, "system_prompt", "") or ""
@@ -284,11 +310,8 @@ class MemoryService:
         else:
             req.system_prompt = existing + block
 
-        hit_ids = [
-            hit.atom_id
-            for hit in hits
-            if any(item.name == f"hit:{hit.atom_id}" for item in packed.kept)
-        ]
+        kept_names = {item.name for item in packed.kept} if packed is not None else set()
+        hit_ids = [hit.atom_id for hit in hits if f"hit:{hit.atom_id}" in kept_names]
         try:
             await self.atoms.mark_hit(hit_ids)
             await self.retriever.save_cursor(ev_session or msg.session_id, hit_ids)
@@ -450,10 +473,12 @@ class MemoryService:
                     draft.session_id = str(session_id or "")
                     draft.session_kind = kind
                     draft.session_label = label
+                await self._prepare_drafts(drafts, rows)
                 ids = await self.atoms.add_many(
                     drafts, scope=scope, subject=subject, persona_id=self.config.persona_id
                 )
                 if ids:
+                    await self._link_subjects(drafts, ids)
                     await self.plugin.bus.emit(self.plugin.bus.ON_MEMORY_WRITTEN, drafts)
                     logger.debug(f"[congling] 写入 {len(ids)} 条记忆（{session_id}）")
             # 只有解析成功才推水位：模型返回废话或调用失败，下一轮还要重试
@@ -470,6 +495,63 @@ class MemoryService:
                 pass
         finally:
             self._extracting.discard(session_id)
+
+    # ------------------------------------------------------------ 等级与主体
+    async def _prepare_drafts(self, drafts: list[MemoryDraft], rows: list[dict[str, Any]]) -> None:
+        """给每条草稿定主体、定等级。
+
+        顺序不能反：先认出「这条说的是谁」，才知道该按谁的好感度去调等级。
+        群里一句话可能是别人说的，所以只在草稿主体对得上最后一位发言人时才用他的 QQ 号。
+        """
+        sender_id = ""
+        sender_name = ""
+        for row in reversed(rows):
+            sid = str(row.get("sender_id") or "")
+            if sid:
+                sender_id = sid
+                sender_name = str(row.get("sender_name") or "")
+                break
+        for draft in drafts:
+            try:
+                hint = str(draft.subject or "").strip()
+                same_person = bool(
+                    hint and sender_name and (hint == sender_name or hint in sender_name or sender_name in hint)
+                )
+                key = await self.subjects.identify(
+                    sender_id=sender_id if (same_person or not hint) else "",
+                    sender_name=sender_name if same_person else "",
+                    subject_text=hint,
+                )
+                draft.subject_key = key
+                stage = await self.affinity.stage(key) if key else None
+                level, reason, tags = self.grades.judge_one(draft, stage=stage)
+                draft.level = level
+                draft.level_reason = reason
+                draft.level_tags = tags
+            except Exception as exc:
+                logger.debug(f"[congling] 等级判定失败: {exc!r}")
+
+    async def _link_subjects(self, drafts: list[MemoryDraft], ids: list[int]) -> None:
+        """把人挂到记忆上。
+
+        不能用 zip(drafts, ids)：写入阶段任何一条失败都不会进 ids，两个列表就错位了，
+        人会被记到别人头上。所以按文本哈希回查一遍，稳一点。
+        """
+        for draft in drafts:
+            key = str(getattr(draft, "subject_key", "") or "")
+            if not key:
+                continue
+            atom_id = 0
+            try:
+                row = await self.store.fetch_one(
+                    "SELECT id FROM mem_atom WHERE persona_id=? AND norm_hash=? AND status='active'",
+                    (self.config.persona_id, norm_hash(draft.text)),
+                )
+                atom_id = int((row or {}).get("id") or 0)
+            except Exception:
+                atom_id = 0
+            if atom_id:
+                await self.subjects.link_atom(atom_id, key)
 
     # ================================================================ 对外 API
     async def write_text(
@@ -538,9 +620,55 @@ class MemoryService:
         from .maintenance import Maintenance
 
         await Maintenance(self.plugin, self.atoms, self.retriever).run_daily()
+        try:
+            settled = await self.affinity.settle_daily()
+            logger.debug(f"[congling] 好感度结算：{settled}")
+        except Exception as exc:
+            logger.debug(f"[congling] 好感度结算失败: {exc!r}")
+        try:
+            await self.build_profiles()
+        except Exception as exc:
+            logger.debug(f"[congling] 画像轮询失败: {exc!r}")
         pending = await self.retriever.embed_pending(30)
         if pending:
             logger.debug(f"[congling] 补齐 {pending} 条记忆向量")
+
+    async def build_profiles(self, limit: int = 30, force: bool = False) -> dict[str, Any]:
+        """每天挑几个够格的人重新画像。
+
+        够格不等于每次都建：概率由好感度决定，今天掷不中明天再说。
+        force 是给 UI 的「现在生成」按钮用的，跳过概率但仍受开关与名单约束。
+        """
+        if not self.profiles.enabled():
+            return {"built": 0, "reason": "画像总开关关着"}
+        today = time.strftime("%Y-%m-%d")
+        if not force:
+            try:
+                if await self.store.kv_get("profile:last_day", "") == today:
+                    return {"built": 0, "skipped": "今天已经轮过"}
+            except Exception:
+                pass
+        rows = await self.store.fetch_all(
+            "SELECT user_id FROM mem_subject WHERE persona_id=? ORDER BY last_seen_at DESC LIMIT ?",
+            (self.config.persona_id, max(1, min(200, limit))),
+        )
+        built = 0
+        for row in rows:
+            key = str(row.get("user_id") or "")
+            if not key:
+                continue
+            try:
+                result = await self.profiles.build(key, force=force)
+                if result.get("ok"):
+                    built += 1
+            except Exception as exc:
+                logger.debug(f"[congling] 画像生成失败 {key}: {exc!r}")
+        if not force:
+            try:
+                await self.store.kv_set("profile:last_day", today)
+            except Exception:
+                pass
+        return {"built": built}
 
     # ================================================================ 工具
     def _scope_of(self, msg: PerceivedMessage) -> tuple[str, str]:

@@ -16,6 +16,7 @@ from astrbot_plugin_congling.qqext.targets import Resolution, TargetResolver
 SENDER = 10001
 FRIEND = 10086
 OTHER = 10001
+STRANGER = 10099  # 既不是管理员也不是发言人，用来测「普通用户被拒」
 
 
 class FakeAt:
@@ -185,8 +186,9 @@ class TestAdminRules(unittest.TestCase):
         self.assertTrue(ConglingPlugin.is_admin(fake_self, FakeRoleEvent(OTHER)))
 
     def test_regular_user_rejected(self):
+        # 这里必须用第三个号：OTHER 恰好等于管理员，拿它测「拒绝」永远测不出来
         fake_self = make_plugin_self(["10001"])
-        self.assertFalse(ConglingPlugin.is_admin(fake_self, FakeRoleEvent(OTHER)))
+        self.assertFalse(ConglingPlugin.is_admin(fake_self, FakeRoleEvent(STRANGER)))
 
     def test_group_admin_ignored_by_default(self):
         fake_self = make_plugin_self([], include_role=False)
@@ -207,7 +209,7 @@ class TestAdminRules(unittest.TestCase):
 
     def test_union_dedup(self):
         fake_self = make_plugin_self(["10001"], extra=["10001", "10001"])
-        self.assertEqual(ConglingPlugin.admin_ids(fake_self), ["10001", "10001"])
+        self.assertEqual(ConglingPlugin.admin_ids(fake_self), ["10001"])
 
 
 if __name__ == "__main__":

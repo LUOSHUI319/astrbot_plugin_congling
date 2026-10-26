@@ -361,6 +361,163 @@
         "description": "每日反思时间（小时）",
         "type": "int",
         "default": 4
+      },
+      "levels": {
+        "description": "记忆等级",
+        "hint": "记忆分 1~5 级，另有 0 级不可忘。等级决定忘得多快、注入时排多前",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用记忆等级",
+            "type": "bool",
+            "default": true,
+            "hint": "关掉退回全局单因子衰减，等级字段保留但不参与计算"
+          },
+          "manual_edit": {
+            "description": "允许手动改等级",
+            "type": "bool",
+            "default": true,
+            "hint": "打开后可以在记忆库里直接改某条的等级，改完不会被模型覆盖"
+          }
+        }
+      },
+      "forgetting": {
+        "description": "遗忘曲线",
+        "hint": "off 不衰减；dream 照着长夜的梦境衰减来（忘得快）；balanced 取 dream 与 ebbinghaus 的中间；ebbinghaus 走经典遗忘曲线（最保守）",
+        "type": "object",
+        "items": {
+          "mode": {
+            "description": "衰减档位",
+            "type": "string",
+            "options": [
+              "off",
+              "dream",
+              "balanced",
+              "ebbinghaus"
+            ],
+            "default": "balanced",
+            "hint": "默认 balanced：随口的话一周左右散掉，认真说过的事能留几个月"
+          },
+          "archive_ratio": {
+            "description": "归档阈值",
+            "type": "float",
+            "default": 0.45,
+            "hint": "强度低于这个比例就进归档，不再主动注入但还能翻到"
+          },
+          "forget_ratio": {
+            "description": "遗忘阈值",
+            "type": "float",
+            "default": 0.12,
+            "hint": "再低就标记遗忘，仍可手动找回"
+          },
+          "hit_boost": {
+            "description": "命中后强度加成",
+            "type": "float",
+            "default": 1.5,
+            "hint": "被用到一次，强度上限和周期都会按这个系数延长，越用越牢"
+          }
+        }
+      },
+      "affinity": {
+        "description": "好感度",
+        "hint": "按记忆等级、对话频率、冷淡天数综合结算，每天结算一次",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用好感度",
+            "type": "bool",
+            "default": true
+          },
+          "ui_editable": {
+            "description": "允许在面板上手动调",
+            "type": "bool",
+            "default": true,
+            "hint": "关掉后只能看不能改，自动结算照常"
+          },
+          "manual_override": {
+            "description": "手改后冻结自动结算",
+            "type": "bool",
+            "default": false,
+            "hint": "开启后手动改过的用户不再被自动加减，适合固定关系"
+          },
+          "stage_names": {
+            "description": "阶段名称（6 项）",
+            "type": "list",
+            "default": [
+              "陌生",
+              "眼熟",
+              "熟人",
+              "朋友",
+              "亲近",
+              "交心"
+            ]
+          },
+          "stage_thresholds": {
+            "description": "阶段门槛分数（6 项）",
+            "type": "list",
+            "default": [
+              0,
+              100,
+              250,
+              450,
+              650,
+              850
+            ]
+          },
+          "max_daily_delta": {
+            "description": "单日最大变化",
+            "type": "float",
+            "default": 15.0,
+            "hint": "防止一天刷满，正负都受限"
+          },
+          "neglect_days": {
+            "description": "多少天不说话开始掉",
+            "type": "int",
+            "default": 3,
+            "hint": "掉分不会跨档，每档都有下限"
+          }
+        }
+      },
+      "user_profile": {
+        "description": "用户画像",
+        "hint": "把某个人的记忆压缩成一段认识，注入到提示词里",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用用户画像",
+            "type": "bool",
+            "default": true
+          },
+          "whitelist_enabled": {
+            "description": "只给白名单里的人画像",
+            "type": "bool",
+            "default": false,
+            "hint": "关着的时候所有用户都可能被画像（仍受好感度门槛限制）"
+          },
+          "whitelist": {
+            "description": "白名单用户 ID",
+            "type": "list",
+            "default": [],
+            "hint": "一行一个 QQ 号，只有开了上面的开关才生效"
+          },
+          "blocklist": {
+            "description": "不再画像名单",
+            "type": "list",
+            "default": [],
+            "hint": "删画像时自动加进来，移除后才会重新生成"
+          },
+          "min_stage": {
+            "description": "最低好感阶段",
+            "type": "int",
+            "default": 2,
+            "hint": "好感没到这一档，不会为对方生成画像。0 陌生 / 2 熟人 / 5 交心"
+          },
+          "max_keywords": {
+            "description": "关键词上限",
+            "type": "int",
+            "default": 32
+          }
+        }
       }
     }
   },
@@ -423,9 +580,9 @@
       },
       "qzone_allow_write": {
         "description": "允许写入空间",
-        "hint": "发说说需要，默认关闭",
+        "hint": "发说说需要。0.5.0 起默认开启，配合每日配额与内容过滤，不会乱发",
         "type": "bool",
-        "default": false
+        "default": true
       },
       "qzone_cookie": {
         "description": "手动填空间 Cookie",
@@ -445,14 +602,70 @@
         "default": true
       },
       "qzone_auto_post": {
-        "description": "每日自动发一条说说",
+        "description": "每日自动发说说",
         "type": "bool",
-        "default": false
+        "default": true,
+        "hint": "每天从当天的梦境、新记忆、情绪浓度高的对话里抽 1~3 条来发，7 天内不重复，涉及别人的内容不发"
+      },
+      "qzone_daily_min": {
+        "description": "每日最少几条",
+        "type": "int",
+        "default": 1,
+        "hint": "与上限一起决定当天配额：在上限和下限之间随机取一个数"
+      },
+      "qzone_daily_max": {
+        "description": "每日说说上限",
+        "type": "int",
+        "default": 3,
+        "hint": "当天发够就停。想安静点改成 1，想热闹点改到 3"
+      },
+      "qzone_write_confirm": {
+        "description": "自动说说只存草稿",
+        "type": "bool",
+        "default": false,
+        "hint": "打开后自动说说不会直接发出去，只记成草稿，等你在面板上确认（手动发不拦）"
       },
       "signature_auto_update": {
         "description": "自动更新个性签名",
         "type": "bool",
-        "default": false
+        "default": true,
+        "hint": "让签名跟着当前心情/状态走，默认开启"
+      },
+      "avatar_auto_change": {
+        "description": "允许自己换头像",
+        "type": "bool",
+        "default": true,
+        "hint": "只会从头像库里被允许的图里挑，库里没有就不换，不会自己上网找图"
+      },
+      "avatar_daily_limit": {
+        "description": "每天最多换几次",
+        "type": "int",
+        "default": 1,
+        "hint": "主动更换的次数上限，用户明确要求换的不计入"
+      },
+      "avatar_pool_limit": {
+        "description": "头像库上限",
+        "type": "int",
+        "default": 30,
+        "hint": "超出后按最久没用过的淘汰，你主动存进去的优先保留"
+      },
+      "avatar_allow_bot_inject": {
+        "description": "允许她提交候选图",
+        "type": "bool",
+        "default": true,
+        "hint": "她可以把自己找到的图放到待审区，但必须你点头才会进可用库"
+      },
+      "avatar_allow_user_request": {
+        "description": "允许用户要求换头像",
+        "type": "bool",
+        "default": true,
+        "hint": "关掉后只有你自己能换，别人说换也不动"
+      },
+      "avatar_max_kb": {
+        "description": "头像图片大小上限（KB）",
+        "type": "int",
+        "default": 512,
+        "hint": "超过会先本地压缩，压不动就拒绝并说明原因"
       },
       "poke_enabled": {
         "description": "戳一戳互动",

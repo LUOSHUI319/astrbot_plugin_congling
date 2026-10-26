@@ -4,7 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <link rel="stylesheet" href="./style.css?v=20261025a" />
+  <link rel="stylesheet" href="./style.css?v=6" />
+  <link rel="stylesheet" href="./theme-v6.css?v=6" />
+  <!-- 夜航手账：全量皮肤，只在 data-ui="night" 时生效 -->
+  <link rel="stylesheet" href="./night.css?v=20261027a" />
 </head>
 <body>
   <div class="app">
@@ -56,11 +59,14 @@
           <button id="refresh" class="ghost" title="刷新">刷新</button>
         </div>
       </header>
+      <div id="subtabs" class="subtabs" hidden></div>
       <section id="view" class="view">
         <div class="empty">加载中…</div>
       </section>
     </main>
   </div>
-  <script src="./app.js?v=20261025a" defer></script>
+  <!-- night.js 要先于 app.js 执行：app.js 的 render 会在这里找 nj* 函数 -->
+  <script src="./night.js?v=20261027a" defer></script>
+  <script src="./app.js?v=20261027a" defer></script>
 </body>
 </html>

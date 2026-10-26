@@ -15,6 +15,7 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core.contracts import MemoryDraft, MemoryHit
+from .grade import STRENGTH, next_review_at
 
 DUP_THRESHOLD = 0.86
 
@@ -107,6 +108,13 @@ class AtomStore:
             supersedes = similar_id
 
         now = int(time.time())
+        # 等级：0 不可忘 / 1~5 依次加重。等级决定初始强度、衰减速度和复习时间
+        try:
+            level = max(0, min(5, int(getattr(draft, "level", 3) or 3)))
+        except (TypeError, ValueError):
+            level = 3
+        strength = STRENGTH.get(level, 0.65)
+        next_review = next_review_at(level, now)
         # 睡着期间产生的记忆打上「未曾爬楼」，醒后要先爬楼才能读
         unread = 0
         unread_since = 0
@@ -125,8 +133,9 @@ class AtomStore:
         atom_id = await self.store.execute(
             "INSERT INTO mem_atom(persona_id, scope, subject_id, kind, text, norm_hash, keywords, "
             "importance, confidence, source_msg_ids, created_at, last_hit_at, hit_count, decay, status, protect, supersedes, "
-            "session_id, session_kind, session_label, unread, unread_since) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "session_id, session_kind, session_label, unread, unread_since, "
+            "mem_level, level_reason, level_tags, level_source, strength, next_review_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 persona_id,
                 scope,
@@ -143,13 +152,19 @@ class AtomStore:
                 0,
                 1.0,
                 "active",
-                1 if draft.importance >= 0.85 else 0,
+                1 if level == 0 else 0,
                 supersedes,
                 draft.session_id or "",
                 draft.session_kind or "",
                 draft.session_label or "",
                 unread,
                 unread_since,
+                level,
+                draft.level_reason or "",
+                json.dumps(draft.level_tags or [], ensure_ascii=False),
+                draft.level_source or "llm",
+                strength,
+                next_review,
             ),
         )
         if supersedes:
@@ -167,10 +182,25 @@ class AtomStore:
         )
 
     async def _reinforce(self, atom_id: int, importance: float) -> None:
+        now = int(time.time())
+        boost = 1.5
+        try:
+            boost = float(self.config.float("memory.forgetting.hit_boost", 1.5))
+        except Exception:
+            boost = 1.5
+        level = 3
+        try:
+            row = await self.store.fetch_one("SELECT mem_level FROM mem_atom WHERE id=?", (int(atom_id),))
+            if row:
+                level = int(row.get("mem_level") or 3)
+        except Exception:
+            level = 3
+        base = STRENGTH.get(level, 0.65)
         await self.store.execute(
             "UPDATE mem_atom SET hit_count=hit_count+1, last_hit_at=?, "
-            "importance=MIN(1.0, MAX(importance, ?)+0.02), decay=MIN(1.0, decay+0.05) WHERE id=?",
-            (int(time.time()), importance, atom_id),
+            "importance=MIN(1.0, MAX(importance, ?)+0.02), decay=MIN(1.0, decay+0.05), "
+            "strength=MAX(strength, MIN(1.0, ? * ?)), next_review_at=? WHERE id=?",
+            (now, importance, base, boost, next_review_at(level, now, boost), int(atom_id)),
         )
 
     # ================================================================ 读取
@@ -215,6 +245,8 @@ class AtomStore:
         for row in rows:
             row["keywords"] = self._loads(row.get("keywords"), [])
             row["evidence"] = self._loads(row.get("source_msg_ids"), [])
+            row["level_tags"] = self._loads(row.get("level_tags"), [])
+            row["mem_level"] = int(row.get("mem_level") or 3)
             row["created_text"] = time.strftime(
                 "%Y-%m-%d %H:%M", time.localtime(int(row.get("created_at") or 0))
             )
@@ -250,7 +282,19 @@ class AtomStore:
         await self.store.execute("UPDATE mem_atom SET status=? WHERE id=?", (status, atom_id))
 
     async def set_fields(self, atom_id: int, fields: dict[str, Any]) -> None:
-        allowed = {"text", "importance", "protect", "kind", "status", "scope", "subject_id"}
+        allowed = {
+            "text",
+            "importance",
+            "protect",
+            "kind",
+            "status",
+            "scope",
+            "subject_id",
+            "mem_level",
+            "level_reason",
+            "level_source",
+            "strength",
+        }
         sets: list[str] = []
         params: list[Any] = []
         for key, value in fields.items():
@@ -292,6 +336,8 @@ class AtomStore:
             score=score,
             created_at=int(row.get("created_at") or 0),
             decay=float(row.get("decay") or 1.0),
+            level=int(row.get("mem_level") or 3),
+            strength=float(row.get("strength") or 0.65),
             evidence=[str(item) for item in evidence][:5],
             subject_id=str(row.get("subject_id") or ""),
             scope=str(row.get("scope") or "user"),

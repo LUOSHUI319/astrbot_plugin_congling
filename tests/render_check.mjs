@@ -135,6 +135,16 @@ async function main() {
   if (!/noon_nap_jitter_minutes/.test(appSrc)) problems.push("长夜设置页缺少午睡浮动");
   if (!/infoRow\("午睡时长"/.test(appSrc)) problems.push("睡眠页没有显示午睡时长");
 
+  // 0.5.0：二级栏目与新页面
+  // 二级栏目在切页时会被重画，所以查源码里的定义，而不是当前的 DOM
+  if (!/等级与遗忘/.test(appSrc)) problems.push("记忆页缺少二级栏目（等级与遗忘）");
+  if (!/key: "avatar"/.test(appSrc)) problems.push("QQ 页缺少头像子栏目");
+  if (!results.memory.includes("等级分布")) problems.push("记忆概览没有等级分布块");
+  for (const fn of ["renderMemorySummary", "renderMemoryPeople", "renderMemoryLevels", "renderAffinityPage", "renderAvatarPage"]) {
+    if (!appSrc.includes(fn)) problems.push(`缺少渲染函数 ${fn}`);
+  }
+  if (!/data-tip=/.test(appSrc)) problems.push("配置项没有 tooltip");
+
   console.log("\n=== 人格页联动 ===");
   const personaBody = byId("persona-body");
   const builtinHtml = results.persona;

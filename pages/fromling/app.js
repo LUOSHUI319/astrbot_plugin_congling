@@ -14,13 +14,10 @@ let bridgePromise = null;
 
 /* ------------------------------------------------------------------ 外观 */
 const THEMES = [
-  { id: "moon", name: "月白", color: "#35685a" },
-  { id: "mist", name: "雾蓝", color: "#35617d" },
-  { id: "sand", name: "暖砂", color: "#8a6b3f" },
-  { id: "lotus", name: "藕荷", color: "#6d5a80" },
-  { id: "celadon", name: "青瓷", color: "#3f7a72" },
-  { id: "graphite", name: "墨灰", color: "#3d4450" },
-  { id: "dark", name: "深色", color: "#16171a" },
+  /* v6 三套 UI：排版与风格各自独立，不是换色 */
+  { id: "night", name: "夜航手账", color: "#9bc4b1" },
+  { id: "console", name: "仪表台", color: "#1f5f4e" },
+  { id: "scroll", name: "尺素", color: "#8a6a3c" },
 ];
 
 const FONTS = [
@@ -37,18 +34,27 @@ function readLook() {
   try {
     const raw = localStorage.getItem(LOOK_KEY);
     const data = raw ? JSON.parse(raw) : {};
-    return { theme: data.theme || "moon", font: data.font || "sans" };
+    return { theme: data.theme || "night", font: data.font || "sans" };
   } catch (err) {
-    return { theme: "moon", font: "sans" };
+    return { theme: "night", font: "sans" };
   }
 }
 
 function applyLook(look) {
   const root = document.documentElement;
-  if (look.theme && look.theme !== "moon") root.dataset.theme = look.theme;
-  else root.removeAttribute("data-theme");
+  const ui = look.theme || "night";
+  root.dataset.ui = ui;
   if (look.font && look.font !== "sans") root.dataset.font = look.font;
   else root.removeAttribute("data-font");
+  /* 仪表台是窄图标栏，导航只留一个字的缩写 */
+  const nav = document.getElementById("nav");
+  if (nav) {
+    nav.querySelectorAll(".nav-item").forEach((btn) => {
+      const text = (btn.textContent || "").trim();
+      btn.dataset.abbr = text.slice(0, 1);
+      btn.title = text;
+    });
+  }
   try {
     localStorage.setItem(LOOK_KEY, JSON.stringify(look));
   } catch (err) {
@@ -663,6 +669,7 @@ function nightSettingsPage(settings) {
 
 /* ---- 主渲染 ---- */
 async function renderNight() {
+  if (isNightUI() && typeof njNight === "function") return njNight();
   const TABS = [
     ["state", "状态"],
     ["sleep", "睡眠"],
@@ -684,7 +691,7 @@ async function renderNight() {
   let needState = nightTab === "state" || nightTab === "sleep" || nightTab === "memory";
 
   const [stateData, settings, dreamData, unreadData] = await Promise.all([
-    needState ? get("/night/state").catch(() => ({})) : Promise.resolve({}),
+    needState ? get("night/state").catch(() => ({})) : Promise.resolve({}),
     needSettings ? loadSettings() : Promise.resolve(null),
     needDreams ? get("/night/dreams", { limit: 40 }).catch(() => ({ items: [], nights: [], stats: {} })) : Promise.resolve(null),
     needUnread ? get("/night/unread", { limit: 40 }).catch(() => ({ items: [] })) : Promise.resolve(null),
@@ -801,25 +808,121 @@ const VIEWS = {
 };
 
 let currentView = "overview";
+let currentSub = "";
 let state = { persona: null, compat: null, health: null };
 let settingsCache = null;
 
-function setView(name) {
+/* 二级栏目：一个一级视图下面挂几个子页。
+   没在这里登记的视图不显示子页栏，保持原来的长页。 */
+const SUBTABS = {
+  memory: [
+    { key: "summary", title: "记忆总览", render: renderM3Overview },
+    { key: "people", title: "按用户分", render: renderM3Users },
+    { key: "sessions", title: "按会话分", render: renderM3Sessions },
+    { key: "library", title: "记忆库", render: () => renderMemory() },
+    { key: "levels", title: "等级与遗忘", render: renderMemoryLevels },
+    { key: "affinity", title: "好感度", render: renderAffinityPage },
+  ],
+  qq: [
+    { key: "space", title: "空间", render: () => renderQQ() },
+    { key: "avatar", title: "头像", render: renderAvatarPage },
+  ],
+};
+
+const subtabsEl = document.getElementById("subtabs");
+
+function subsOf(name) {
+  return SUBTABS[name] || [];
+}
+
+function paintSubtabs() {
+  if (!subtabsEl) return;
+  const subs = subsOf(currentView);
+  if (!subs.length) {
+    subtabsEl.hidden = true;
+    subtabsEl.innerHTML = "";
+    return;
+  }
+  subtabsEl.hidden = false;
+  subtabsEl.innerHTML = subs
+    .map(
+      (sub) =>
+        `<button class="subtab${sub.key === currentSub ? " is-active" : ""}" data-sub="${esc(sub.key)}">${esc(
+          sub.title
+        )}</button>`
+    )
+    .join("");
+  subtabsEl.querySelectorAll("[data-sub]").forEach((btn) => {
+    btn.onclick = () => setSub(btn.dataset.sub);
+  });
+}
+
+function setSub(key) {
+  const subs = subsOf(currentView);
+  const hit = subs.find((sub) => sub.key === key);
+  if (!hit) return;
+  currentSub = hit.key;
+  applyHash(`#${currentView}/${currentSub}`);
+  paintSubtabs();
+  render();
+}
+
+function setView(name, sub) {
   if (!VIEWS[name]) return;
   settingsCache = null;
   currentView = name;
+  const subs = subsOf(name);
+  if (subs.length) {
+    const hit = sub ? subs.find((item) => item.key === sub) : null;
+    currentSub = (hit || subs[0]).key;
+  } else {
+    currentSub = "";
+  }
   titleEl.textContent = VIEWS[name].title;
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.classList.toggle("is-active", btn.dataset.view === name);
   });
+  const target = currentSub ? `#${name}/${currentSub}` : `#${name}`;
+  applyHash(target);
+  paintSubtabs();
   render();
   view.scrollIntoView({ block: "start" });
 }
 
+/* 页面可能在非浏览器环境被加载（渲染冒烟测试），这两处都要兜住 */
+function readHash() {
+  try {
+    return String(window.location.hash || "");
+  } catch (err) {
+    return "";
+  }
+}
+
+function applyHash(target) {
+  try {
+    if (!target) return;
+    if (window.location.hash === target) return;
+    history.replaceState(null, "", target);
+  } catch (err) {
+    /* 没有 history 就只改内部状态 */
+  }
+}
+
+function parseHash() {
+  const raw = readHash().replace(/^#/, "");
+  if (!raw) return { view: "overview", sub: "" };
+  const [name, sub] = raw.split("/");
+  return { view: VIEWS[name] ? name : "overview", sub: sub || "" };
+}
+
 async function render() {
+  const subs = subsOf(currentView);
+  const active = subs.length ? subs.find((sub) => sub.key === currentSub) || subs[0] : null;
+  if (active) currentSub = active.key;
   view.innerHTML = '<div class="empty">读取中…</div>';
   try {
-    await VIEWS[currentView].render();
+    if (active) await active.render();
+    else await VIEWS[currentView].render();
   } catch (err) {
     view.innerHTML = `<div class="empty">出错了：${esc(err.message)}</div>`;
   }
@@ -833,9 +936,9 @@ const CORE_KEYS = {
   humanize: ["reply_threshold", "max_bubbles_private", "max_bubbles_group", "think_delay_base", "quote_probability"],
   guard: ["strip_emoji", "strip_trailing_period", "max_chars_per_bubble"],
   perception: ["expand_forward", "image_describe", "voice_transcribe"],
-  memory: ["enabled", "inject_top_k", "idle_extract_seconds", "embedding_provider_id"],
+  memory: ["enabled", "inject_top_k", "forgetting.mode", "levels.enabled", "affinity.enabled", "user_profile.enabled"],
   capability: ["enabled", "groups", "rate_limit_per_min"],
-  qq_extra: ["qzone_mode", "poke_enabled", "qzone_allow_write"],
+  qq_extra: ["qzone_mode", "qzone_auto_post", "qzone_daily_max", "avatar_auto_change", "poke_enabled"],
   compat: ["mode", "yield_humanize", "yield_memory", "yield_rhythm"],
   debug: ["decision_log", "verbose"],
 };
@@ -883,7 +986,16 @@ function controlHtml(item) {
 }
 
 function rowHtml(item, compact) {
-  const hint = item.hint ? `<span class="hint">${esc(compact ? firstSentence(item.hint) : item.hint)}</span>` : "";
+  // 核心项：提示收进取问号气泡，省地方；高级项：直接把 hint 摊开写清楚
+  if (compact && item.hint) {
+    return `<div class="cfg-row">
+      <div class="cfg-label">${esc(item.label)}<span class="tip" tabindex="0" role="button" aria-label="说明" data-tip="${esc(
+      item.hint
+    )}">?</span></div>
+      <div>${controlHtml(item)}</div>
+    </div>`;
+  }
+  const hint = item.hint ? `<span class="hint">${esc(item.hint)}</span>` : "";
   return `<div class="cfg-row">
     <div class="cfg-label">${esc(item.label)}${hint}</div>
     <div>${controlHtml(item)}</div>
@@ -978,6 +1090,7 @@ function pageActions(label) {
 
 /* ------------------------------------------------------------------ 概览 */
 async function renderOverview() {
+  if (isNightUI() && typeof njOverview === "function") return njOverview();
   const data = await get("page/overview");
   state.health = data.health;
   state.compat = data.health.compat;
@@ -1064,6 +1177,7 @@ function renderDecisions(rows) {
 
 /* ------------------------------------------------------------------ 人格 */
 async function renderPersona() {
+  if (isNightUI() && typeof njPersona === "function") return njPersona();
   const data = await get("page/persona");
   const settings = await loadSettings();
   state.persona = data;
@@ -1261,6 +1375,7 @@ function modeCard(id, title, desc, current) {
 
 /* ------------------------------------------------------------------ 行为 */
 async function renderBehavior() {
+  if (isNightUI() && typeof njBehavior === "function") return njBehavior();
   const settings = await loadSettings();
   view.innerHTML = `
     <div class="settings-intro">这里决定「它怎么说话」和「它看得懂什么」。改完点各卡片自己的保存。</div>
@@ -1306,6 +1421,7 @@ function memCard(row) {
   const where = row.session_label ? esc(row.session_label) : "未标来源";
   return `<article class="mem-card">
     <div class="mem-card-head">
+      ${levelTag(row.mem_level)}
       <span class="mem-kind k-${esc(row.kind || "fact")}">${esc(memKindCN(row.kind))}</span>
       <span class="mem-where">${where}</span>
       <span class="mem-time mono">${esc(row.created_text || "")}</span>
@@ -1317,6 +1433,7 @@ function memCard(row) {
 }
 
 async function renderMemory(keyword, sessionId, kind) {
+  if (isNightUI() && typeof njMemory === "function") return njMemory(keyword, sessionId, kind);
   const settings = await loadSettings();
   const params = { limit: 500, status: "active" };
   if (keyword) params.keyword = keyword;
@@ -1437,6 +1554,7 @@ async function renderMemory(keyword, sessionId, kind) {
 
 /* ------------------------------------------------------------------ 工具 */
 async function renderTools() {
+  if (isNightUI() && typeof njTools === "function") return njTools();
   const settings = await loadSettings();
   const data = await get("page/tools");
   const items = data.items || [];
@@ -1499,6 +1617,7 @@ async function renderTools() {
 
 /* ------------------------------------------------------------------ QQ */
 async function renderQQ() {
+  if (isNightUI() && typeof njQQ === "function") return njQQ();
   const settings = await loadSettings();
   const qzone = await get("page/qzone");
   const auth = qzone.auth || {};
@@ -1645,6 +1764,7 @@ async function renderQQ() {
 
 /* ------------------------------------------------------------------ 系统 */
 async function renderSystem() {
+  if (isNightUI() && typeof njSystem === "function") return njSystem();
   const settings = await loadSettings();
   const admins = await get("page/admins");
   const compat = settings.compat || { yield: {}, present: {} };
@@ -1875,6 +1995,543 @@ view.addEventListener("click", (ev) => {
   if (btn) copyGroupNo(btn);
 });
 
+
+/* ------------------------------------------------------------------ 记忆 2.0 */
+const LEVEL_NAMES = ["不可忘", "随口", "细节", "平常", "在意", "关键"];
+let subjectKey = "";
+
+function levelTag(level) {
+  const n = Math.max(0, Math.min(5, Number(level) || 0));
+  return `<span class="lv lv-${n}">${n === 0 ? "不可忘" : "L" + n}</span>`;
+}
+
+function stageChip(stage, name) {
+  const n = Math.max(0, Math.min(5, Number(stage) || 0));
+  return `<span class="stage stage-${n}">${esc(name || "")}</span>`;
+}
+
+async function renderMemorySummary() {
+  const [levels, curve, aff] = await Promise.all([
+    get("page/memory/levels"),
+    get("page/memory/forgetting", { days: 45 }),
+    get("page/affinity"),
+  ]);
+  const items = levels.levels || [];
+  const maxCount = Math.max(1, ...items.map((x) => Number(x.count) || 0));
+  const bars = items
+    .map((x) => {
+      const count = Number(x.count) || 0;
+      const width = Math.round((count / maxCount) * 100);
+      return `<div class="bar-row">
+        <span class="bar-key">${levelTag(x.level)}</span>
+        <span class="bar"><i style="width:${width}%"></i></span>
+        <span class="bar-num mono">${count}</span>
+      </div>`;
+    })
+    .join("");
+  const ranking = (aff.ranking || [])
+    .slice(0, 6)
+    .map(
+      (row, index) =>
+        `<li><span class="mono muted">${index + 1}</span><span class="grow">${esc(
+          row.name || row.subject_key
+        )}</span>${stageChip(row.stage, row.stage_name)}<span class="mono">${Math.round(row.score)}</span></li>`
+    )
+    .join("");
+  const locked = items.filter((x) => Number(x.level) === 0).reduce((sum, x) => sum + (Number(x.count) || 0), 0);
+  view.innerHTML = `
+    <div class="grid-stats">
+      <div class="stat"><div class="num">${esc(levels.total || 0)}</div><div class="lbl">活跃记忆</div></div>
+      <div class="stat"><div class="num">${esc(locked)}</div><div class="lbl">不可忘</div></div>
+      <div class="stat"><div class="num small">${esc(curve.label || "")}</div><div class="lbl">衰减档位</div></div>
+      <div class="stat"><div class="num">${esc(curve.due_now || 0)}</div><div class="lbl">待复习</div></div>
+    </div>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>等级分布</h3><p>等级越高越不容易忘，也越优先被想起来</p></div>
+      <div class="pad">${bars || '<p class="hint">还没有记忆</p>'}</div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>谁跟我最好</h3><p>按好感度排，具体数值可以在「好感度」里手改</p></div>
+      <div class="pad">${ranking ? `<ol class="rank-list">${ranking}</ol>` : '<p class="hint">还没有好感度记录</p>'}</div>
+    </section>`;
+}
+
+/* ------------------------------------------------ 用户识别库 */
+async function renderMemoryPeople() {
+  if (subjectKey) return renderSubjectDetail(subjectKey);
+  const data = await get("page/memory/subjects", { limit: 100 });
+  const items = data.items || [];
+  const rows = items
+    .map((item) => {
+      const aff = item.affinity || {};
+      return `<button class="person" data-key="${esc(item.user_id)}">
+        <span class="person-name">${esc(item.display_name || item.user_id)}</span>
+        ${stageChip(aff.stage, aff.stage_name)}
+        <span class="mono muted">${esc(item.atom_count)} 条</span>
+        ${item.has_profile ? '<span class="chip">有画像</span>' : ""}
+        <span class="mono muted small">${esc(item.last_text || "")}</span>
+      </button>`;
+    })
+    .join("");
+  view.innerHTML = `
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>用户识别库</h3><p>${items.length} 个人被记住过；昵称会变，QQ 号不会</p></div>
+      <div class="pad">
+        <div class="row" style="margin-bottom:12px;align-items:center">
+          <div class="field grow" style="margin:0">
+            <input type="text" id="subj-search" placeholder="搜名字或 QQ 号，回车" />
+          </div>
+          <label class="switch"><input type="checkbox" id="subj-whitelist" ${
+            data.whitelist_enabled ? "checked" : ""
+          } /><span>仅白名单</span></label>
+          <button class="ghost" id="subj-reload">刷新</button>
+        </div>
+        <p class="hint" style="margin:0 0 10px">
+          「仅白名单」打开后，只有名单里的人会被画像；名单在下面这个面板里加，也可以去设置页改
+        </p>
+        <div class="person-list">${rows || '<p class="hint">还没识别到人，聊几句就有了</p>'}</div>
+      </div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>画像名单</h3><p>白名单放行，不再构建名单拦住</p></div>
+      <div class="pad">
+        <div class="field"><label>白名单（一行一个 QQ 号）</label>
+          <textarea id="prof-whitelist" data-type="list" style="min-height:80px">${esc(
+            (data.whitelist || []).join("\n")
+          )}</textarea></div>
+        <div class="field"><label>不再构建名单</label>
+          <textarea id="prof-blocklist" data-type="list" style="min-height:80px">${esc(
+            (data.blocklist || []).join("\n")
+          )}</textarea>
+          <div class="hint">删画像时会自动加进来，清空这一栏就恢复</div></div>
+        ${pageActions("保存名单")}
+      </div>
+    </section>`;
+
+  document.querySelectorAll("[data-key]").forEach((btn) => {
+    btn.onclick = () => {
+      subjectKey = btn.dataset.key;
+      render();
+    };
+  });
+  const box = document.getElementById("subj-whitelist");
+  if (box)
+    box.onchange = async () => {
+      await post("page/memory/profile/config", { whitelist_enabled: box.checked });
+      settingsCache = null;
+    };
+  const search = document.getElementById("subj-search");
+  if (search)
+    search.onkeydown = async (ev) => {
+      if (ev.key !== "Enter") return;
+      const keyword = search.value.trim();
+      const found = await get("page/memory/subjects", { keyword, limit: 100 });
+      const list = document.querySelector(".person-list");
+      if (list) {
+        list.innerHTML = (found.items || [])
+          .map(
+            (item) =>
+              `<button class="person" data-key="${esc(item.user_id)}"><span class="person-name">${esc(
+                item.display_name || item.user_id
+              )}</span><span class="mono muted">${esc(item.atom_count)} 条</span></button>`
+          )
+          .join("") || '<p class="hint">没找到</p>';
+        list.querySelectorAll("[data-key]").forEach((btn) => {
+          btn.onclick = () => {
+            subjectKey = btn.dataset.key;
+            render();
+          };
+        });
+      }
+    };
+  const save = document.getElementById("page-save");
+  if (save)
+    save.onclick = async () => {
+      const msg = document.getElementById("page-msg");
+      const white = (document.getElementById("prof-whitelist") || {}).value || "";
+      const block = (document.getElementById("prof-blocklist") || {}).value || "";
+      const toList = (text) => text.split(/\s+/).map((x) => x.trim()).filter(Boolean);
+      await post("page/memory/profile/config", {
+        whitelist: toList(white),
+        blocklist: toList(block),
+      });
+      settingsCache = null;
+      if (msg) msg.textContent = "已保存";
+    };
+}
+
+async function renderSubjectDetail(key) {
+  const data = await get("page/memory/subject", { key });
+  const aff = data.affinity || {};
+  const profile = data.profile || {};
+  const atoms = (data.atoms || []).slice(0, 80);
+  const rows = atoms
+    .map(
+      (row) => `<div class="atom-row">
+        ${levelTag(row.mem_level)}
+        <span class="atom-text">${esc(firstSentence(row.text, 70))}</span>
+        <select class="lv-pick" data-id="${row.id}" title="改等级">
+          ${[0, 1, 2, 3, 4, 5]
+            .map(
+              (n) =>
+                `<option value="${n}" ${Number(row.mem_level) === n ? "selected" : ""}>${LEVEL_NAMES[n]}</option>`
+            )
+            .join("")}
+        </select>
+      </div>`
+    )
+    .join("");
+  const fields = profile.fields || {};
+  const fieldRows = Object.entries(fields).filter(([, v]) => v).length
+    ? Object.entries(fields)
+        .filter(([, v]) => v)
+        .map(([name, value]) => `<div class="kv"><span>${esc(name)}</span><p>${esc(value)}</p></div>`)
+        .join("")
+    : '<p class="hint">还没有画像</p>';
+  const words = (profile.keywords || []).map((w) => `<span class="chip">${esc(w)}</span>`).join("");
+  view.innerHTML = `
+    <div class="page-actions">
+      <button class="ghost" id="subj-back">返回列表</button>
+      <span class="saved">${esc(data.name || key)}　好感度 ${Math.round(Number(aff.score) || 0)}</span>
+    </div>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>关系</h3><p>${esc((data.stage_names || [])[aff.stage] || "")}</p></div>
+      <div class="pad">
+        <div class="row" style="align-items:center">
+          <input type="range" id="aff-range" min="0" max="1000" step="10" value="${Math.round(
+            Number(aff.score) || 0
+          )}" style="flex:1" />
+          <span class="mono" id="aff-num">${Math.round(Number(aff.score) || 0)}</span>
+          <button class="primary" id="aff-save">保存分数</button>
+        </div>
+        <p class="hint" style="margin:8px 0 0">手动改过之后，这一位不再被自动加减${data.blocked ? "；当前在不再构建名单里" : ""}</p>
+      </div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>画像</h3><p>${profile.exists ? esc(profile.updated_text || "") : "还没生成"}</p></div>
+      <div class="pad">
+        <p class="profile-summary">${esc(profile.summary || "这个人还没有画像")}</p>
+        <div class="chip-row">${words}</div>
+        ${fieldRows}
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="prof-build">重新生成</button>
+          <button class="ghost" id="prof-delete">删除画像并不再构建</button>
+          ${data.blocked ? '<button class="ghost" id="prof-unblock">解除不再构建</button>' : ""}
+        </div>
+      </div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>记忆（${atoms.length}）</h3><p>改等级会立刻影响它忘得多快</p></div>
+      <div class="pad">${rows || '<p class="hint">没有记忆</p>'}</div>
+    </section>`;
+
+  document.getElementById("subj-back").onclick = () => {
+    subjectKey = "";
+    render();
+  };
+  const range = document.getElementById("aff-range");
+  const num = document.getElementById("aff-num");
+  if (range)
+    range.oninput = () => {
+      if (num) num.textContent = range.value;
+    };
+  const affSave = document.getElementById("aff-save");
+  if (affSave)
+    affSave.onclick = async () => {
+      await post("page/affinity/save", { key, score: Number(range.value) });
+      render();
+    };
+  document.querySelectorAll(".lv-pick").forEach((sel) => {
+    sel.onchange = async () => {
+      await post("page/memory/level/set", { atom_id: Number(sel.dataset.id), level: Number(sel.value) });
+      render();
+    };
+  });
+  const build = document.getElementById("prof-build");
+  if (build)
+    build.onclick = async () => {
+      build.textContent = "生成中…";
+      try {
+        await post("page/memory/profile/build", { key });
+      } catch (err) {
+        build.textContent = err.message;
+        return;
+      }
+      render();
+    };
+  const del = document.getElementById("prof-delete");
+  if (del)
+    del.onclick = async () => {
+      await post("page/memory/profile/delete", { key, block: true });
+      render();
+    };
+  const unblock = document.getElementById("prof-unblock");
+  if (unblock)
+    unblock.onclick = async () => {
+      await post("page/memory/profile/unblock", { key });
+      render();
+    };
+}
+
+/* ------------------------------------------------ 等级与遗忘 */
+async function renderMemoryLevels() {
+  if (isNightUI() && typeof njMemoryLevels === "function") return njMemoryLevels();
+  const [levels, curve] = await Promise.all([
+    get("page/memory/levels"),
+    get("page/memory/forgetting", { days: 45 }),
+  ]);
+  const modes = curve.modes || ["off", "dream", "balanced", "ebbinghaus"];
+  const modeText = {
+    off: "不衰减",
+    dream: "长夜式",
+    balanced: "均衡",
+    ebbinghaus: "保守",
+  };
+  const modeBtns = modes
+    .map(
+      (mode) =>
+        `<button class="seg${mode === curve.mode ? " is-active" : ""}" data-mode="${mode}">${esc(
+          modeText[mode] || mode
+        )}</button>`
+    )
+    .join("");
+  const marks = [7, 14, 30, 45];
+  const head = marks.map((day) => `<th class="mono">${day} 天</th>`).join("");
+  const body = [1, 2, 3, 4, 5]
+    .map((level) => {
+      const series = (curve.series || {})[String(level)] || [];
+      const cells = marks
+        .map((day) => `<td class="mono">${Math.round((series[day] || 0) * 100)}%</td>`)
+        .join("");
+      const review = (curve.review_days || {})[String(level)];
+      return `<tr><td>${levelTag(level)} ${LEVEL_NAMES[level]}</td>${cells}<td class="mono">${
+        review ? review + " 天" : "—"
+      }</td></tr>`;
+    })
+    .join("");
+  const dist = (levels.levels || [])
+    .map((x) => `<li>${levelTag(x.level)} ${esc(x.name)}<span class="mono muted">${esc(x.count)} 条</span></li>`)
+    .join("");
+  view.innerHTML = `
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>衰减档位</h3><p>决定一条记忆多久被忘掉。改完立刻生效，不用重启</p></div>
+      <div class="pad">
+        <div class="segmented" id="mode-row">${modeBtns}</div>
+        <div class="row" style="margin-top:14px">
+          <div class="field" style="margin:0"><label>归档阈值</label>
+            <input type="number" step="0.01" id="fa-archive" value="${esc(curve.archive_ratio)}" /></div>
+          <div class="field" style="margin:0"><label>遗忘阈值</label>
+            <input type="number" step="0.01" id="fa-forget" value="${esc(curve.forget_ratio)}" /></div>
+          <div class="field" style="margin:0"><label>命中加成</label>
+            <input type="number" step="0.1" id="fa-boost" value="${esc(curve.hit_boost)}" /></div>
+        </div>
+        ${pageActions("保存衰减设置")}
+      </div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>还能记住多久</h3><p>按当前档位模拟，数字是保留率</p></div>
+      <div class="pad">
+        <table class="mini-table"><thead><tr><th>等级</th>${head}<th>该复习</th></tr></thead>
+        <tbody>${body}</tbody></table>
+      </div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>等级定义</h3><p>0 级永不忘，1 级最容易被忘</p></div>
+      <div class="pad"><ul class="plain-list">${dist}</ul></div>
+    </section>`;
+
+  document.querySelectorAll("[data-mode]").forEach((btn) => {
+    btn.onclick = async () => {
+      await post("page/memory/forgetting/save", { mode: btn.dataset.mode });
+      settingsCache = null;
+      render();
+    };
+  });
+  const save = document.getElementById("page-save");
+  if (save)
+    save.onclick = async () => {
+      const msg = document.getElementById("page-msg");
+      await post("page/memory/forgetting/save", {
+        archive_ratio: Number((document.getElementById("fa-archive") || {}).value),
+        forget_ratio: Number((document.getElementById("fa-forget") || {}).value),
+        hit_boost: Number((document.getElementById("fa-boost") || {}).value),
+      });
+      settingsCache = null;
+      if (msg) msg.textContent = "已保存";
+    };
+}
+
+/* ------------------------------------------------ 好感度 */
+async function renderAffinityPage() {
+  if (isNightUI() && typeof njAffinityPage === "function") return njAffinityPage();
+  const data = await get("page/affinity");
+  const names = data.names || [];
+  const thresholds = data.thresholds || [];
+  const nameInputs = names
+    .map(
+      (name, index) =>
+        `<div class="field" style="margin:0"><label>${index} 档</label>
+          <input type="text" class="aff-name" data-index="${index}" value="${esc(name)}" /></div>`
+    )
+    .join("");
+  const thresholdsInputs = thresholds
+    .map(
+      (value, index) =>
+        `<div class="field" style="margin:0"><label>门槛 ${index}</label>
+          <input type="number" class="aff-th" data-index="${index}" value="${esc(value)}" /></div>`
+    )
+    .join("");
+  const ranking = (data.ranking || [])
+    .map(
+      (row, index) =>
+        `<li><span class="mono muted">${index + 1}</span><span class="grow">${esc(
+          row.name || row.subject_key
+        )}</span>${stageChip(row.stage, row.stage_name)}<span class="mono">${Math.round(row.score)}</span></li>`
+    )
+    .join("");
+  view.innerHTML = `
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>阶段</h3><p>六个阶段的名字和分数门槛都能改</p></div>
+      <div class="pad">
+        <div class="row" style="margin-bottom:12px">${nameInputs}</div>
+        <div class="row" style="margin-bottom:12px">${thresholdsInputs}</div>
+        <div class="row">
+          <div class="field" style="margin:0"><label>单日最大变化</label>
+            <input type="number" step="1" id="aff-max" value="${esc(data.max_daily_delta)}" /></div>
+          <div class="field" style="margin:0"><label>多少天不说话开始掉</label>
+            <input type="number" step="1" id="aff-neglect" value="${esc(data.neglect_days)}" /></div>
+        </div>
+        ${pageActions("保存好感度设置")}
+        <p class="hint" style="margin:10px 0 0">当前状态：${data.enabled ? "启用" : "关闭"}；${
+          data.editable ? "面板可手改" : "面板只读"
+        }</p>
+      </div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>排行</h3><p>按分数从高到低</p></div>
+      <div class="pad">
+        ${ranking ? `<ol class="rank-list">${ranking}</ol>` : '<p class="hint">还没有记录</p>'}
+        <div class="row" style="margin-top:12px"><button class="ghost" id="aff-settle">立刻结算一次</button></div>
+      </div>
+    </section>`;
+  const save = document.getElementById("page-save");
+  if (save)
+    save.onclick = async () => {
+      const msg = document.getElementById("page-msg");
+      const names = [...document.querySelectorAll(".aff-name")].map((el) => el.value);
+      const ths = [...document.querySelectorAll(".aff-th")].map((el) => Number(el.value));
+      await post("page/affinity/config", {
+        stage_names: names,
+        stage_thresholds: ths,
+        max_daily_delta: Number((document.getElementById("aff-max") || {}).value),
+        neglect_days: Number((document.getElementById("aff-neglect") || {}).value),
+      });
+      settingsCache = null;
+      if (msg) msg.textContent = "已保存";
+    };
+  const settle = document.getElementById("aff-settle");
+  if (settle)
+    settle.onclick = async () => {
+      settle.textContent = "结算中…";
+      try {
+        await post("page/affinity/settle", {});
+      } catch (err) {
+        settle.textContent = err.message;
+        return;
+      }
+      render();
+    };
+}
+
+/* ------------------------------------------------ 头像 */
+async function renderAvatarPage() {
+  if (isNightUI() && typeof njAvatarPage === "function") return njAvatarPage();
+  const data = await get("page/avatar");
+  const items = data.items || [];
+  const pending = data.pending || [];
+  const card = (item, isPending) => `<div class="avatar-card">
+      <img src="file://${esc(item.path)}" alt="" onerror="this.style.opacity=0.25" />
+      <div class="avatar-meta">
+        <span class="mono small">${esc(item.source)}</span>
+        <span class="mono small muted">${esc(item.used_text || "")}</span>
+      </div>
+      <div class="avatar-actions">
+        ${isPending ? `<button class="primary tiny" data-trust="${item.id}">允许</button>` : ""}
+        <button class="ghost tiny" data-use="${item.id}">换成这张</button>
+        <button class="ghost tiny" data-drop="${item.id}">删</button>
+      </div>
+    </div>`;
+  const last = data.last || {};
+  const lastText = last.at ? `${fmtTime(last.at)}　来自 ${esc(last.reason || "user")}` : "还没换过";
+  view.innerHTML = `
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>换头像</h3><p>${data.available ? "通道可用" : "现在拿不到 bot 客户端"}</p></div>
+      <div class="pad">
+        <p class="hint" style="margin:0 0 10px">上次更换：${lastText}；今天已自动换 ${esc(
+          data.used_today || 0
+        )} / ${esc(data.daily_limit || 0)} 次</p>
+        <div class="row">
+          <button class="primary" id="avatar-random">从库里挑一张换</button>
+          <span class="saved" id="avatar-msg"></span>
+        </div>
+        <p class="hint" style="margin:10px 0 0">
+          自动换只用「可信」库里的图：你主动存进来的，或者你点过「允许」的。她自己扒到的图只会待在待审区
+        </p>
+      </div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>可信库（${items.length}）</h3><p>能被自动换用到的图</p></div>
+      <div class="pad"><div class="avatar-grid">${
+        items.map((item) => card(item, false)).join("") || '<p class="hint">库里还是空的，先把喜欢的图存进来</p>'
+      }</div></div>
+    </section>
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>待审（${pending.length}）</h3><p>她自己找的图，你允许了才会被用</p></div>
+      <div class="pad"><div class="avatar-grid">${
+        pending.map((item) => card(item, true)).join("") || '<p class="hint">没有待审的图</p>'
+      }</div></div>
+    </section>`;
+
+  document.querySelectorAll("[data-use]").forEach((btn) => {
+    btn.onclick = async () => {
+      const msg = document.getElementById("avatar-msg");
+      try {
+        await post("page/avatar/set", { id: Number(btn.dataset.use) });
+        if (msg) msg.textContent = "换好了";
+      } catch (err) {
+        if (msg) msg.textContent = err.message;
+      }
+    };
+  });
+  document.querySelectorAll("[data-trust]").forEach((btn) => {
+    btn.onclick = async () => {
+      await post("page/avatar/pool", { action: "trust", id: Number(btn.dataset.trust) });
+      render();
+    };
+  });
+  document.querySelectorAll("[data-drop]").forEach((btn) => {
+    btn.onclick = async () => {
+      await post("page/avatar/pool", { action: "delete", id: Number(btn.dataset.drop) });
+      render();
+    };
+  });
+  const random = document.getElementById("avatar-random");
+  if (random)
+    random.onclick = async () => {
+      const msg = document.getElementById("avatar-msg");
+      try {
+        await post("page/avatar/set", { id: 0, pool_id: 0 });
+        // id=0 时后端会从库里随机挑
+        const picked = items[0];
+        if (picked) await post("page/avatar/set", { id: picked.id });
+        if (msg) msg.textContent = "换好了";
+        render();
+      } catch (err) {
+        if (msg) msg.textContent = err.message;
+      }
+    };
+}
+
 (async function boot() {
   bindGroupCard();
   try {
@@ -1883,5 +2540,339 @@ view.addEventListener("click", (ev) => {
     view.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
     return;
   }
-  await render();
+  const start = parseHash();
+  setView(start.view, start.sub);
 })();
+
+
+/* ==================================================================
+   v6 · 记忆三板块：记忆总览 / 按用户分 / 按会话分
+   ================================================================== */
+
+const M3_KIND_CN = { pref: "偏好", preference: "偏好", event: "事件", relation: "关系", emotion: "情绪", promise: "约定", fact: "事实" };
+
+function m3KindCN(kind) {
+  return M3_KIND_CN[kind] || memKindCN(kind) || "事实";
+}
+function m3KindClass(kind) {
+  if (kind === "event") return "m";
+  if (kind === "relation") return "v";
+  return "p";
+}
+
+/* 头像：私聊圆形、群聊方形；取不到就回落首字 */
+function avatarUrl(kind, id) {
+  const key = String(id == null ? "" : id).trim();
+  /* 只有纯数字才是 QQ 号或群号，昵称类主体直接回落首字 */
+  if (!/^\d{5,12}$/.test(key)) return "";
+  if (kind === "group") return `https://p.qlogo.cn/gh/${key}/${key}/640`;
+  return `https://q1.qlogo.cn/g?b=qq&nk=${key}&s=640`;
+}
+
+function avatarHtml(kind, id, name, cls) {
+  const url = avatarUrl(kind, id);
+  const initial = esc(String(name || id || "?").slice(0, 1));
+  const klass = `v6-av${kind === "group" ? " sq" : ""}${cls ? " " + cls : ""}`;
+  if (!url) return `<span class="${klass}"><span class="fb">${initial}</span></span>`;
+  return `<span class="${klass}"><img src="${esc(url)}" alt="" loading="lazy" data-fb="${initial}" onerror="var p=this.parentNode;this.remove();p.textContent=this.dataset.fb"></span>`;
+}
+
+function m3Day(ts) {
+  if (!ts) return "";
+  const d = new Date(Number(ts) * 1000);
+  return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function m3When(ts) {
+  if (!ts) return "";
+  const now = Date.now() / 1000;
+  const diff = now - Number(ts);
+  const d = new Date(Number(ts) * 1000);
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (diff < 86400) return `今天 ${hm}`;
+  if (diff < 172800) return `昨天 ${hm}`;
+  if (diff < 7 * 86400) return `${Math.floor(diff / 86400)} 天前`;
+  return m3Day(ts);
+}
+function m3Remain(atom) {
+  if (atom.expire_at == null || Number(atom.expire_at) === 0) return "永久";
+  const left = Math.round((Number(atom.expire_at) - Date.now() / 1000) / 86400);
+  if (left <= 0) return "已过期";
+  return `剩 ${left} 天`;
+}
+
+function m3AtomRow(atom) {
+  const kind = m3KindCN(atom.kind);
+  return `<div class="m3-ev">
+    <div class="pt"><i></i></div>
+    <div class="bd">
+      <div class="meta">
+        <span class="m3-chip ${m3KindClass(atom.kind)}">${esc(kind)}</span>
+        <em>${esc(m3Remain(atom))} · ${esc(m3When(atom.created_at))}</em>
+      </div>
+      <p>${esc(atom.text || "")}</p>
+    </div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------ 记忆总览 */
+async function renderM3Overview() {
+  if (isNightUI() && typeof njM3Overview === "function") return njM3Overview();
+  const data = await get("page/memory/m3/overview");
+  const total = Number(data.total || 0);
+  const kinds = data.kinds || [];
+  const maxKind = Math.max(1, ...kinds.map((k) => Number(k.count || 0)));
+  const heat = data.heatmap || {};
+  const recent = data.recent || [];
+
+  /* 最近 182 天按周聚合成 26 格 */
+  const cells = [];
+  const today = new Date();
+  for (let w = 25; w >= 0; w--) {
+    let sum = 0;
+    for (let d = 0; d < 7; d++) {
+      const day = new Date(today.getTime() - (w * 7 + d) * 86400000);
+      const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+      sum += Number(heat[key] || 0);
+    }
+    cells.push(sum);
+  }
+  const maxCell = Math.max(1, ...cells);
+  const heatHtml = cells
+    .map((n) => {
+      const ratio = n / maxCell;
+      const alpha = n === 0 ? 0.06 : 0.18 + ratio * 0.72;
+      return `<i style="background:rgba(155,196,177,${alpha.toFixed(2)})" title="${n} 条"></i>`;
+    })
+    .join("");
+
+  const kindHtml = kinds.length
+    ? kinds
+        .map(
+          (k) => `<div class="m3-bar">
+            <div class="k">${esc(m3KindCN(k.kind))}</div>
+            <div class="tr"><i style="width:${Math.round((Number(k.count) / maxKind) * 100)}%"></i></div>
+            <div class="n">${esc(k.count)}</div>
+          </div>`
+        )
+        .join("")
+    : '<p class="hint">还没有记忆，聊几句就会开始记</p>';
+
+  view.innerHTML = `
+    <div class="m3-strip">
+      <div class="m3-st"><div class="n">记忆总条数</div><div class="v">${esc(total)}<small>条</small></div>
+        <div class="t">近 30 天新增 ${esc(data.month_new || 0)}</div></div>
+      <div class="m3-st"><div class="n">永久记忆</div><div class="v">${esc(data.permanent_pct || 0)}<small>%</small></div>
+        <div class="t">${esc(data.permanent || 0)} 条不会淡</div></div>
+      <div class="m3-st"><div class="n">快忘掉的</div><div class="v">${esc(data.fading || 0)}<small>条</small></div>
+        <div class="t">7 天内会淡出</div></div>
+      <div class="m3-st"><div class="n">认识的人 / 会话</div><div class="v">${esc(data.people || 0)}<small>/ ${esc(data.sessions || 0)}</small></div>
+        <div class="t">${data.pending ? `待确认 ${esc(data.pending)} 条` : "没有待确认"}</div></div>
+    </div>
+
+    <div class="m3-cols">
+      <div>
+        <div class="m3-blk-h"><h2>记忆类型</h2><span>按条数</span></div>
+        ${kindHtml}
+        <div class="m3-blk-h" style="margin-top:22px"><h2>记过话的日子</h2><span>近 26 周 · 颜色越深条数越多</span></div>
+        <div class="m3-heat">${heatHtml}</div>
+        <div class="m3-heatlbl"><span>半年前</span><span>3 个月前</span><span>现在</span></div>
+        <div class="m3-note">
+          <em>记忆系统的自述</em>
+          <p>${esc(data.attitude || "")}</p>
+        </div>
+      </div>
+      <div>
+        <div class="m3-blk-h"><h2>最近写入</h2><span>新的在上面</span></div>
+        ${recent.length ? recent.map((a) => m3AtomRow(a, true)).join("") : '<p class="hint">还没有最近写入</p>'}
+      </div>
+    </div>
+  `;
+}
+
+/* ------------------------------------------------------------ 按用户分 */
+let m3UserId = "";
+async function renderM3Users() {
+  if (isNightUI() && typeof njM3Users === "function") return njM3Users();
+  const list = await get("page/memory/subjects", { limit: 200 });
+  const items = (list.items || []).map((x) => ({ ...x, key: x.user_id || x.subject_id || "" }));
+  if (!items.length) {
+    view.innerHTML = '<div class="empty">还没有记住任何人</div>';
+    return;
+  }
+  if (!m3UserId || !items.some((x) => x.key === m3UserId)) m3UserId = items[0].key;
+  const detail = await get("page/memory/subject", { key: m3UserId });
+  const atoms = (detail.atoms || []).slice(0, 6);
+  const aff = detail.affinity || {};
+  const profile = detail.profile || {};
+  const prof = profile.data || profile.fields || profile || {};
+  const score = aff.score != null ? aff.score : aff.value != null ? aff.value : 0;
+  const stageName = aff.stage_name || aff.stage || "—";
+
+  const rows = items
+    .slice(0, 12)
+    .map((x) => {
+      const name = x.display_name || x.name || x.nickname || x.key;
+      const cnt = x.atom_count != null ? x.atom_count : x.count != null ? x.count : 0;
+      const affObj = x.affinity || {};
+      const own = affObj.score != null ? affObj.score : affObj.value != null ? affObj.value : affObj;
+      const lv = x.level || affObj.level || "";
+      return `<div class="m3-row ${x.key === m3UserId ? "is-on" : ""}" data-m3-uid="${esc(x.key)}">
+        ${avatarHtml("user", x.key, name)}
+        <div><b>${esc(name)}</b>
+          <span>${esc(cnt)} 条${lv ? ` · Lv.${esc(lv)}` : ""}</span></div>
+        <em>${typeof own === "number" ? esc(Math.round(own)) : ""}</em>
+      </div>`;
+    })
+    .join("");
+
+  const profItems = [
+    ["称呼", prof.call || prof.nickname || "—"],
+    ["作息", prof.sleep || prof.routine || "—"],
+    ["忌口", prof.food || prof.taste || "—"],
+    ["雷点", prof.taboo || prof.dislike || "—"],
+  ]
+    .map(([k, v]) => `<div><span class="m3-chip">${esc(k)}</span><div style="font-size:15.5px;margin-top:6px">${esc(v)}</div></div>`)
+    .join("");
+
+  const stageBars = (detail.stage_names || ["陌生", "眼熟", "常聊", "熟", "很近", "亲近", "现在"])
+    .map((name, i, arr) => {
+      const on = aff.stage_index != null ? i <= Number(aff.stage_index) : i >= arr.length - 1;
+      return `<i class="${on ? "hi" : ""}" style="height:${28 + i * 8}%" title="${esc(name)}"></i>`;
+    })
+    .join("");
+
+  view.innerHTML = `
+    <div style="display:grid;grid-template-columns:296px 1fr;gap:26px">
+      <div class="m3-list">
+        <div class="hd"><h2>认识的人</h2><span>${esc(list.total || items.length)}</span></div>
+        ${rows}
+      </div>
+      <div>
+        <div class="m3-hero">
+          ${avatarHtml("user", m3UserId, detail.name || m3UserId, "lg")}
+          <div><b>${esc(detail.name || m3UserId)}</b>
+            <span>${esc(atoms.length)} 条近期记忆 · Lv.${esc(aff.level || "-")} · ${esc(stageName)} · 好感 ${esc(Math.round(score))}</span></div>
+        </div>
+        <div style="display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:26px">
+          <div>
+            <div class="m3-blk-h"><h2>这个人她记住了什么</h2><span>最近 ${esc(atoms.length)} 条</span></div>
+            ${atoms.length ? atoms.map((a) => m3AtomRow(a, false)).join("") : '<p class="hint">关于这个人还没有记忆</p>'}
+          </div>
+          <div>
+            <div class="m3-blk-h"><h2>画像与好感</h2><span>她的判断</span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">${profItems}</div>
+            <div class="m3-bars">${stageBars}</div>
+            <div class="m3-barlbl"><span>陌生</span><span>熟</span><span>现在</span></div>
+            <div class="m3-note">
+              <em>她私下记的一句</em>
+              <p>${esc(prof.summary || prof.note || "还没有形成判断，多聊几次就有了。")}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  view.querySelectorAll("[data-m3-uid]").forEach((row) => {
+    row.onclick = () => {
+      m3UserId = row.dataset.m3Uid;
+      render();
+    };
+  });
+}
+
+/* ------------------------------------------------------------ 按会话分 */
+let m3SessionId = "";
+async function renderM3Sessions() {
+  if (isNightUI() && typeof njM3Sessions === "function") return njM3Sessions();
+  const data = await get("page/memory/sessions");
+  const items = data.items || [];
+  if (!items.length) {
+    view.innerHTML = '<div class="empty">还没有按会话记下东西</div>';
+    return;
+  }
+  if (!m3SessionId || !items.some((x) => x.session_id === m3SessionId)) m3SessionId = items[0].session_id;
+  const detail = await get("page/memory/session", { session_id: m3SessionId });
+  const atoms = (detail.atoms || []).slice(0, 6);
+  const kinds = detail.kinds || [];
+  const hours = detail.hours || {};
+  const maxKind = Math.max(1, ...kinds.map((k) => Number(k.count || 0)));
+  const maxHour = Math.max(1, ...Object.values(hours).map((n) => Number(n || 0)));
+
+  const rows = items
+    .slice(0, 12)
+    .map((x) => {
+      const isGroup = x.kind === "group" || String(x.label || "").includes("群");
+      return `<div class="m3-row ${x.session_id === m3SessionId ? "is-on" : ""}" data-m3-sid="${esc(x.session_id)}">
+        ${avatarHtml(isGroup ? "group" : "user", isGroup ? x.session_id : x.session_id, x.label)}
+        <div><b>${esc(x.label || x.session_id)}</b>
+          <span>${esc(x.count)} 条 · ${esc(m3When(x.last_at))}</span></div>
+        <em>›</em>
+      </div>`;
+    })
+    .join("");
+
+  const kindHtml = kinds.length
+    ? kinds
+        .map(
+          (k) => `<div class="m3-bar"><div class="k">${esc(m3KindCN(k.kind))}</div>
+            <div class="tr"><i style="width:${Math.round((Number(k.count) / maxKind) * 100)}%"></i></div>
+            <div class="n">${esc(k.count)}</div></div>`
+        )
+        .join("")
+    : '<p class="hint">没有类型统计</p>';
+
+  const hourBars = Array.from({ length: 24 }, (_, h) => {
+    const n = Number(hours[String(h)] || 0);
+    return `<i class="${n === maxHour && n > 0 ? "hi" : ""}" style="height:${Math.max(6, Math.round((n / maxHour) * 100))}%" title="${h} 点 ${n} 条"></i>`;
+  }).join("");
+
+  const spanDays = items.find((x) => x.session_id === m3SessionId)?.days || 1;
+  const lastAt = items.find((x) => x.session_id === m3SessionId)?.last_at;
+
+  view.innerHTML = `
+    <div style="display:grid;grid-template-columns:320px 1fr;gap:26px">
+      <div class="m3-list">
+        <div class="hd"><h2>会话</h2><span>${esc(data.total || items.length)} 个</span></div>
+        ${rows}
+      </div>
+      <div>
+        <div class="m3-hero">
+          ${avatarHtml(String(detail.kind || "").includes("group") ? "group" : "user", m3SessionId, detail.label, "lg")}
+          <div><b>${esc(detail.label || m3SessionId)}</b>
+            <span>跨度 ${esc(spanDays)} 天 · ${esc((detail.atoms || []).length)} 条记忆 · 最近 ${esc(m3When(lastAt))}</span></div>
+        </div>
+        <div style="display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:26px">
+          <div>
+            <div class="m3-blk-h"><h2>这个会话里记住的事</h2><span>按时间倒序</span></div>
+            ${atoms.length ? atoms.map((a) => m3AtomRow(a, true)).join("") : '<p class="hint">这个会话还没有记忆</p>'}
+          </div>
+          <div>
+            <div class="m3-blk-h"><h2>这个会话的形状</h2><span>活跃时段 / 类型</span></div>
+            <p class="hint" style="margin:0 0 4px">她在这个会话最活跃的时段</p>
+            <div class="m3-bars" style="height:88px">${hourBars}</div>
+            <div class="m3-barlbl"><span>0 点</span><span>6</span><span>12</span><span>18</span><span>24 点</span></div>
+            <div class="m3-blk-h" style="margin-top:20px"><h2>记忆类型</h2><span>这个会话</span></div>
+            ${kindHtml}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  view.querySelectorAll("[data-m3-sid]").forEach((row) => {
+    row.onclick = () => {
+      m3SessionId = row.dataset.m3Sid;
+      render();
+    };
+  });
+}
+
+
+/* ------------------------------------------------------------------ 夜航分发门
+   data-ui="night" 时所有页面走 night.js 的全量实现（概览/人格/行为/记忆/长夜/工具/QQ/系统）
+   这里只留判断，具体渲染在 night.js，文件更短也更好改
+   ------------------------------------------------------------------ */
+function isNightUI() {
+  return document.documentElement.dataset.ui === "night";
+}

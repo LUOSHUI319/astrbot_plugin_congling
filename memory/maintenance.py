@@ -17,6 +17,7 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core import paths
+from .forgetting import ForgettingCurve
 
 REFLECT_PROMPT = """你在整理对一个用户的认识。下面是关于 TA 的记忆条目（已经过时间衰减筛选）。
 
@@ -45,28 +46,69 @@ class Maintenance:
         await self.backup()
 
     async def decay(self) -> int:
-        factor = self.config.float("memory.decay_factor", 0.985)
+        """按等级衰减。返回本次实际改动的条数（给日志和 UI 用）。
+
+        0.5.0 起不再全表乘一个因子：每条按自己的等级、距上次被想起的天数、
+        被想起过几次来算保留率。off 档保留 0.4.x 的老逻辑，方便回退。
+        """
+        curve = ForgettingCurve(self.plugin)
+        now = int(time.time())
         archive_days = self.config.int("memory.archive_after_days", 30)
         forget_days = self.config.int("memory.forget_after_days", 90)
-        now = int(time.time())
 
-        await self.store.execute(
-            "UPDATE mem_atom SET decay=MIN(1.0, decay*?) WHERE status='active' AND protect=0",
-            (factor,),
+        if curve.mode == "off":
+            factor = self.config.float("memory.decay_factor", 0.985)
+            await self.store.execute(
+                "UPDATE mem_atom SET decay=MIN(1.0, decay*?) WHERE status='active' AND protect=0",
+                (factor,),
+            )
+            await self.store.execute(
+                "UPDATE mem_atom SET status='archived' "
+                "WHERE status='active' AND protect=0 AND decay<0.45 "
+                "AND last_hit_at>0 AND last_hit_at<?",
+                (now - archive_days * 86400,),
+            )
+            await self.store.execute(
+                "UPDATE mem_atom SET status='forgotten' "
+                "WHERE status IN ('active','archived') AND protect=0 "
+                "AND ((last_hit_at=0 AND created_at<?) OR (last_hit_at>0 AND last_hit_at<?))",
+                (now - forget_days * 86400, now - forget_days * 86400),
+            )
+            return 0
+
+        rows = await self.store.fetch_all(
+            "SELECT id, mem_level, created_at, last_hit_at, hit_count, decay, status, protect "
+            "FROM mem_atom WHERE status IN ('active','archived')"
         )
-        await self.store.execute(
-            "UPDATE mem_atom SET status='archived' "
-            "WHERE status='active' AND protect=0 AND decay<0.45 "
-            "AND last_hit_at>0 AND last_hit_at<?",
-            (now - archive_days * 86400,),
-        )
-        await self.store.execute(
-            "UPDATE mem_atom SET status='forgotten' "
-            "WHERE status IN ('active','archived') AND protect=0 "
-            "AND ((last_hit_at=0 AND created_at<?) OR (last_hit_at>0 AND last_hit_at<?))",
-            (now - forget_days * 86400, now - forget_days * 86400),
-        )
-        return 0
+        updates: list[tuple[Any, ...]] = []
+        changed = 0
+        for row in rows:
+            if int(row.get("protect") or 0):
+                continue
+            level = int(row.get("mem_level") or 3)
+            if level <= 0:
+                continue
+            last = max(int(row.get("last_hit_at") or 0), int(row.get("created_at") or 0))
+            days = (now - last) / 86400 if last else 0.0
+            hits = int(row.get("hit_count") or 0)
+            value = curve.decay_at(level, days, hits)
+            status = str(row.get("status") or "active")
+            if status == "active":
+                status = curve.status_for(value)
+            elif status == "archived" and value < curve.forget_ratio:
+                status = "forgotten"
+            old_decay = float(row.get("decay") or 1.0)
+            review = now + curve.next_review_days(level, hits) * 86400 if level else 0
+            if abs(old_decay - value) < 0.002 and status == str(row.get("status") or "active"):
+                continue
+            updates.append((value, status, review, int(row["id"])))
+            changed += 1
+
+        if updates:
+            await self.store.executemany(
+                "UPDATE mem_atom SET decay=?, status=?, next_review_at=? WHERE id=?", updates
+            )
+        return changed
 
     async def reflect(self) -> None:
         rows = await self.store.fetch_all(

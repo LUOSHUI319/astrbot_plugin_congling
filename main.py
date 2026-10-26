@@ -30,7 +30,7 @@ from .core.probe import Probe
 from .core.rhythm import RhythmController
 from .core.store import Store
 
-PLUGIN_VERSION = "0.4.7"
+PLUGIN_VERSION = "0.5.0"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -83,10 +83,18 @@ class ConglingPlugin(Star):
 
         self._started_at = int(time.time())
         self._boot_errors: list[str] = []
+        self.config_upgrade: dict[str, Any] = {}
 
     # ================================================================ 生命周期
     async def initialize(self) -> None:
         await self.store.open()
+        try:
+            from .core import migrate as config_migrate
+
+            self.config_upgrade = await config_migrate.run(self)
+        except Exception as exc:
+            self.config_upgrade = {"applied": False, "reason": repr(exc)}
+            logger.debug(f"[congling] 配置升级失败: {exc!r}")
         await self._safe_boot("models", self._boot_models)
 
         await self._safe_boot("perception", self._boot_perception)
@@ -213,6 +221,7 @@ class ConglingPlugin(Star):
                     await self.memory.daily_tick()
                 await self.decision.purge()
                 await self._purge_cache()
+                await self._qq_daily_tick()
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -238,6 +247,30 @@ class ConglingPlugin(Star):
             await self.store.execute("DELETE FROM forward_cache WHERE expires_at < ?", (cutoff,))
         except Exception:
             pass
+
+    async def _qq_daily_tick(self) -> None:
+        """每小时看一次：今天的说说到点了没有，该换脸了没有。
+
+        两件事都很轻：说说受配额和时段约束，头像受日限和头像库约束，
+        没到点就立刻返回，不占资源。
+        """
+        ext = self.qqext
+        if ext is None:
+            return
+        try:
+            daily = getattr(ext, "qzone_daily", None)
+            if daily is not None:
+                await daily.tick()
+        except Exception as exc:
+            logger.debug(f"[congling] 每日说说任务出错: {exc!r}")
+        try:
+            pool = getattr(ext, "avatar_pool", None)
+            avatar = getattr(ext, "avatar", None)
+            if pool is not None and avatar is not None:
+                if self.cfg.bool("qq_extra.avatar_auto_change", True):
+                    await pool.auto_change(avatar)
+        except Exception as exc:
+            logger.debug(f"[congling] 自动换头像失败: {exc!r}")
 
     # ================================================================ 工具方法
     @property
@@ -436,6 +469,11 @@ class ConglingPlugin(Star):
                 if hint:
                     current = getattr(req, "system_prompt", "") or ""
                     setattr(req, "system_prompt", f"{current}\n\n{hint}".strip())
+            if self.qqext is not None:
+                avatar_hint = self.qqext.avatar_hint()
+                if avatar_hint:
+                    current = getattr(req, "system_prompt", "") or ""
+                    setattr(req, "system_prompt", f"{current}\n\n{avatar_hint}".strip())
             if self.capabilities is not None:
                 self.capabilities.attach_tools(req)
         except Exception as exc:
@@ -538,4 +576,5 @@ class ConglingPlugin(Star):
             },
             "compat": self.probe.matrix(),
             "boot_errors": list(self._boot_errors),
+            "config_upgrade": dict(self.config_upgrade or {}),
         }
