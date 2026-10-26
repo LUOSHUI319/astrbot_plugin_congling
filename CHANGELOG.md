@@ -39,7 +39,7 @@
 3. 人设注入仍然幂等
 4. 全插件（含 tests、脚本）不许 `import logging`
 
-跑法：`python tests/check_prompt_cache.py`，当前 15 项全过。
+跑法：`python tests/check_prompt_cache.py`，当前 17 项全过。
 
 ## 关于 0.4.2 那条 changelog
 
