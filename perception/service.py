@@ -70,6 +70,17 @@ class PerceptionService:
                 await self._handle_card(block, comp)
             blocks.append(block)
 
+        # 主动找人要按 umo 发消息，而 session_id 只有群号/QQ 号，还原不出平台，
+        # 所以归档时把 umo 和平台名一起存下来（老数据为空时发送侧再拼）
+        try:
+            msg.meta["umo"] = str(getattr(event, "unified_msg_origin", "") or "")
+        except Exception:
+            msg.meta["umo"] = ""
+        try:
+            msg.meta["platform"] = str(self._safe(event, "get_platform_name") or "")
+        except Exception:
+            msg.meta["platform"] = ""
+
         msg.blocks = blocks
         msg.text = blocks_to_text(blocks)
         msg.quoted = next((b.text for b in blocks if b.kind == "quote"), "")
@@ -83,6 +94,12 @@ class PerceptionService:
         self.plugin._current_event = event
         self.plugin._current_bot = getattr(event, "bot", None)
         self.plugin._last_perceived = msg
+        # 再绑一份到事件自己身上：发送阶段要引用「这条消息」，
+        # 只看 _last_perceived 会拿错（主动消息、并发两条、延时回复都会错位）
+        try:
+            setattr(event, "_congling_perceived", msg)
+        except Exception:
+            pass
         return msg
 
     # ================================================================ 注入
@@ -267,8 +284,9 @@ class PerceptionService:
             return
         try:
             await self.store.execute(
-                "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, blocks_json, expanded, forward_id) "
-                "SELECT ?,?,?,?,?,?,?,?,?,? "
+                "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
+                "blocks_json, expanded, forward_id, umo, platform) "
+                "SELECT ?,?,?,?,?,?,?,?,?,?,?,? "
                 "WHERE NOT EXISTS(SELECT 1 FROM msg_archive WHERE msg_id IS ? AND session_id = ?)",
                 (
                     msg.msg_id,
@@ -295,6 +313,8 @@ class PerceptionService:
                         ),
                         None,
                     ),
+                    str(msg.meta.get("umo") or ""),
+                    str(msg.meta.get("platform") or ""),
                     msg.msg_id,
                     msg.session_id,
                 ),

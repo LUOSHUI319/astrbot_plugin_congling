@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="./style.css?v=6" />
   <link rel="stylesheet" href="./theme-v6.css?v=6" />
   <!-- 夜航手账：全量皮肤，只在 data-ui="night" 时生效 -->
-  <link rel="stylesheet" href="./night.css?v=20261027a" />
+  <link rel="stylesheet" href="./night.css?v=20261027m" />
 </head>
 <body>
   <div class="app">
@@ -27,6 +27,7 @@
         <button class="nav-item" data-view="behavior">行为</button>
         <button class="nav-item" data-view="memory">记忆</button>
         <button class="nav-item" data-view="night">长夜</button>
+        <button class="nav-item" data-view="diary">日记</button>
         <button class="nav-item" data-view="tools">工具</button>
         <button class="nav-item" data-view="qq">QQ</button>
         <button class="nav-item" data-view="system">系统</button>
@@ -45,12 +46,6 @@
       <header class="head">
         <h1 id="title">概览</h1>
         <div class="head-right">
-          <div class="picker" id="theme-picker" title="配色">
-            <button class="picker-btn" aria-label="配色">
-              <span class="picker-dot"></span>
-            </button>
-            <div class="picker-menu" id="theme-menu"></div>
-          </div>
           <div class="picker" id="font-picker" title="字体">
             <button class="picker-btn picker-btn-font" aria-label="字体">字</button>
             <div class="picker-menu" id="font-menu"></div>
@@ -66,7 +61,7 @@
     </main>
   </div>
   <!-- night.js 要先于 app.js 执行：app.js 的 render 会在这里找 nj* 函数 -->
-  <script src="./night.js?v=20261027a" defer></script>
-  <script src="./app.js?v=20261027a" defer></script>
+  <script src="./night.js?v=20261027m" defer></script>
+  <script src="./app.js?v=20261027m" defer></script>
 </body>
 </html>

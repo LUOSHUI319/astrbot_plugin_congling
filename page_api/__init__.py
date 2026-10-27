@@ -17,8 +17,10 @@ from astrbot.api import logger
 from astrbot.api.web import request
 
 from ..core import paths
+from .diary import DiaryMixin
 from .memory_m3 import MemoryM3Mixin
 from .memory_v2 import MemoryV2Mixin
+from .proactive import ProactiveMixin
 
 PAGE_API_PREFIX = "/astrbot_plugin_congling/page"
 """必须与 metadata.yaml 的 name 完全一致。
@@ -223,7 +225,7 @@ def _schema_groups(config: Any) -> list[dict[str, Any]]:
     return groups
 
 
-class PageApi(MemoryM3Mixin, MemoryV2Mixin):
+class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self.cfg = plugin.cfg
@@ -288,8 +290,21 @@ class PageApi(MemoryM3Mixin, MemoryV2Mixin):
             ("/night/sleep", self.night_sleep, ["POST"]),
             ("/night/dream/delete", self.night_dream_delete, ["POST"]),
             ("/night/dream/pin", self.night_dream_pin, ["POST"]),
+            ("/night/dream/make", self.night_dream_make, ["POST"]),
             ("/night/unread", self.night_unread, ["GET"]),
             ("/night/crawl", self.night_crawl, ["POST"]),
+            # ---- 0.7.0 日记
+            ("/diary/list", self.diary_list, ["GET"]),
+            ("/diary/get", self.diary_get, ["GET"]),
+            ("/diary/generate", self.diary_generate, ["POST"]),
+            ("/diary/delete", self.diary_delete, ["POST"]),
+            ("/diary/pin", self.diary_pin, ["POST"]),
+            # ---- 0.7.0 主动找人
+            ("/proactive/state", self.proactive_state, ["GET"]),
+            ("/proactive/sessions", self.proactive_sessions, ["GET"]),
+            ("/proactive/log", self.proactive_log, ["GET"]),
+            ("/proactive/now", self.proactive_now, ["POST"]),
+            ("/proactive/mute", self.proactive_mute, ["POST"]),
             # ---- 0.5.0 记忆 2.0
             ("/memory/levels", self.memory_levels, ["GET"]),
             ("/memory/levels/save", self.memory_levels_save, ["POST"]),
@@ -485,6 +500,10 @@ class PageApi(MemoryM3Mixin, MemoryV2Mixin):
             )
             total = await atoms.count()
             try:
+                unread = await atoms.count_unread()
+            except Exception:
+                unread = 0
+            try:
                 sessions = await atoms.sessions()
             except Exception:
                 sessions = []
@@ -495,6 +514,7 @@ class PageApi(MemoryM3Mixin, MemoryV2Mixin):
             return _ok(
                 {
                     "total": total,
+                    "unread": unread,
                     "items": rows,
                     "sessions": sessions,
                     "tier": tier,
@@ -715,6 +735,32 @@ class PageApi(MemoryM3Mixin, MemoryV2Mixin):
         except Exception as exc:
             return _err(repr(exc)[:200])
 
+    async def night_dream_make(self) -> dict[str, Any]:
+        """手动补一段梦。
+
+        正常是睡着期间定时做的，这里给面板一个「现在做一段」的入口：
+        想确认梦这条链路通不通、或者刚改完配置想立刻看效果，不用等下一觉。
+        """
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None or getattr(night, "dreamer", None) is None:
+                return _err("长夜如梦没有启用")
+            dreamer = night.dreamer
+            if not dreamer.enabled:
+                return _err("梦境开关是关着的，先把 night.dream_enabled 打开")
+            if not getattr(dreamer, "_loaded", False):
+                await dreamer.load()
+            last = dreamer.list_recent(1)
+            continuation = ""
+            if last:
+                continuation = (last[0].text or "")[-200:]
+            entry = await dreamer.make(continuation=continuation)
+            if entry is None:
+                return _err("这段梦没生成出来，可能模型没返回或素材为空，看看日志")
+            return _ok({"dream": entry.to_dict(), "stats": dreamer.stats()})
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
     async def night_dreams(self) -> dict[str, Any]:
         try:
             night = getattr(self.plugin, "night", None)
@@ -725,6 +771,11 @@ class PageApi(MemoryM3Mixin, MemoryV2Mixin):
                 limit = int(params.get("limit") or 20)
             except (TypeError, ValueError):
                 limit = 20
+            if not getattr(night.dreamer, "_loaded", False):
+                try:
+                    await night.dreamer.load()
+                except Exception:
+                    pass
             dreams = night.dreamer.list_recent(max(1, min(100, limit)))
             items = []
             for dream in dreams:
@@ -826,14 +877,36 @@ class PageApi(MemoryM3Mixin, MemoryV2Mixin):
         try:
             night = getattr(self.plugin, "night", None)
             if night is None:
-                return _ok({"items": [], "count": 0})
+                return _ok({"items": [], "groups": [], "count": 0, "total": 0})
             params = await _params()
             try:
                 limit = int(params.get("limit") or 20)
             except (TypeError, ValueError):
                 limit = 20
             items = await night.crawler.unread_atoms(max(1, min(100, limit)))
-            return _ok({"items": items, "count": len(items)})
+            total = 0
+            groups: list[dict[str, Any]] = []
+            try:
+                rows = await self.plugin.store.fetch_all(
+                    "SELECT session_id, session_kind, session_label, COUNT(*) AS c, "
+                    "MIN(unread_since) AS since FROM mem_atom "
+                    "WHERE status='active' AND unread=1 GROUP BY session_id, session_kind, session_label "
+                    "ORDER BY since DESC LIMIT 20"
+                )
+                for row in rows:
+                    total += int(row["c"] or 0)
+                    groups.append({
+                        "session_id": str(row["session_id"] or ""),
+                        "kind": str(row["session_kind"] or ""),
+                        "label": str(row["session_label"] or "") or str(row["session_id"] or ""),
+                        "count": int(row["c"] or 0),
+                        "since": int(row["since"] or 0),
+                    })
+            except Exception as exc:
+                logger.debug(f"[congling] 未爬分组失败: {exc!r}")
+            if not total:
+                total = len(items)
+            return _ok({"items": items, "groups": groups, "count": len(items), "total": total})
         except Exception as exc:
             return _err(repr(exc)[:200])
 

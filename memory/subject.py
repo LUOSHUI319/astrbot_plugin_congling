@@ -194,7 +194,7 @@ class SubjectBook:
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         rows = await self.store.fetch_all(
-            "SELECT * FROM mem_atom WHERE persona_id=? AND status=? "
+            "SELECT * FROM mem_atom WHERE persona_id=? AND status=? AND (unread IS NULL OR unread=0) "
             "AND (subject_id=? OR id IN (SELECT atom_id FROM mem_atom_tag WHERE subject_key=?)) "
             "ORDER BY (COALESCE(decay,1.0) * (1.0 + COALESCE(mem_level,3) * 0.2)) DESC, id DESC LIMIT ?",
             (
@@ -228,7 +228,8 @@ class SubjectBook:
             try:
                 count = int(
                     await self.store.scalar(
-                        "SELECT COUNT(*) FROM mem_atom WHERE persona_id=? AND subject_id=? AND status='active'",
+                        "SELECT COUNT(*) FROM mem_atom WHERE persona_id=? AND subject_id=? AND status='active' "
+                        "AND (unread IS NULL OR unread=0)",
                         (persona, key),
                         0,
                     )

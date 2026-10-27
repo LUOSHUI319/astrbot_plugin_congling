@@ -42,6 +42,7 @@ class RhythmController:
         as_voice: bool = False,
         sticker_tag: str | None = None,
         reason: str = "",
+        extra_hold: float = 0.0,
     ) -> RhythmPlan:
         cleaned = self.guard.clean_bubbles(bubbles)
         if not cleaned:
@@ -66,6 +67,11 @@ class RhythmController:
                 delay = 0.6 + factor * len(bubble)
             delay *= random.uniform(0.7, 1.3)
             delays.append(round(max(delay, 0.35), 2))
+
+        # 延时回复（humanize.reply_delay）不另起一层 event.send 包装，
+        # 只在这里给首条气泡加一段额外等待——两层包装会互相以为对方没发。
+        if extra_hold and delays:
+            delays[0] = round(min(25.0, delays[0] + max(0.0, float(extra_hold))), 2)
 
         return RhythmPlan(
             bubbles=cleaned,

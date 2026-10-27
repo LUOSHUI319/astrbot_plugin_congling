@@ -27,10 +27,13 @@ from ..core.contracts import (
     WakeAttempt,
 )
 from . import energy as energy_mod
+from . import stages as stages_mod
 from .lullaby import Lullaby
 from .wake import Waker
 
 KV_KEY = "night.state"
+# 最近三次睡眠区间，给「睡着期间的记忆打未读」判定用（抽取是延后的，实时状态靠不住）
+SLEEP_WINDOW_KEY = "night.last_sleep_window"
 
 # 疲劳期内的下限保护：至少还能撑这么多条消息才允许睡着
 DEFAULT_MIN_TURNS = 8
@@ -49,6 +52,7 @@ class NightService:
         self._fatigue_turns = 0      # 本轮疲劳期内已经处理过多少条消息
         self._fatigue_entered = 0    # 进入本轮疲劳期的时间戳
         self._last_sleep_kind = ""   # night / noon，决定道别语用哪套
+        self._woke_from: dict | None = None  # 醒来那一刻所在的睡眠阶段
         self._loaded = False
 
     # ================================================================ 开关
@@ -105,8 +109,20 @@ class NightService:
             return []
         events: list[str] = []
 
+        # waking 不能一直挂着：叫醒之后那句没说成、或者用户就此不说话，
+        # 状态机会永远停在「正醒着，还没爬起来」，面板和记忆都被冻住。
+        if self.state.mode == NIGHT_WAKING and self.state.enter_waking_at:
+            limit = max(1, self.config.int("night.waking_timeout_minutes", 5)) * 60
+            if now - self.state.enter_waking_at >= limit:
+                await self.finish_waking()
+                events.append("wake_timeout")
+
         if self.state.last_tick <= 0:
             self.state.last_tick = int(now)
+            # 刚启动的第一个心跳：可能一觉早就该醒了，别等到下一个周期
+            if self.state.is_asleep() and self.state.wake_at and now >= self.state.wake_at:
+                await self._do_wake(reason="natural")
+                events.append("wake_natural")
             await self.save()
             return events
 
@@ -114,7 +130,23 @@ class NightService:
         self.state.last_tick = int(now)
 
         if self.state.is_asleep():
-            # 睡着的时候精力冻结，只检查要不要自然醒
+            # 睡着的时候按睡眠阶段回精力：深睡那一小时补得多，REM 补得少。
+            # 以前是直接冻结，面板上看着像一条直线，也解释不了「睡得浅等于没睡」
+            stage = stages_mod.at(
+                self.config,
+                sleep_at=int(self.state.sleep_at or 0),
+                wake_at=int(self.state.wake_at or 0),
+                kind=self.state.sleep_kind or "night",
+                now=now,
+            )
+            if stage:
+                gain = (
+                    elapsed_minutes
+                    * self.config.float("night.energy_recover_per_minute", 1.5)
+                    * stages_mod.energy_factor(stage)
+                )
+                cap = float(self.config.int("night.energy_max", 100))
+                self.state.energy = energy_mod.clamp(min(cap, self.state.energy + max(0.0, gain)))
             if self.state.wake_at and now >= self.state.wake_at:
                 await self._do_wake(reason="natural")
                 events.append("wake_natural")
@@ -244,6 +276,9 @@ class NightService:
         self.state.sleep_at = int(now)
         self.state.wake_at = energy_mod.next_wake_time(self.config, now, kind=kind)
         self.state.reason = reason
+        self.state.sleep_kind = kind or "night"
+        self.state.enter_waking_at = 0
+        self.state.pending_crawl = []
         self.state.dream_count_today = 0
         # 午睡要掷一次骰：这一次到底做不做梦
         if (kind or "night") == "noon":
@@ -259,18 +294,103 @@ class NightService:
             f"预计醒来={time.strftime('%H:%M', time.localtime(self.state.wake_at))}"
         )
 
-    async def _do_wake(self, *, reason: str = "natural") -> None:
-        self.state.mode = NIGHT_AWAKE
+    async def _do_wake(self, *, reason: str = "natural", enter_waking: bool = True) -> None:
+        """醒。
+
+        醒来先看有没有东西要爬：有就进 waking（回第一句时先念一句爬楼语），
+        没有就直接 awake。原来是一律置 awake，等于自然醒、面板叫醒这两条路
+        永远不会爬楼，睡着期间攒下的未读也永远清不掉。
+        """
+        sleep_at = int(self.state.sleep_at or 0)
+        wake_at = int(self.state.wake_at or 0)
+        sleep_kind = self.state.sleep_kind or self._last_sleep_kind or "night"
+        if not sleep_kind or sleep_kind not in ("night", "noon"):
+            sleep_kind = "night"
+
+        # 记下是从哪个阶段醒的：深睡被拽起来和 REM 醒过来，说话状态不一样
+        try:
+            self._woke_from = stages_mod.at(
+                self.config, sleep_at=sleep_at, wake_at=wake_at, kind=sleep_kind, now=time.time()
+            )
+        except Exception:
+            self._woke_from = None
+
+        pending: list[str] = []
+        if sleep_at > 0:
+            await self._remember_sleep_window(sleep_at, wake_at or int(time.time()), sleep_kind)
+            if enter_waking and self.config.bool("night.crawl_enabled", True):
+                pending = await self._pending_sessions(sleep_at)
+
         self.state.sleep_at = 0
         self.state.wake_at = 0
         self.state.reason = ""
-        # 正常睡醒：精力满格，取消一切精力影响
         self.state.energy = float(self.config.int("night.energy_max", 100))
         self._fatigue_turns = 0
         self._fatigue_entered = 0
         self.waker.reset_all()
+
+        if pending:
+            self.state.mode = NIGHT_WAKING
+            self.state.enter_waking_at = int(time.time())
+            self.state.pending_crawl = pending
+        else:
+            self.state.mode = NIGHT_AWAKE
+            self.state.enter_waking_at = 0
+            self.state.pending_crawl = []
+            self.state.sleep_kind = ""
         await self.save()
-        logger.info(f"[congling] 醒来：原因={reason}")
+        logger.info(
+            f"[congling] 醒来：原因={reason}"
+            + (f"，待爬 {len(pending)} 个会话" if pending else "")
+        )
+
+    async def _pending_sessions(self, since: int) -> list[str]:
+        """从入睡那一刻起，哪些会话有新消息没翻。"""
+        if since <= 0:
+            return []
+        try:
+            rows = await self.store.fetch_all(
+                "SELECT DISTINCT session_id FROM msg_archive "
+                "WHERE ts >= ? AND session_id<>'' ORDER BY ts DESC LIMIT 50",
+                (since,),
+            )
+        except Exception as exc:
+            logger.debug(f"[congling] 查待爬会话失败: {exc!r}")
+            return []
+        # store.fetch_all 给的是 dict 行，这里以前按元组取 row[0]，
+        # 一进 _do_wake 就 KeyError，于是状态永远卡在「睡着」——
+        # 面板上看到的就是「bot 都醒了，界面还说睡着」。
+        out: list[str] = []
+        for row in rows or []:
+            value = row.get("session_id") if isinstance(row, dict) else (row[0] if row else None)
+            if value:
+                out.append(str(value))
+        return out
+
+    async def _remember_sleep_window(self, sleep_at: int, wake_at: int, kind: str) -> None:
+        """把这一觉的时间区间落盘，最近三段。
+
+        记忆抽取是延后批量的，等它跑的时候人早就醒了，靠实时状态判断
+        「这条是不是睡着期间记的」必然判错，只能靠这里留下的区间。
+        """
+        try:
+            raw = await self.store.kv_get(SLEEP_WINDOW_KEY, []) or []
+        except Exception:
+            raw = []
+        items = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+        record = {"sleep_at": int(sleep_at), "wake_at": int(wake_at), "kind": kind}
+        # 同一觉重复写（以前醒来失败会一直重试）会把这段区间记成三份，
+        # 记忆抽取时按区间判「这条是不是睡着时记的」就会重复算
+        if not items or any(
+            item.get("sleep_at") != record["sleep_at"] or item.get("wake_at") != record["wake_at"]
+            for item in items[-1:]
+        ):
+            items.append(record)
+        items = items[-3:]
+        try:
+            await self.store.kv_set(SLEEP_WINDOW_KEY, items)
+        except Exception as exc:
+            logger.debug(f"[congling] 记录睡眠区间失败: {exc!r}")
 
     async def sleep_now(self, *, reason: str = "manual", kind: str | None = None) -> None:
         """外部调用（面板/指令）强制入睡。
@@ -286,14 +406,36 @@ class NightService:
         await self._do_sleep(reason=reason, kind=kind, force=True)
 
     async def wake_now(self, *, reason: str = "manual") -> None:
-        """外部调用强制唤醒。"""
-        await self._do_wake(reason=reason)
+        """外部调用强制唤醒。醒来照样要爬楼（有未读就进 waking）。"""
+        await self._do_wake(reason=reason, enter_waking=True)
 
     async def finish_waking(self) -> None:
         """爬楼结束后调，把 waking 落回 awake。"""
         if self.state.mode == NIGHT_WAKING:
             self.state.mode = NIGHT_AWAKE
             self.state.energy = float(self.config.int("night.energy_after_wake", 35))
+        self.state.enter_waking_at = 0
+        self.state.pending_crawl = []
+        self.state.wake_at = 0
+        self.state.sleep_kind = ""
+        await self.save()
+
+    def drop_pending_crawl(self, session_id: str) -> None:
+        """这个会话爬完了，从待爬清单里划掉（进程内，调用方负责 save）。"""
+        key = str(session_id or "")
+        if not key:
+            return
+        remain = [sid for sid in self.state.pending_crawl if sid != key]
+        self.state.pending_crawl = remain
+        if not remain and self.state.mode == NIGHT_WAKING:
+            self.state.enter_waking_at = 0
+
+    async def crawl_done(self, session_id: str) -> None:
+        """某个会话爬完：划掉；全爬完就正式醒。"""
+        self.drop_pending_crawl(session_id)
+        if not self.state.pending_crawl and self.state.mode == NIGHT_WAKING:
+            await self.finish_waking()
+        else:
             await self.save()
 
     # ================================================================ 道别
@@ -329,15 +471,72 @@ class NightService:
             "allow_sleep": self.config.bool("night.allow_sleep", True),
             "noon_nap_minutes": max(10, min(180, self.config.int("night.noon_nap_minutes", 60))),
             "noon_nap_jitter": max(0, min(60, self.config.int("night.noon_nap_jitter_minutes", 15))),
-            "sleep_kind": getattr(self, "_last_sleep_kind", "night"),
+            "sleep_kind": state.sleep_kind or getattr(self, "_last_sleep_kind", "night"),
+            "pending_crawl": len(state.pending_crawl or []),
+            "crawl_sessions": list(state.pending_crawl or []),
         }
+        # 醒时文案：午睡不能报「07:00-09:00 醒」，那是夜里的起床点
+        sleep_kind = data["sleep_kind"] if data["sleep_kind"] in ("night", "noon") else "night"
+        wake_ts = int(state.wake_at or 0)
+        clock = time.strftime("%H:%M", time.localtime(wake_ts)) if wake_ts else ""
+        day_label = self._day_label(wake_ts, now) if wake_ts else ""
+        if sleep_kind == "noon":
+            data["wake_kind"] = "noon"
+            data["wake_window"] = ""
+            data["wake_at_clock"] = clock
+            data["wake_day_label"] = day_label
+            data["wake_label"] = clock
+        else:
+            window = energy_mod.wake_window_text(self.config, int(now))
+            data["wake_kind"] = "night"
+            data["wake_at_clock"] = clock
+            data["wake_day_label"] = day_label
+            data["wake_label"] = window
         if state.is_asleep():
             data["sleep_at"] = state.sleep_at
             data["wake_at"] = state.wake_at
             data["sleep_reason"] = state.reason
             data["remaining"] = max(0, state.wake_at - int(now))
             data["remaining_text"] = energy_mod.human_duration(max(0, state.wake_at - int(now)))
+            plan = stages_mod.build_plan(
+                self.config,
+                sleep_at=int(state.sleep_at or 0),
+                wake_at=int(state.wake_at or 0),
+                kind=sleep_kind,
+            )
+            stage = stages_mod.at(
+                self.config,
+                sleep_at=int(state.sleep_at or 0),
+                wake_at=int(state.wake_at or 0),
+                kind=sleep_kind,
+                now=now,
+            )
+            if stage:
+                stage["remaining_text"] = energy_mod.human_duration(stage.get("remaining") or 0)
+                stage["energy_factor"] = stages_mod.energy_factor(stage)
+                data["stage"] = stage
+                data["stage_text"] = stages_mod.describe(stage)
+                data["stage_seq"] = plan
+                data["stage_stats"] = stages_mod.stats(plan)
         return data
+
+    @staticmethod
+    def _day_label(ts: int, now: float | None = None) -> str:
+        """今天 / 明天 / 后天 / 具体日期，给状态栏用。"""
+        if ts <= 0:
+            return ""
+        base = time.localtime(now if now is not None else time.time())
+        target = time.localtime(ts)
+        today = time.mktime((base.tm_year, base.tm_mon, base.tm_mday, 0, 0, 0, 0, 0, -1))
+        that = time.mktime((target.tm_year, target.tm_mon, target.tm_mday, 0, 0, 0, 0, 0, -1))
+        delta = int(round((that - today) / 86400))
+        if delta == 0:
+            return "今天"
+        if delta == 1:
+            return "明天"
+        if delta == 2:
+            return "后天"
+        return time.strftime("%m-%d", target)
 
     def status_text(self) -> str:
         data = self.snapshot()
@@ -350,8 +549,9 @@ class NightService:
                 f"起床点 {data['wake_time']} 浮动 ±{data['wake_jitter']} 分钟"
             )
         if data["mode"] == NIGHT_WAKING:
-            return "正醒着，还没爬起来"
+            left = data.get("pending_crawl") or 0
+            return "正醒着，还没爬起来" + (f"（待爬 {left} 个会话）" if left else "")
         return (
             f"睡着中 剩余 {data.get('remaining_text', '?')} "
-            f"预计 {data['wake_window']} 醒 精力 {data['energy']:.0f}"
+            f"预计 {data.get('wake_day_label', '')}{data.get('wake_label', '')} 醒 精力 {data['energy']:.0f}"
         )

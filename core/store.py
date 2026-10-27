@@ -19,7 +19,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = [
     """
@@ -231,6 +231,44 @@ _SCHEMA = [
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_avatar_sha ON qq_avatar_pool(persona_id, sha1)",
+    # ---- 0.7.0 日记（第 6 条）----
+    """
+    CREATE TABLE IF NOT EXISTS mem_diary(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        persona_id TEXT DEFAULT 'ling',
+        day_key TEXT NOT NULL,
+        created_at INTEGER,
+        title TEXT DEFAULT '',
+        text TEXT DEFAULT '',
+        mood TEXT DEFAULT '',
+        tags TEXT DEFAULT '[]',
+        refs TEXT DEFAULT '[]',
+        affinity_subject TEXT DEFAULT '',
+        affinity_score REAL DEFAULT 0,
+        pinned INTEGER DEFAULT 0,
+        hidden INTEGER DEFAULT 0
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_diary_day ON mem_diary(persona_id, day_key)",
+    "CREATE INDEX IF NOT EXISTS idx_diary_time ON mem_diary(persona_id, created_at)",
+    # ---- 0.7.0 主动找人（第 11 条）----
+    """
+    CREATE TABLE IF NOT EXISTS proactive_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        persona_id TEXT DEFAULT 'ling',
+        session_id TEXT NOT NULL,
+        umo TEXT DEFAULT '',
+        at INTEGER,
+        reason TEXT DEFAULT '',
+        text TEXT DEFAULT '',
+        kind TEXT DEFAULT 'text',
+        replied_at INTEGER DEFAULT 0,
+        replied_delta REAL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_proactive_at ON proactive_log(persona_id, at)",
+    # 未爬记忆查询走这条索引，别让记忆库翻全表
+    "CREATE INDEX IF NOT EXISTS idx_atom_unread ON mem_atom(persona_id, unread, status)",
 ]
 
 
@@ -288,6 +326,17 @@ class Store:
             )
         except Exception as exc:
             logger.debug(f"[congling] mem_atom 补列失败: {exc!r}")
+        # msg_archive 补 umo / platform：主动发送要按 umo 发，光有群号/QQ 号不够
+        try:
+            msg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(msg_archive)")}
+            for name, stmt in (
+                ("umo", "ALTER TABLE msg_archive ADD COLUMN umo TEXT DEFAULT ''"),
+                ("platform", "ALTER TABLE msg_archive ADD COLUMN platform TEXT DEFAULT ''"),
+            ):
+                if name not in msg_cols:
+                    self._conn.execute(stmt)
+        except Exception as exc:
+            logger.debug(f"[congling] msg_archive 补列失败: {exc!r}")
         if current < 4:
             self._backfill_levels()
         if current < SCHEMA_VERSION:

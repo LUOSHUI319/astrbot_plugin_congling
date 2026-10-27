@@ -19,6 +19,52 @@ function njIsNight() {
 function njTitle(no) {
   if (titleEl && no) titleEl.dataset.crumb = `从绫开始 · ${no}`;
 }
+/** 轻提示：iframe 里 alert 也会被拦，用它代替 */
+function njToast(message, kind) {
+  let box = document.getElementById("nj-toast-box");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "nj-toast-box";
+    box.className = "nj-toast-box";
+    document.body.appendChild(box);
+  }
+  const item = document.createElement("div");
+  item.className = `nj-toast${kind === "ok" ? " is-ok" : kind === "err" ? " is-err" : ""}`;
+  item.textContent = String(message == null ? "" : message);
+  box.appendChild(item);
+  setTimeout(() => item.classList.add("is-out"), 2600);
+  setTimeout(() => item.remove(), 3100);
+}
+
+/** 面板可能跑在 iframe 里，window.confirm 会被沙箱拦掉（返回 false 且没有任何提示），
+ *  表现出来就是「点了按钮没反应」。所以自己做一个，返回 Promise<boolean>。 */
+function njConfirm(message, opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.className = "nj-modal";
+    wrap.innerHTML = `<div class="nj-modal-card">
+      <p>${esc(message)}</p>
+      <div class="nj-modal-ops">
+        <button type="button" class="nj-btn sm" data-no>${esc(o.cancel || "算了")}</button>
+        <button type="button" class="nj-btn sm primary" data-yes>${esc(o.ok || "确定")}</button>
+      </div>
+    </div>`;
+    const close = (value) => {
+      wrap.remove();
+      resolve(value);
+    };
+    wrap.querySelector("[data-no]").onclick = () => close(false);
+    wrap.querySelector("[data-yes]").onclick = () => close(true);
+    wrap.onclick = (ev) => {
+      if (ev.target === wrap) close(false);
+    };
+    document.body.appendChild(wrap);
+    const yes = wrap.querySelector("[data-yes]");
+    if (yes) yes.focus();
+  });
+}
+
 /** 壳层静态部分：导航编号、侧栏人格卡。可重复调用。 */
 function njShell() {
   if (!njIsNight()) return;
@@ -44,6 +90,38 @@ function njShell() {
     compatLine.textContent = `外部 ${present.length ? present.join(" / ") : "无"}\n${yielding.length ? `让位 ${yielding.join(" / ")}` : "全部自管"}`;
   }
   if (personaTag && personaTag.textContent === "—" && window.__njPersonaTag) personaTag.textContent = window.__njPersonaTag;
+  njPersonaBoot();
+}
+
+/** 侧栏「当前人格」要跟后端实际生效的人格走。
+ *  原来只有人格页保存时才写一次名字，所以永远停在「绫」——
+ *  切到 AstrBot 人格（或改了内置名字）侧栏不会变。 */
+async function njPersonaBoot(force) {
+  const now = Date.now();
+  if (!force && (window.__njPersonaBusy || now - (window.__njPersonaAt || 0) < 30000)) return;
+  window.__njPersonaBusy = true;
+  window.__njPersonaAt = now;
+  try {
+    const data = await get("page/persona");
+    const mode = String(data.mode || "builtin");
+    let name = String(data.name || "");
+    let id = String(data.persona_id || "ling");
+    if (mode === "astrbot") {
+      const wanted = String(data.astrbot_persona_id || "");
+      const list = (data.astrbot_personas && data.astrbot_personas.items) || [];
+      const hit = list.find((item) => String(item.id || item.persona_id || "") === wanted);
+      name = String((hit && (hit.name || hit.id)) || wanted || "AstrBot 人格");
+      id = wanted ? `AstrBot · ${wanted}` : "AstrBot";
+    } else if (mode === "none") {
+      name = name || "无人格";
+      id = "关闭";
+    }
+    if (name) njPersonaName(name, id);
+  } catch (err) {
+    /* 拉不到就保持原样，不影响页面 */
+  } finally {
+    window.__njPersonaBusy = false;
+  }
 }
 function njPersonaName(name, id) {
   const el = document.getElementById("nj-persona-name");
@@ -148,25 +226,49 @@ function njKindCN(kind) {
 }
 const NJ_KIND_CLASS = { pref: "k-pref", preference: "k-pref", event: "k-event", promise: "k-promise", relation: "k-relation", emotion: "k-emotion" };
 
-/** 头像：私聊圆形、群聊方形；只有纯数字才去拉 QQ 头像 */
+/** 从 session_id / umo 里挖出 (kind, 号码)。
+ *  session_id 有两种形态：纯群号/QQ 号（msg_archive 存法），
+ *  以及 aiocqhttp:FriendMessage:3190568934 这种 umo —— 两种都要能认。
+ */
+function njAvatarParts(kind, id, sessionId) {
+  const raw = String(id == null ? "" : id).trim();
+  const sid = String(sessionId || "").trim();
+  const group = (sid.match(/GroupMessage[:_](\d{5,12})/i) || sid.match(/group[:_](\d{5,12})/i) || [])[1];
+  const user = (sid.match(/(?:FriendMessage|PrivateMessage|private|friend)[:_](\d{5,12})/i) || [])[1];
+  if (kind === "group") return { kind: "group", key: group || (/^\d{5,12}$/.test(raw) ? raw : "") };
+  if (group) return { kind: "group", key: group };
+  if (user) return { kind: "user", key: user };
+  if (/^\d{5,12}$/.test(raw)) return { kind: kind || "user", key: raw };
+  return { kind: kind || "user", key: "" };
+}
+
+/** 头像：私聊圆形、群聊方形；只有纯数字（或能从 umo 解析出号码）才去拉 QQ 头像 */
 function njAvatar(id, name, opts) {
   const o = opts || {};
-  const key = String(id == null ? "" : id).trim();
+  const parts = njAvatarParts(o.kind, id, o.sessionId);
+  const key = parts.key;
   const url = /^\d{5,12}$/.test(key)
-    ? o.kind === "group"
+    ? parts.kind === "group"
       ? `https://p.qlogo.cn/gh/${key}/${key}/640`
       : `https://q1.qlogo.cn/g?b=qq&nk=${key}&s=640`
     : "";
   const initial = esc(String(name || id || "?").slice(0, 1));
-  const klass = `nj-avatar${o.kind === "group" ? " sq" : ""}${o.lg ? " lg" : ""}`;
+  const klass = `nj-avatar${parts.kind === "group" ? " sq" : ""}${o.lg ? " lg" : ""}`;
   if (!url) return `<span class="${klass}"><span>${initial}</span></span>`;
   return `<span class="${klass}"><img src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer"
     onerror="var p=this.parentNode;this.remove();p.textContent='${initial}'"></span>`;
 }
 
+const NJ_LEVEL_NAMES = ["不可忘", "随口", "细节", "平常", "在意", "关键"];
+
+/** 记忆等级用点阵表示：1~5 级亮几个点，0 级是双环（不可忘）。
+ *  比「L3」这种标签好认，也不占宽度。名称放 title 里。 */
 function njLevelTag(level) {
   const n = Math.max(0, Math.min(5, Number(level) || 0));
-  return `<span class="nj-lv nj-lv${n}">${n === 0 ? "永不忘" : "L" + n}</span>`;
+  const name = NJ_LEVEL_NAMES[n] || "";
+  if (n === 0) return `<span class="nj-lv lv0" title="0 级 · ${esc(name)}"><i></i></span>`;
+  const dots = Array.from({ length: 5 }, (_, i) => `<i class="${i < n ? "on" : ""}"></i>`).join("");
+  return `<span class="nj-lv lv${n}" title="${n} 级 · ${esc(name)}">${dots}</span>`;
 }
 
 /** 截一段文本，超长补省略号（用于卡片里的引文） */
@@ -198,8 +300,9 @@ async function njOverview() {
   const health = data.health || {};
   const persona = health.persona || {};
   const modules = health.modules || {};
-  if (personaTag) personaTag.textContent = `${persona.name || "绫"} · ${persona.id || "ling"}`;
-  njPersonaName(persona.name || "绫", persona.id || "ling");
+  /* 名字以 /page/persona 的实际情况为准：这里只是概览页的兜底显示，
+     真正的名字交给 njPersonaBoot（它知道 mode=astrbot 时该显示哪个人格） */
+  njPersonaBoot(true);
 
   const heat = ov.heatmap || {};
   const g = njGreeting();
@@ -487,8 +590,30 @@ async function njPersona() {
         .join("")}</div>`
     : '<div class="nj-empty">还没有历史版本</div>';
 
+  const modeCN = { builtin: "插件自带", astrbot: "AstrBot 人格", none: "只用默认" };
+  const modeName =
+    mode === "astrbot"
+      ? (personas.find((item) => item.id === selected) || {}).name || selected || "AstrBot 默认"
+      : data.name || "绫";
   view.innerHTML = `
-    <div class="nj-head" style="margin-top:0"><h2>人设来源</h2><span>三选一，选了立刻生效</span></div>
+    ${njHeroBar({
+      eyebrow: "02 / PERSONA",
+      variant: "quote",
+      title: modeName,
+      note: mode === "astrbot"
+        ? `人设来自 AstrBot 里的人格「${modeName}」，改那边才会变`
+        : mode === "none"
+          ? "完全交给 AstrBot 默认人设，本插件不注入任何东西"
+          : "插件自带的内置人设，下面这段文字就是「她是谁」",
+      art: "persona",
+      stats: [
+        { label: "来源", value: modeCN[mode] || mode },
+        { label: "单句字数", value: style.max_chars || 25, unit: "字" },
+        { label: "活跃时段", value: data.active_hours || "09:00-03:30" },
+        { label: "版本", value: (data.versions || []).length, unit: "版" },
+      ],
+    })}
+    <div class="nj-head" style="margin-top:22px"><h2>人设来源</h2><span>三选一，选了立刻生效</span></div>
     <div class="nj-modes">
       ${njModeCard("builtin", "插件自带「绫」", "写在本插件里，可直接编辑", mode)}
       ${njModeCard("astrbot", "AstrBot 人格", "用框架里已有的人格", mode)}
@@ -623,7 +748,7 @@ async function njPersona() {
       }
       msg.textContent = "已保存";
       settingsCache = null;
-      if (currentMode === "builtin" && payload.name) njPersonaName(payload.name, data.persona_id || "ling");
+      njPersonaBoot(true);
       /* 不整页重画：重画会把「已保存」一起冲掉，版本列表下次进来再看 */
     } catch (err) {
       msg.textContent = err.message;
@@ -632,12 +757,12 @@ async function njPersona() {
 
   view.querySelectorAll("[data-rollback]").forEach((btn) => {
     btn.onclick = async () => {
-      if (!confirm("回到这个版本？当前内容会被覆盖")) return;
+      if (!(await njConfirm("回到这个版本？当前内容会被覆盖"))) return;
       try {
         await post("page/persona/rollback", { index: Number(btn.dataset.rollback) });
         njPersona();
       } catch (err) {
-        alert(err.message);
+        njToast(err.message, "err");
       }
     };
   });
@@ -656,15 +781,32 @@ async function njBehavior() {
   njShell();
   njTitle("03");
   const settings = await loadSettings();
+  const humanize = pickGroup(settings, "humanize") || { items: [] };
+  const valueOf = (key, fallback) => {
+    const hit = (humanize.items || []).find((item) => item.key === key);
+    return hit && hit.value != null ? hit.value : fallback;
+  };
   view.innerHTML = `
-    <div class="nj-head" style="margin-top:0"><h2>怎么说话</h2><span>改完点下面的保存</span></div>
+    ${njHeroBar({
+      eyebrow: "03 / EXPRESSION",
+      variant: "tape",
+      tape: Math.max(2, Math.min(100, Number(valueOf("reply_threshold", 35)))),
+      title: "怎么说话",
+      note: "阈值决定它多爱接话，分句决定它一次说几句，输出风格是发送前的硬性清理。",
+      art: "behavior",
+      stats: [
+        { label: "接话阈值", value: valueOf("reply_threshold", 35) },
+        { label: "私聊分句", value: valueOf("max_bubbles_private", 3), unit: "条" },
+        { label: "群聊分句", value: valueOf("max_bubbles_group", 2), unit: "条" },
+        { label: "引用概率", value: `${Math.round(Number(valueOf("quote_probability", 0)) * 100)}%` },
+      ],
+    })}
     ${configCard(pickGroup(settings, "humanize"), { title: "什么情况下回", desc: "阈值越高越少接话；分句条数决定它一次发几条" })}
     ${configCard(pickGroup(settings, "guard"), { title: "输出风格", desc: "发送前的硬性清理：emoji、句末句号、换行、单条字数" })}
     ${configCard(pickGroup(settings, "perception"), { title: "看得懂什么", desc: "合并转发、图片、语音、卡片要不要解析" })}
     ${pageActions("保存本页设置")}
   `;
-  bindConfigCards(view);
-  bindPageSave();
+  njBindSettings(view);
 }
 
 
@@ -803,13 +945,15 @@ async function njMemory(keyword, sessionId, kind) {
     })
     .join("");
 
-  view.innerHTML = `
+  const memHero = `
     <div class="nj-mem-stats">
       <div class="nj-ms"><span class="nj-ms-label">记忆总数</span><b>${esc(data.total || 0)}</b><span class="unit">条</span><span class="note">本次列出 ${items.length}</span></div>
       <div class="nj-ms"><span class="nj-ms-label">来源会话</span><b>${esc(sessions.length)}</b><span class="unit">个</span><span class="note">重要 ${esc(important)} 条</span></div>
       <div class="nj-ms"><span class="nj-ms-label">重要记忆</span><b>${esc(important)}</b><span class="unit">条</span><span class="note">${esc(data.total ? Math.round((important / data.total) * 100) : 0)}%</span></div>
       <div class="nj-ms"><span class="nj-ms-label">检索档位</span><b class="word">${esc(data.tier || "—")}</b><span class="note">向量 / 关键词</span></div>
-    </div>
+    </div>`;
+  view.innerHTML = njPage(memHero, `
+    ${Number(data.unread || 0) > 0 ? `<button class="nj-tipbar" id="nj-unread-jump"><i></i>有 ${esc(data.unread)} 条没爬过的记忆已隐藏 · 去长夜看看<b>→</b></button>` : ""}
 
     <div class="nj-toolbar">
       <label class="nj-search">
@@ -831,6 +975,7 @@ async function njMemory(keyword, sessionId, kind) {
           ${sessions
             .map(
               (item) => `<button class="nj-session ${sessionId === item.session_id ? "is-on" : ""}" data-session="${esc(item.session_id)}">
+                ${njAvatar(item.session_id, item.label, { kind: item.kind })}
                 <span class="label">${esc(item.label)}</span>
                 <b>${esc(item.count)}${item.important ? '<i class="dot-gold"></i>' : ""}</b>
                 <small>${esc(item.last_text || "")}</small>
@@ -880,7 +1025,35 @@ async function njMemory(keyword, sessionId, kind) {
         <div class="body" id="nj-inbox-body"><div class="hint">展开后自动加载</div></div>
       </details>
     </div>
-  `;
+  `, { plain: true, bodyClass: "is-mem" });
+
+  /* 底下那两条展开时，把三栏的高度就地锁住：
+     宁可整页往下滚，也不让三栏被压小、更不许互相盖住 */
+  const memBody = view.querySelector(".nj-mem-body");
+  view.querySelectorAll(".nj-mem-extra .nj-details > summary").forEach((sum) => {
+    sum.addEventListener(
+      "click",
+      () => {
+        if (memBody && !memBody.dataset.lockH) memBody.dataset.lockH = String(memBody.offsetHeight);
+      },
+      true
+    );
+  });
+  view.querySelectorAll(".nj-mem-extra .nj-details").forEach((node) => {
+    node.addEventListener("toggle", () => {
+      if (!memBody) return;
+      const anyOpen = Array.from(view.querySelectorAll(".nj-mem-extra .nj-details")).some((d) => d.open);
+      if (anyOpen && memBody.dataset.lockH) {
+        memBody.style.minHeight = `${memBody.dataset.lockH}px`;
+      } else {
+        memBody.style.minHeight = "";
+        delete memBody.dataset.lockH;
+      }
+    });
+  });
+
+  const jump = document.getElementById("nj-unread-jump");
+  if (jump) jump.onclick = () => setView("night");
 
   const current = () => (document.getElementById("nj-m-key") || {}).value || "";
   const go = () => njMemory(current().trim(), sessionId || "", kind || "");
@@ -901,18 +1074,17 @@ async function njMemory(keyword, sessionId, kind) {
   view.querySelectorAll("[data-forget]").forEach((btn) => {
     btn.onclick = async (ev) => {
       ev.stopPropagation();
-      if (!confirm("让它忘掉这一条？")) return;
+      if (!(await njConfirm("让它忘掉这一条？"))) return;
       try {
         await post("page/memory/delete", { id: Number(btn.dataset.forget) });
         njMemory(current().trim(), sessionId || "", kind || "");
       } catch (err) {
-        alert(err.message);
+        njToast(err.message, "err");
       }
     };
   });
 
-  bindConfigCards(view);
-  bindPageSave();
+  njBindSettings(view);
 
   const inbox = document.getElementById("nj-inbox");
   let loaded = false;
@@ -946,7 +1118,7 @@ function njMemEvent(row) {
     <div class="nj-ev-head">
       ${njLevelTag(row.mem_level)}
       <span class="nj-kind ${NJ_KIND_CLASS[kind] || ""}">${esc(njKindCN(kind))}</span>
-      <span class="nj-ev-where">${esc(row.session_label || "未标来源")}</span>
+      <span class="nj-ev-where">${row.session_id ? njAvatar(row.session_id, row.session_label, { kind: row.session_kind }) : ""}${esc(row.session_label || "未标来源")}</span>
       <span class="nj-ev-time">${esc(row.created_text || njWhen(row.created_at))}</span>
     </div>
     <p>${esc(row.text || "")}</p>
@@ -1003,11 +1175,25 @@ async function njM3Overview() {
     : '<div class="nj-empty">还没有记忆，聊几句就会开始记</div>';
 
   view.innerHTML = `
+    ${njHeroBar({
+      eyebrow: "04 / MEMORY",
+      variant: "ring",
+      ring: { value: data.permanent || 0, max: total || 1, label: "永久占比", sub: "条永久" },
+      title: "记忆总览",
+      note: "她记得什么、还记得多牢。掉得太快的会自动归档，永久记忆不会淡。",
+      art: "memory",
+      stats: [
+        { label: "总条数", value: total, unit: "条" },
+        { label: "近 30 天", value: `+${data.month_new || 0}` },
+        { label: "永久", value: data.permanent || 0, unit: "条" },
+        { label: "快忘掉", value: data.fading || 0, unit: "条", warn: Number(data.fading || 0) > 0 },
+      ],
+    })}
     <div class="nj-mem-stats">
       <div class="nj-ms"><span class="nj-ms-label">记忆总条数</span><b>${esc(total)}</b><span class="unit">条</span><span class="note">近 30 天 +${esc(data.month_new || 0)}</span></div>
       <div class="nj-ms"><span class="nj-ms-label">永久记忆</span><b>${esc(data.permanent || 0)}</b><span class="unit">条</span><span class="note">${esc(data.permanent_pct || 0)}% 不会淡</span></div>
       <div class="nj-ms"><span class="nj-ms-label">快忘掉的</span><b>${esc(data.fading || 0)}</b><span class="unit">条</span><span class="note">7 天内</span></div>
-      <div class="nj-ms"><span class="nj-ms-label">人 / 会话</span><b>${esc(data.people || 0)}<small> / ${esc(data.sessions || 0)}</small></b><span class="note">${data.pending ? "待确认 " + esc(data.pending) : "无待确认"}</span></div>
+      <div class="nj-ms"><span class="nj-ms-label">人 / 会话</span><b>${esc(data.people || 0)}<small> / ${esc(data.sessions || 0)}</small></b><span class="note">${data.pending ? "待确认 " + esc(data.pending) : "无待确认"}${Number(data.unread || 0) > 0 ? ` · <em class="unread">未爬 ${esc(data.unread)}</em>` : ""}</span></div>
     </div>
 
     <div class="nj-cols" style="margin-top:18px">
@@ -1039,6 +1225,7 @@ function njAtomRow(atom) {
   return `<div class="nj-ev" data-kind="${esc(kind)}" style="cursor:default">
     <div class="nj-ev-head">
       <span class="nj-kind ${NJ_KIND_CLASS[kind] || ""}">${esc(njKindCN(kind))}</span>
+      ${atom.session_id ? njAvatar(atom.session_id, atom.session_label, { kind: atom.session_kind }) : ""}
       <span class="nj-ev-time">${esc(njWhen(atom.created_at))}</span>
     </div>
     <p>${esc(atom.text || "")}</p>
@@ -1146,12 +1333,26 @@ async function njM3Sessions() {
   const data = await get("page/memory/sessions");
   const items = data.items || [];
   if (!items.length) {
-    view.innerHTML = '<div class="nj-empty">还没有按会话记下东西</div>';
+    view.innerHTML = njPage(
+      njHeroBar({
+        eyebrow: "04 / SESSIONS",
+        variant: "compact",
+        art: "memory",
+        title: "按会话分",
+        note: "按人、按群各自记住的东西，挑一个看细节。",
+        stats: [{ label: "会话", value: 0, unit: "个" }],
+      }),
+      '<div class="nj-empty">还没有按会话记下东西</div>',
+      { plain: true }
+    );
     return;
   }
   if (!window.__njM3Session || !items.some((x) => x.session_id === window.__njM3Session)) window.__njM3Session = items[0].session_id;
   const detail = await get("page/memory/session", { session_id: window.__njM3Session });
-  const atoms = (detail.atoms || []).slice(0, 8);
+  /* 以前这里 slice(0, 8)，几百条只露出八条，看着像「记忆丢了」 */
+  const atoms = detail.atoms || [];
+  const atomTotal = Number(detail.total || atoms.length);
+  const atomHead = atomTotal > atoms.length ? `${atomTotal} 条 · 显示最近 ${atoms.length} 条 · 框内滚` : `${atomTotal} 条 · 按时间倒序 · 框内滚`;
   const kinds = detail.kinds || [];
   const hours = detail.hours || {};
   const maxKind = Math.max(1, ...kinds.map((k) => Number(k.count || 0)));
@@ -1184,8 +1385,22 @@ async function njM3Sessions() {
     return `<i class="${n === maxHour && n > 0 ? "hi" : ""}" style="height:${Math.max(6, Math.round((n / maxHour) * 100))}%" title="${h} 点 ${n} 条"></i>`;
   }).join("");
 
-  view.innerHTML = `
-    <div class="nj-split" style="grid-template-columns:320px minmax(0,1fr)">
+  const totalAtoms = items.reduce((sum, x) => sum + Number(x.count || 0), 0);
+  const hero = njHeroBar({
+    eyebrow: "04 / SESSIONS",
+    variant: "compact",
+    art: "memory",
+    title: "按会话分",
+    note: "左边挑一个会话，右边看这个会话里记下的事、活跃时段和类型分布。",
+    stats: [
+      { label: "会话", value: items.length, unit: "个" },
+      { label: "记忆", value: totalAtoms, unit: "条" },
+      { label: "当前", value: (detail.label || window.__njM3Session || "").slice(0, 8) || "—" },
+      { label: "最近", value: njWhen(active.last_at) },
+    ],
+  });
+
+  view.innerHTML = njPage(hero, `<div class="nj-split nj-split-wide">
       <aside class="nj-card">
         <div class="nj-card-head"><h3>会话</h3><span class="note">${esc(data.total || items.length)} 个</span></div>
         <div class="nj-person-list">${rows}</div>
@@ -1200,7 +1415,7 @@ async function njM3Sessions() {
         </div>
         <div class="nj-cols" style="grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);margin-top:0">
           <div>
-            <div class="nj-head" style="margin-top:0"><h2>这个会话里记住的事</h2><span>按时间倒序 · 可滚动</span></div>
+            <div class="nj-head" style="margin-top:0"><h2>这个会话里记住的事</h2><span>${esc(atomHead)}</span></div>
             <div class="nj-scroll nj-list-scroll">
               <div class="nj-timeline" style="padding-left:22px">
                 ${atoms.length ? atoms.map((a) => njAtomRow(a)).join("") : '<div class="nj-empty">这个会话还没有记忆</div>'}
@@ -1216,8 +1431,7 @@ async function njM3Sessions() {
           </div>
         </div>
       </div>
-    </div>
-  `;
+    </div>`, { plain: true, bodyClass: "is-sessions" });
 
   view.querySelectorAll("[data-session]").forEach((btn) => {
     btn.onclick = () => {
@@ -1261,7 +1475,19 @@ async function njMemoryLevels() {
     .join("");
 
   view.innerHTML = `
-    <div class="nj-head" style="margin-top:0"><h2>衰减档位</h2><span>改完立刻生效，不用重启</span></div>
+    ${njHeroBar({
+      eyebrow: "04 / FORGETTING",
+      title: "等级与遗忘",
+      note: "一条记忆多久被忘掉，由模式和三个阈值决定。改完立刻生效，不用重启。",
+      art: "memory",
+      stats: [
+        { label: "当前模式", value: modeText[curve.mode] || curve.mode || "—" },
+        { label: "归档阈值", value: curve.archive_ratio },
+        { label: "遗忘阈值", value: curve.forget_ratio },
+        { label: "命中加成", value: curve.hit_boost },
+      ],
+    })}
+    <div class="nj-head" style="margin-top:22px"><h2>衰减档位</h2><span>改完立刻生效，不用重启</span></div>
     <section class="cfg-group">
       <div class="cfg-head"><h3>模式</h3><p>决定一条记忆多久被忘掉</p></div>
       <div class="pad">
@@ -1304,7 +1530,7 @@ async function njMemoryLevels() {
         settingsCache = null;
         njMemoryLevels();
       } catch (err) {
-        alert(err.message);
+        njToast(err.message, "err");
       }
     };
   });
@@ -1348,11 +1574,20 @@ async function njAffinityPage() {
         <input type="number" class="nj-aff-th" data-index="${i}" value="${esc(value)}" /></div>`
     )
     .join("");
+  const editable = data.editable !== false;
   const rankHtml = ranking.length
     ? `<ol class="nj-rank">${ranking
         .map(
-          (row) => `<li><span class="grow">${esc(row.name || row.subject_key)}</span>
-            <span class="nj-stage">${esc(row.stage_name || "陌生")}</span><b>${Math.round(Number(row.score) || 0)}</b></li>`
+          (row) => `<li data-aff-key="${esc(row.subject_key)}">
+            ${njAvatar(row.subject_key, row.name || row.subject_key)}
+            <span class="grow">${esc(row.name || row.subject_key)}</span>
+            <span class="nj-stage">${esc(row.stage_name || "陌生")}</span>
+            <b class="aff-score">${Math.round(Number(row.score) || 0)}</b>
+            <span class="aff-ops">
+              <button type="button" data-aff="10" title="加 10 分" ${editable ? "" : "disabled"}>＋</button>
+              <button type="button" data-aff="-10" title="减 10 分" ${editable ? "" : "disabled"}>－</button>
+            </span>
+          </li>`
         )
         .join("")}</ol>`
     : '<div class="nj-empty">还没有好感度记录</div>';
@@ -1412,6 +1647,27 @@ async function njAffinityPage() {
       msg.textContent = err.message;
     }
   };
+  view.querySelectorAll(".aff-ops [data-aff]").forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const li = btn.closest("li");
+      if (!li) return;
+      const key = li.dataset.affKey || "";
+      if (!key) return;
+      btn.disabled = true;
+      try {
+        const res = await post("page/affinity/save", { key, delta: Number(btn.dataset.aff) || 0 });
+        const scoreEl = li.querySelector(".aff-score");
+        if (scoreEl && res && res.score != null) scoreEl.textContent = Math.round(Number(res.score));
+        const stageEl = li.querySelector(".nj-stage");
+        if (stageEl && res && res.stage_name) stageEl.textContent = res.stage_name;
+      } catch (err) {
+        njToast(err.message || "调整失败", "err");
+      }
+      btn.disabled = false;
+    };
+  });
+
   const settle = document.getElementById("nj-aff-settle");
   if (settle)
     settle.onclick = async () => {
@@ -1493,10 +1749,20 @@ function njNightHero(st, opts) {
         ? "醒着，进入疲劳期"
         : "还醒着";
   const sub = asleep
-    ? `预计 ${esc(st.wake_window || st.wake_time || "08:00")} 醒；叫醒她会先缓一会儿，刚醒的话语气会松一点`
+    ? `预计 ${esc((st.wake_day_label || "") + (st.wake_label || st.wake_window || st.wake_time || "08:00"))} 醒；叫醒她会先缓一会儿，刚醒的话语气会松一点`
     : waking
-      ? "正在翻昨晚没收的消息，翻完才算真的醒"
+      ? `正在翻没收的消息（${esc(st.pending_crawl || 0)} 个会话），翻完才算真的醒`
       : `起床点 ${esc(st.wake_time || "08:00")} ± ${esc(st.wake_jitter || 0)} 分钟；累了会自己睡，不用催`;
+
+  const stage = st.stage || null;
+  const stageRow =
+    asleep && stage
+      ? `<div class="nj-stage" data-stage="${esc(stage.key || "")}">
+           <b>${esc(stage.label || "")}</b>
+           <span>第 ${Number(stage.cycle || 0) + 1} 个周期 · 还有 ${esc(stage.remaining_text || "")}</span>
+           <i class="nj-stage-bar"><u style="width:${Math.max(2, Math.round(Number(stage.progress || 0) * 100))}%"></u></i>
+         </div>`
+      : "";
 
   const chips = [
     ["当前时段", fatigueText],
@@ -1514,6 +1780,7 @@ function njNightHero(st, opts) {
       <div class="nj-eyebrow"><i></i><b>${asleep ? "睡着中" : waking ? "刚醒" : "清醒中"}</b><span class="sep">·</span>第 ${esc(st.day_count || 1)} 夜<span class="sep">·</span>${esc(fatigueText)}</div>
       <h2 class="nj-h1">${asleep ? title : `${esc(title)}，精力 <span>${pct}%</span>`}</h2>
       <p class="nj-night-sub">${sub}</p>
+      ${stageRow}
       <div class="nj-night-chips">${chips}</div>
       <div class="nj-night-acts">
         ${asleep ? '<button class="nj-btn gold" data-night-act="wake">叫醒她</button>' : '<button class="nj-btn" data-night-act="sleep">让她去睡</button>'}
@@ -1580,6 +1847,8 @@ async function njNight() {
 
   view.innerHTML = `${njNightTabs(nightTab)}${body}`;
 
+  njDiaryBind();
+
   /* 子标签 / 快速跳转 */
   view.querySelectorAll("[data-night-tab]").forEach((btn) => {
     btn.onclick = () => {
@@ -1601,7 +1870,7 @@ async function njNight() {
         settingsCache = null;
         njNight();
       } catch (err) {
-        alert(err.message || "操作失败");
+        njToast(err.message || "操作失败", "err");
         btn.disabled = false;
       }
     };
@@ -1616,8 +1885,29 @@ async function njNight() {
         settingsCache = null;
         njNight();
       } catch (err) {
-        alert(err.message || "操作失败");
+        njToast(err.message || "操作失败", "err");
         btn.disabled = false;
+      }
+    };
+  });
+
+  /* 梦境：手动补一段，用来验证链路 / 立刻看效果 */
+  view.querySelectorAll("[data-dream-make]").forEach((btn) => {
+    btn.onclick = async () => {
+      if (btn.dataset.busy === "1") return;
+      btn.dataset.busy = "1";
+      const label = btn.textContent;
+      btn.textContent = "正在做…";
+      btn.disabled = true;
+      try {
+        await post("/night/dream/make", {});
+        njToast("做好了一段梦", "ok");
+        njNight();
+      } catch (err) {
+        njToast(err.message || "没做成", "err");
+        btn.textContent = label;
+        btn.disabled = false;
+        btn.dataset.busy = "";
       }
     };
   });
@@ -1630,30 +1920,27 @@ async function njNight() {
         await post("/night/dream/pin", { dream_id: btn.dataset.dreamId, pinned: btn.dataset.pinned !== "1" });
         njNight();
       } catch (err) {
-        alert(err.message || "操作失败");
+        njToast(err.message || "操作失败", "err");
         btn.disabled = false;
       }
     };
   });
   view.querySelectorAll("[data-dream-del]").forEach((btn) => {
     btn.onclick = async () => {
-      if (!confirm("删掉这段梦？")) return;
+      if (!(await njConfirm("删掉这段梦？"))) return;
       btn.disabled = true;
       try {
         await post("/night/dream/delete", { dream_id: btn.dataset.dreamId });
         njNight();
       } catch (err) {
-        alert(err.message || "删除失败");
+        njToast(err.message || "删除失败", "err");
         btn.disabled = false;
       }
     };
   });
 
   /* 设置页的保存 */
-  if (nightTab === "config") {
-    bindConfigCards(view);
-    bindPageSave();
-  }
+  if (nightTab === "config") njBindSettings(view);
 }
 
 function njNightState(st, unread, heat, dreams) {
@@ -1725,6 +2012,48 @@ function njNightState(st, unread, heat, dreams) {
   `;
 }
 
+/** 整夜的睡眠结构：一条彩色甘特 + 四个时长。数据全是后端按 now 现算的 */
+function njStageGantt(st) {
+  const seq = (st && st.stage_seq) || [];
+  if (!seq.length) {
+    return `<section class="nj-stage-card">
+      <div class="nj-card-head"><h3>这一觉的结构</h3><span class="note">还没睡</span></div>
+      <div class="nj-empty">睡着之后这里会显示今晚的睡眠阶段</div>
+    </section>`;
+  }
+  const stats = st.stage_stats || {};
+  const start = seq[0].start;
+  const end = seq[seq.length - 1].end;
+  const span = Math.max(1, end - start);
+  const now = Math.floor(Date.now() / 1000);
+  const blocks = seq
+    .map((seg) => {
+      const left = ((seg.start - start) / span) * 100;
+      const width = Math.max(0.35, ((seg.end - seg.start) / span) * 100);
+      return `<i class="stage-seg" data-stage="${esc(seg.key)}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%"
+        title="${esc(seg.label)} ${njClock(seg.start)}–${njClock(seg.end)}"></i>`;
+    })
+    .join("");
+  const cursor = now > start && now < end ? `<b class="now" style="left:${(((now - start) / span) * 100).toFixed(3)}%"></b>` : "";
+  const label = (key, cn) => {
+    const minutes = Math.max(0, Math.round(stats[key] || 0));
+    if (minutes < 60) return `${cn} ${minutes} 分钟`;
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    return `${cn} ${h} 小时${m ? ` ${m} 分` : ""}`;
+  };
+  return `<section class="nj-stage-card">
+    <div class="nj-card-head"><h3>这一觉的结构</h3><span class="note">${njClock(start)} – ${njClock(end)}</span></div>
+    <div class="nj-stage-gantt">${blocks}${cursor}</div>
+    <div class="nj-stage-legend">
+      <span data-stage="n1">${label("n1", "刚入睡")}</span>
+      <span data-stage="n2">${label("n2", "浅层睡眠")}</span>
+      <span data-stage="n3">${label("n3", "深度睡眠")}</span>
+      <span data-stage="rem">${label("rem", "快速眼动")}</span>
+    </div>
+  </section>`;
+}
+
 function njNightSleep(st) {
   const rows = [
     ["当前时段", st.fatigue === "night" ? "夜间疲劳期" : st.fatigue === "noon" ? "午间疲劳期" : "不在疲劳期", "疲劳期里精力往下掉"],
@@ -1745,6 +2074,7 @@ function njNightSleep(st) {
     .join("");
   return `
     ${njNightHero(st)}
+    ${njStageGantt(st)}
     <div class="nj-head"><h2>此刻的作息</h2><span>改设置去「设置」那一页</span></div>
     <section class="cfg-group" style="padding-bottom:6px">
       <div class="cfg-head"><h3>时段与开关</h3><p>这些值直接来自长夜状态</p></div>
@@ -1784,6 +2114,426 @@ function njNightMemory(st, unread) {
   `;
 }
 
+/* 日记页的事件绑定：长夜页和独立板块共用一份 */
+function njDiaryBind() {
+const writeBtn = document.getElementById("nj-diary-write");
+if (writeBtn) {
+  writeBtn.onclick = async () => {
+    const old = writeBtn.textContent;
+    writeBtn.disabled = true;
+    writeBtn.textContent = "写着…";
+    try {
+      await post("diary/generate", {});
+      njNight();
+    } catch (err) {
+      njToast(err.message || "这次没写成", "err");
+      writeBtn.disabled = false;
+      writeBtn.textContent = old;
+    }
+  };
+}
+view.querySelectorAll("[data-diary-fold]").forEach((btn) => {
+  btn.onclick = () => {
+    const card = btn.closest(".nj-diary");
+    if (card) card.classList.toggle("is-open");
+  };
+});
+view.querySelectorAll("[data-diary-pin]").forEach((btn) => {
+  btn.onclick = async () => {
+    const card = btn.closest(".nj-diary");
+    if (!card) return;
+    const pinned = !card.classList.contains("is-pinned");
+    btn.disabled = true;
+    try {
+      await post("diary/pin", { id: Number(btn.dataset.diaryPin), pinned });
+      njNight();
+    } catch (err) {
+      njToast(err.message || "置顶失败", "err");
+      btn.disabled = false;
+    }
+  };
+});
+view.querySelectorAll("[data-diary-del]").forEach((btn) => {
+  btn.onclick = async () => {
+    if (!(await njConfirm("删掉这篇日记？删了就找不回来了"))) return;
+    btn.disabled = true;
+    try {
+      await post("diary/delete", { id: Number(btn.dataset.diaryDel) });
+      njNight();
+    } catch (err) {
+      njToast(err.message || "删除失败", "err");
+      btn.disabled = false;
+    }
+  };
+});
+}
+
+/* ============================================================ 状态栏（0.7.0）
+   各板块顶部的一条同构状态栏：左标题右指标，底下一层暖光和一枚细线图案。
+   图案用 stroke 画，透明度很低——是氛围不是装饰，别抢内容。 */
+/** 夜航 UI 统一保存：配置卡交互 + 保存按钮。
+ *  原来各页自己写一遍，日记的保存按钮就漏了——点了没反应。
+ *  这里统一绑，省得每个新页面再踩一次。 */
+function njBindSettings(root, onSaved) {
+  const scope = root || view;
+  if (typeof bindConfigCards === "function") bindConfigCards(scope);
+  const btn = scope.querySelector("#page-save");
+  if (!btn) return;
+  btn.onclick = async () => {
+    const msg = scope.querySelector("#page-msg");
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "保存中…";
+    if (msg) msg.textContent = "";
+    try {
+      const result = await post("page/settings/save", { changes: collectChanges(scope) });
+      settingsCache = null;
+      if (typeof onSaved === "function") onSaved(result);
+      if (msg) msg.textContent = `已保存 ${result.applied} 项${result.saved === false ? "（未写入文件）" : ""}`;
+    } catch (err) {
+      if (msg) msg.textContent = err.message || "保存失败";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  };
+}
+
+function njHeroArt(kind) {
+  const wrap = (inner) =>
+    `<svg viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="0.9" stroke-linecap="round">${inner}</svg>`;
+  switch (kind) {
+    case "diary":
+      return wrap(`
+        <path d="M78 34a22 22 0 1 0 0 44 26 26 0 0 1 0-44Z"/>
+        <path d="M22 74c9-3 16-2 24 3 8-5 15-6 24-3v22c-9-3-16-2-24 3-8-5-15-6-24-3z"/>
+        <path d="M46 77v23"/>`);
+    case "persona":
+      return wrap(`
+        <circle cx="60" cy="52" r="20"/>
+        <circle cx="60" cy="52" r="33" stroke-dasharray="3 7"/>
+        <path d="M60 88v16M40 98c6-6 34-6 40 0"/>`);
+    case "behavior":
+      return wrap(`
+        <path d="M14 44c10-9 20 9 30 0s20 9 30 0 20 9 30 0"/>
+        <path d="M14 62c10-9 20 9 30 0s20 9 30 0 20 9 30 0"/>
+        <path d="M14 80c10-9 20 9 30 0s20 9 30 0 20 9 30 0"/>`);
+    case "proactive":
+      return wrap(`
+        <path d="M24 58c14-16 58-16 72 0-14 16-58 16-72 0Z"/>
+        <circle cx="60" cy="58" r="9"/>
+        <path d="M60 18v10M60 92v10M22 34l7 7M98 34l-7 7"/>`);
+    case "tools":
+      return wrap(`
+        <path d="M60 20 86 35v30L60 100 34 65V35z"/>
+        <circle cx="60" cy="60" r="11"/>
+        <path d="M60 20v22M86 65 68 64M34 65l18-1"/>`);
+    case "qq":
+      return wrap(`
+        <circle cx="60" cy="60" r="12"/>
+        <ellipse cx="60" cy="60" rx="40" ry="20" transform="rotate(-22 60 60)"/>
+        <ellipse cx="60" cy="60" rx="40" ry="20" transform="rotate(22 60 60)"/>`);
+    case "system":
+      return wrap(`
+        <path d="M26 26h30v30H26zM64 26h30v30H64zM26 64h30v30H26zM64 64h30v30H64z"/>
+        <circle cx="80" cy="80" r="4"/>`);
+    case "memory":
+    default:
+      return wrap(`
+        <circle cx="44" cy="44" r="7"/><circle cx="80" cy="38" r="5"/><circle cx="66" cy="78" r="6"/>
+        <circle cx="34" cy="82" r="4"/>
+        <path d="M44 44 66 78M44 44l36-6M66 78l14-40M34 82l32-4"/>`);
+  }
+}
+
+/** 把状态栏之外的内容收进一个滚动框里（渲染完一帧后跑）。
+ *  为什么要这么绕：各页都是一次 innerHTML 拼完，没法在拼的时候就把后半段包起来；
+ *  等 DOM 落地再搬一次，事件绑定不受影响（appendChild 不丢监听）。 */
+function njWrapBody() {
+  if (!njIsNight() || !view) return;
+  const kids = Array.from(view.children);
+  const sticky = (el) =>
+    el.classList && (el.classList.contains("nj-herobar") || el.classList.contains("nj-mem-stats"));
+  let index = 0;
+  while (index < kids.length && sticky(kids[index])) index += 1;
+  if (index === 0) return;
+  let box = kids.find((el) => el.classList.contains("nj-page-body"));
+  if (!box) {
+    box = document.createElement("div");
+    box.className = "nj-page-body";
+    view.appendChild(box);
+  }
+  kids.slice(index).forEach((el) => {
+    if (el !== box && !el.classList.contains("nj-page-body")) box.appendChild(el);
+  });
+}
+
+/** 页面骨架：状态栏常驻 + 下方内容独立滚动。
+ *  夜航下 #view 是 flex column 且不吃整页滚动，所以把内容包一层自己滚，
+ *  这样上面那条状态栏一直在，下面的设置区滚自己的。 */
+function njPage(hero, body, opts) {
+  const o = opts || {};
+  const cls = ["nj-page-body", o.plain ? "is-plain" : "", o.wide ? "is-wide" : "", o.bodyClass || ""]
+    .filter(Boolean)
+    .join(" ");
+  return `${hero}<div class="${cls}">${body}</div>`;
+}
+
+function njRing(value, max, label, sub) {
+  const v = Number(value) || 0;
+  const m = Number(max) || 1;
+  const pct = Math.max(0, Math.min(1, v / m));
+  const R = 34;
+  const C = 2 * Math.PI * R;
+  return `<div class="nj-ring">
+    <svg viewBox="0 0 88 88" aria-hidden="true">
+      <circle class="bg" cx="44" cy="44" r="${R}"></circle>
+      <circle class="fg" cx="44" cy="44" r="${R}"
+        style="stroke-dasharray:${C.toFixed(1)};stroke-dashoffset:${(C * (1 - pct)).toFixed(1)};transform:rotate(-90deg);transform-origin:44px 44px"></circle>
+    </svg>
+    <div class="nj-ring-txt"><b>${esc(value == null ? "—" : value)}</b>${sub ? `<small>${esc(sub)}</small>` : ""}</div>
+    ${label ? `<span class="nj-ring-label">${esc(label)}</span>` : ""}
+  </div>`;
+}
+
+function njTape(pct) {
+  const p = Math.max(0, Math.min(100, Number(pct) || 0));
+  return `<div class="nj-herobar-tape" aria-hidden="true"><i style="width:${p}%"></i><b style="left:calc(${p}% - 1px)"></b></div>`;
+}
+
+function njHeroBar(o) {
+  /* 状态栏拼进 innerHTML 后，下一帧把后面的内容收进滚动框（见 njWrapBody） */
+  requestAnimationFrame(njWrapBody);
+  const stats = (o.stats || [])
+    .map(
+      (item) => `<div class="${item.warn ? "is-warn" : ""}">
+        <span>${esc(item.label || "")}</span>
+        <b>${esc(item.value == null ? "—" : item.value)}${item.unit ? `<small>${esc(item.unit)}</small>` : ""}</b>
+      </div>`
+    )
+    .join("");
+  const cls = ["nj-herobar", o.variant ? `is-${o.variant}` : "", o.tone ? `is-${o.tone}` : ""]
+    .filter(Boolean)
+    .join(" ");
+  return `<section class="${cls}">
+    <div class="nj-herobar-glow" aria-hidden="true"></div>
+    <div class="nj-herobar-pattern" aria-hidden="true">${njHeroArt(o.art || "memory")}</div>
+    <div class="nj-herobar-main">
+      <span class="nj-herobar-eyebrow">${esc(o.eyebrow || "")}</span>
+      <h2>${esc(o.title || "")}</h2>
+      <p>${esc(o.note || "")}</p>
+    </div>
+    <div class="nj-herobar-side">
+      ${stats ? `<div class="nj-herobar-stats">${stats}</div>` : ""}
+      ${o.ring ? njRing(o.ring.value, o.ring.max, o.ring.label, o.ring.sub) : ""}
+      ${o.actions || ""}
+    </div>
+    ${o.tape != null ? njTape(o.tape) : ""}
+  </section>`;
+}
+
+/* 独立板块：日记 */
+async function njDiaryPage() {
+  njShell();
+  njTitle("06");
+  const [data, settings] = await Promise.all([
+    get("diary/list", { limit: 60 }).catch(() => ({ items: [], enabled: false })),
+    loadSettings().catch(() => null),
+  ]);
+  const items = data.items || [];
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
+    today.getDate()
+  ).padStart(2, "0")}`;
+  const wroteToday = items.some((row) => String(row.day_key || "") === todayKey);
+  const totalChars = items.reduce((sum, row) => sum + Number(row.chars || 0), 0);
+  /* 连续写了几天：从今天往回数 */
+  let streak = 0;
+  for (let i = 0; i < 60; i += 1) {
+    const d = new Date(today.getTime() - i * 86400000);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    if (items.some((row) => String(row.day_key || "") === key)) streak += 1;
+    else if (i > 0) break;
+  }
+  const latest = items[0] || null;
+
+  view.innerHTML = `
+    ${njHeroBar({
+      eyebrow: "06 / DIARY",
+      title: "日记",
+      note: data.enabled
+        ? `每天 ${data.hour || 23} 点之后写一篇，素材只来自真实记忆与梦。她写这些不是为了给谁看。`
+        : "日记总开关关着，在下面的设置里打开",
+      art: "diary",
+      stats: [
+        { label: "已写", value: items.length, unit: "篇" },
+        { label: "连续", value: streak, unit: "天" },
+        { label: "总字数", value: totalChars > 999 ? `${(totalChars / 1000).toFixed(1)}k` : totalChars },
+        { label: "今天", value: wroteToday ? "写了" : "还没", warn: !wroteToday },
+      ],
+      actions: `<button class="nj-btn sm primary" id="nj-diary-write" ${data.enabled ? "" : "disabled"}>现在就写一篇</button>
+        ${latest ? `<span class="nj-herobar-foot">上次：${esc(latest.day_label || latest.day_key || "")}</span>` : ""}`,
+    })}
+    <div class="nj-diary-list">${
+      items.length
+        ? items.map(njDiaryCard).join("")
+        : `<div class="nj-empty">她还没开始写${data.enabled ? "" : "（日记开关是关的）"}</div>`
+    }</div>
+    ${settings ? `<div class="nj-diary-cfg">
+      ${configCard(pickGroup(settings, "diary"), { title: "日记设置", desc: "写不写、几点写、写多长、引不引梦、要不要写名字" })}
+      ${pageActions("保存日记设置")}
+    </div>` : ""}`;
+  njDiaryBind();
+  if (settings) {
+    njBindSettings(view, () => setTimeout(() => njDiaryPage(), 900));
+  }
+}
+
+/* ============================================================ 主动找人（0.7.0） */
+function njProactiveRow(item) {
+  const muted = Number(item.muted_until || 0) * 1000 > Date.now();
+  const kind = item.session_kind === "group" ? "group" : "user";
+  const badge = item.session_kind === "group" ? "群" : "";
+  return `<div class="nj-px-row ${muted ? "is-muted" : ""}" data-px-session="${esc(item.session_id)}">
+    ${njAvatar(item.session_id, item.label, { kind, sessionId: item.session_id })}
+    <div class="nj-px-main">
+      <b>${esc(item.label || item.session_id)}${badge ? `<span class="nj-px-badge">${badge}</span>` : ""}</b>
+      <span>${esc(item.idle_text || "")}没说话${
+        item.unanswered ? ` · 未回复 ${esc(item.unanswered)}` : ""
+      }${muted ? " · 静音中" : ""}</span>
+    </div>
+    <div class="nj-px-ops">
+      <button type="button" data-px-send="${esc(item.session_id)}" title="立刻发一条">发</button>
+      <button type="button" data-px-mute="${esc(item.session_id)}" title="${muted ? "解除静音" : "静音 6 小时"}">${
+        muted ? "解" : "静"
+      }</button>
+    </div>
+  </div>`;
+}
+
+function njProactiveLogRow(row) {
+  const state = row.replied ? "回了" : "没回";
+  return `<div class="nj-px-log ${row.replied ? "is-replied" : ""}">
+    <span class="nj-px-time">${esc(row.at_text || "")}</span>
+    <span class="nj-px-text">${esc(row.text || "")}</span>
+    <span class="nj-px-state">${state}</span>
+  </div>`;
+}
+
+async function njProactive() {
+  njShell();
+  njTitle("03");
+  const [stateData, sessionsData, logData, settings] = await Promise.all([
+    get("proactive/state").catch(() => ({})),
+    get("proactive/sessions").catch(() => ({ items: [] })),
+    get("proactive/log", { limit: 30 }).catch(() => ({ items: [] })),
+    loadSettings().catch(() => null),
+  ]);
+  const items = sessionsData.items || [];
+  const logs = logData.items || [];
+  const unanswered = items.reduce((sum, item) => sum + Number(item.unanswered || 0), 0);
+  const mutedAt = Number(stateData.muted_until || 0);
+  const mutedText = mutedAt * 1000 > Date.now() ? `静默至 ${new Date(mutedAt * 1000).toTimeString().slice(0, 5)}` : "没在静默";
+
+  const left = items.length
+    ? items.map(njProactiveRow).join("")
+    : `<div class="nj-empty">最近没人说话，她也没处可找</div>`;
+  const right = logs.length
+    ? logs.map(njProactiveLogRow).join("")
+    : `<div class="nj-empty">还没主动说过话</div>`;
+
+  view.innerHTML = `
+    ${njHeroBar({
+      eyebrow: "03 / PROACTIVE",
+      variant: "ring",
+      ring: { value: stateData.sent_today || 0, max: stateData.daily_cap || 6, label: "今日额度", sub: `/${stateData.daily_cap || 6}` },
+      title: "主动找人",
+      note: stateData.enabled
+        ? `没人说话的时候她自己会想找人。睡着不发、${stateData.quiet_hours || "01:00-08:00"} 免打扰、连着没被回会退避。`
+        : "主动找人是关的，在下面的设置里打开",
+      art: "proactive",
+      stats: [
+        { label: "今日已发", value: `${stateData.sent_today || 0}/${stateData.daily_cap || 6}` },
+        { label: "候选会话", value: items.length, unit: "个" },
+        { label: "未回复", value: unanswered, warn: unanswered > 0 },
+        { label: "状态", value: stateData.enabled ? mutedText : "关着", warn: !stateData.enabled },
+      ],
+    })}
+    <div class="nj-split" style="margin-top:14px">
+      <section class="nj-card">
+        <div class="nj-px-head"><h3>谁会被找</h3><span>${esc(items.length)}</span></div>
+        <div class="nj-px-list nj-scroll">${left}</div>
+      </section>
+      <section class="nj-card">
+        <div class="nj-px-head"><h3>最近主动</h3><span>${esc(logs.length)}</span></div>
+        <div class="nj-px-list nj-scroll">${right}</div>
+      </section>
+    </div>
+    <div class="nj-diary-cfg">
+      ${settings ? configCard(pickGroup(settings, "proactive"), { title: "主动找人设置", desc: "闲多久开始想人、每天最多几条、什么时段不发" }) : ""}
+      ${settings ? pageActions("保存主动找人设置") : ""}
+    </div>`;
+
+  if (settings) njBindSettings(view);
+  view.querySelectorAll("[data-px-send]").forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.dataset.pxSend;
+      if (!(await njConfirm(`现在就让 ${id} 收到一条？`))) return;
+      btn.disabled = true;
+      btn.textContent = "…";
+      try {
+        await post("proactive/now", { session_id: id });
+        njProactive();
+      } catch (err) {
+        njToast(err.message || "没发出去", "err");
+        btn.disabled = false;
+        btn.textContent = "发";
+      }
+    };
+  });
+  view.querySelectorAll("[data-px-mute]").forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.dataset.pxMute;
+      const row = btn.closest(".nj-px-row");
+      const muted = row && row.classList.contains("is-muted");
+      btn.disabled = true;
+      try {
+        await post("proactive/mute", { session_id: id, hours: muted ? 0 : 6 });
+        njProactive();
+      } catch (err) {
+        njToast(err.message || "静音失败", "err");
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+/* ============================================================ 日记（0.7.0） */
+function njDiaryCard(row) {
+  const mood = esc(row.mood || "安静");
+  const refs = (row.refs || []).length;
+  return `<article class="nj-diary ${row.pinned ? "is-pinned" : ""}" data-diary-id="${esc(row.id)}">
+    <header>
+      <div class="nj-diary-day">
+        <b>${esc(row.day_label || row.day_key || "")}</b>
+        <span class="nj-diary-mood">${mood}</span>
+        ${refs ? `<span class="nj-diary-refs">引了 ${esc(refs)} 条记忆</span>` : ""}
+      </div>
+      <div class="nj-diary-ops">
+        <button type="button" data-diary-pin="${esc(row.id)}" title="${row.pinned ? "取消置顶" : "置顶"}">${row.pinned ? "★" : "☆"}</button>
+        <button type="button" data-diary-fold title="展开 / 收起">⋯</button>
+      </div>
+    </header>
+    ${row.title ? `<h4>${esc(row.title)}</h4>` : ""}
+    <p class="nj-diary-text">${esc(row.text || "")}</p>
+    <footer>
+      <span>${esc(row.created_text || "")}${row.chars ? ` · ${esc(row.chars)} 字` : ""}</span>
+      <button type="button" class="nj-diary-del" data-diary-del="${esc(row.id)}">删掉</button>
+    </footer>
+  </article>`;
+}
+
+
 function njNightDream(dreamData) {
   const nights = (dreamData && dreamData.nights) || [];
   const stats = (dreamData && dreamData.stats) || {};
@@ -1805,8 +2555,13 @@ function njNightDream(dreamData) {
     })
     .join("");
   return `
-    <div class="nj-head" style="margin-top:0"><h2>做过的梦</h2><span>${esc(stats.living || 0)} 段还在 / 共 ${esc(stats.total || 0)} 段</span></div>
-    <p class="hint" style="margin:-4px 0 14px">睡着满一小时开始做梦，之后每小时一段。梦按等级一天天淡掉，拽住了就不会散。</p>
+    <div class="nj-head" style="margin-top:0"><h2>做过的梦</h2>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span>${esc(stats.living || 0)} 段还在 / 共 ${esc(stats.total || 0)} 段</span>
+        <button class="nj-btn tiny" data-dream-make>现在做一段</button>
+      </div>
+    </div>
+    <p class="hint" style="margin:-4px 0 14px">睡着半小时后开始做梦，之后每半小时一段。梦按等级一天天淡掉，拽住了就不会散。想立刻看效果就点右边那个按钮。</p>
     ${blocks || '<div class="nj-empty">还没做过梦</div>'}
   `;
 }
@@ -1858,7 +2613,7 @@ function njNightSettings(settings) {
 /* ------------------------------------------------------------ 工具 */
 async function njTools() {
   njShell();
-  njTitle("06");
+  njTitle("07");
   const [settings, data] = await Promise.all([loadSettings(), get("page/tools")]);
   const items = data.items || [];
   const groups = {};
@@ -1877,8 +2632,26 @@ async function njTools() {
     )
     .join("");
 
+  const capGroup = pickGroup(settings, "capability") || { items: [] };
+  const capValue = (key, fallback) => {
+    const hit = (capGroup.items || []).find((item) => item.key === key);
+    return hit && hit.value != null ? hit.value : fallback;
+  };
   view.innerHTML = `
-    <div class="nj-head" style="margin-top:0"><h2>工具设置</h2><span>分组决定开放哪些能力</span></div>
+    ${njHeroBar({
+      eyebrow: "07 / TOOLS",
+      variant: "compact",
+      title: "工具",
+      note: "分组决定开放哪些能力，限流是每会话每分钟的次数上限。已经在跑的能力下面的表里能看到调用次数。",
+      art: "tools",
+      stats: [
+        { label: "能力", value: items.length, unit: "个" },
+        { label: "分组", value: Object.keys(groups).length, unit: "组" },
+        { label: "限流", value: `${capValue("rate_limit_per_min", "—")}/分` },
+        { label: "模块", value: capValue("enabled", true) ? "开着" : "关着", warn: !capValue("enabled", true) },
+      ],
+    })}
+    <div class="nj-head" style="margin-top:22px"><h2>工具设置</h2><span>分组决定开放哪些能力</span></div>
     ${configCard(pickGroup(settings, "capability"), { title: "实用能力", desc: "分组决定开放哪些能力；限流是每会话每分钟的次数上限" })}
     ${pageActions("保存工具设置")}
 
@@ -1892,8 +2665,7 @@ async function njTools() {
     }
   `;
 
-  bindConfigCards(view);
-  bindPageSave();
+  njBindSettings(view);
   view.querySelectorAll("[data-test]").forEach((btn) => {
     btn.onclick = async () => {
       const raw = prompt(`${btn.dataset.test} 参数（JSON，可留空）`, "{}");
@@ -1902,15 +2674,15 @@ async function njTools() {
       try {
         params = raw.trim() ? JSON.parse(raw) : {};
       } catch (err) {
-        alert("JSON 格式不对");
+        njToast("JSON 格式不对", "err");
         return;
       }
       btn.disabled = true;
       try {
         const result = await post("page/tools/test", { name: btn.dataset.test, params });
-        alert(`${result.ok ? "成功" : "失败"} · ${result.elapsed}s${result.cached ? "（缓存）" : ""}\n\n${result.text || result.error || ""}`);
+        njToast(`${result.ok ? "成功" : "失败"} · ${result.elapsed}s${result.cached ? "（缓存）" : ""}\n\n${result.text || result.error || ""}`, "err");
       } catch (err) {
-        alert(err.message);
+        njToast(err.message, "err");
       } finally {
         btn.disabled = false;
       }
@@ -1921,7 +2693,7 @@ async function njTools() {
 /* ------------------------------------------------------------ QQ */
 async function njQQ() {
   njShell();
-  njTitle("07");
+  njTitle("08");
   const [settings, qzone] = await Promise.all([loadSettings(), get("page/qzone")]);
   const auth = qzone.auth || {};
   const modeText = { auto: "自动", builtin: "内置", off: "关闭" };
@@ -1939,7 +2711,20 @@ async function njQQ() {
     .join("");
 
   view.innerHTML = `
-    <div class="nj-head" style="margin-top:0"><h2>QQ 扩展设置</h2><span>签名、名片、空间</span></div>
+    ${njHeroBar({
+      eyebrow: "08 / QQ",
+      variant: "compact",
+      title: "QQ 扩展",
+      note: "签名、名片、空间。发说说要先开写权限；空间访问靠协议端的登录态，不用另外装插件。",
+      art: "qq",
+      stats: [
+        { label: "模式", value: modeText[qzone.mode] || qzone.mode || "—" },
+        { label: "登录态", value: auth.ok ? `就绪 · ${auth.uin || ""}` : "未获取", warn: !auth.ok },
+        { label: "写权限", value: canWrite ? "已开" : "关闭", warn: !canWrite },
+        { label: "外部插件", value: qzone.external ? "已装" : "未装" },
+      ],
+    })}
+    <div class="nj-head" style="margin-top:22px"><h2>QQ 扩展设置</h2><span>签名、名片、空间</span></div>
     ${configCard(pickGroup(settings, "qq_extra"), { title: "QQ 扩展", desc: "发说说需要先打开写权限；空间访问靠协议端的登录态，不用另外装插件" })}
     ${pageActions("保存 QQ 设置")}
 
@@ -1972,8 +2757,7 @@ async function njQQ() {
     </section>
   `;
 
-  bindConfigCards(view);
-  bindPageSave();
+  njBindSettings(view);
 
   const msg = document.getElementById("nj-qz-msg");
   const feed = document.getElementById("nj-qz-feed");
@@ -2033,7 +2817,7 @@ async function njQQ() {
       pubMsg.textContent = "内容是空的";
       return;
     }
-    if (!confirm(`确认发这条说说？\n\n${text.slice(0, 120)}`)) return;
+    if (!(await njConfirm(`确认发这条说说？\n\n${text.slice(0, 120)}`))) return;
     pubMsg.textContent = "发送中…";
     publish.disabled = true;
     try {
@@ -2051,7 +2835,7 @@ async function njQQ() {
 
 async function njAvatarPage() {
   njShell();
-  njTitle("07");
+  njTitle("08");
   const data = await get("page/avatar");
   const items = data.items || [];
   const pending = data.pending || [];
@@ -2072,7 +2856,19 @@ async function njAvatarPage() {
     </div>`;
 
   view.innerHTML = `
-    <div class="nj-head" style="margin-top:0"><h2>换头像</h2><span>${data.available ? "通道可用" : "现在拿不到 bot 客户端"}</span></div>
+    ${njHeroBar({
+      eyebrow: "08 / AVATAR",
+      title: "换头像",
+      note: data.available ? "通道可用。库里的图按 sha1 去重，换过的不会被挑第二次。" : "现在拿不到 bot 客户端，等协议端连上再来。",
+      art: "persona",
+      stats: [
+        { label: "通道", value: data.available ? "可用" : "不可用", warn: !data.available },
+        { label: "今天已换", value: data.used_today || 0, unit: "次" },
+        { label: "每日上限", value: data.daily_limit || 0, unit: "次" },
+        { label: "上次", value: lastText || "—" },
+      ],
+    })}
+    <div class="nj-head" style="margin-top:22px"><h2>换头像</h2><span>${data.available ? "通道可用" : "现在拿不到 bot 客户端"}</span></div>
     <section class="nj-card">
       <p class="hint" style="margin:0">上次更换：${lastText}；今天已自动换 ${esc(data.used_today || 0)} / ${esc(data.daily_limit || 0)} 次</p>
       <div class="nj-actions" style="margin-top:12px">
@@ -2131,7 +2927,7 @@ async function njAvatarPage() {
 /* ------------------------------------------------------------ 系统 */
 async function njSystem() {
   njShell();
-  njTitle("08");
+  njTitle("09");
   const settings = await loadSettings();
   const admins = await get("page/admins");
   const compat = settings.compat || { yield: {}, present: {} };
@@ -2158,8 +2954,22 @@ async function njSystem() {
     )
     .join("");
 
+  const yielding = Object.keys(compat.yield || {}).filter((key) => compat.yield[key]);
   view.innerHTML = `
-    <div class="nj-head" style="margin-top:0"><h2>运行状态</h2><span>插件本身怎么跑</span></div>
+    ${njHeroBar({
+      eyebrow: "09 / SYSTEM",
+      variant: "compact",
+      title: "系统",
+      note: "插件本身怎么跑：多模态备用通道、外部插件探测、谁算管理员。",
+      art: "system",
+      stats: [
+        { label: "多模态", value: mmx && mmx.available ? "可用" : "不可用", warn: !(mmx && mmx.available) },
+        { label: "外部插件", value: present.length, unit: "个" },
+        { label: "让位", value: yielding.length ? yielding.join("/") : "全部自管" },
+        { label: "管理员", value: effective.length, unit: "人" },
+      ],
+    })}
+    <div class="nj-head" style="margin-top:22px"><h2>运行状态</h2><span>插件本身怎么跑</span></div>
     <div class="nj-cells">
       <div class="nj-cell"><div class="k">MiniMax 多模态</div>
         <div class="v">${mmx && mmx.available ? '<span class="nj-chip on">可用</span>' : '<span class="nj-chip rose">不可用</span>'}</div></div>
@@ -2205,8 +3015,7 @@ async function njSystem() {
     ${pageActions("保存本页设置")}
   `;
 
-  bindConfigCards(view);
-  bindPageSave();
+  njBindSettings(view);
 
   document.getElementById("nj-adm-save").onclick = async () => {
     const msg = document.getElementById("nj-adm-msg");

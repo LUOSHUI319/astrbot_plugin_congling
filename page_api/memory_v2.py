@@ -423,10 +423,14 @@ class MemoryV2Mixin:
                 return _err("缺 key")
             score = body.get("score")
             stage = body.get("stage")
+            delta = body.get("delta")
+            if delta is not None:
+                delta = max(-200.0, min(200.0, self._float(delta, 0)))
             result = await mem.affinity.set_manual(
                 key,
                 score=self._float(score, 0) if score is not None else None,
                 stage=self._int(stage, 0) if stage is not None else None,
+                delta=delta,
             )
             return _ok(result)
         except PermissionError as exc:

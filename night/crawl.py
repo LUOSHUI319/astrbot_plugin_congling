@@ -126,7 +126,7 @@ class Crawler:
         try:
             if session_id:
                 value = await self.store.scalar(
-                    "SELECT COUNT(*) FROM mem_atom WHERE unread=1 AND session_id=?",
+                    "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND unread=1 AND session_id=?",
                     (session_id,),
                 )
                 await self.store.execute(
@@ -134,7 +134,8 @@ class Crawler:
                     (session_id,),
                 )
             else:
-                value = await self.store.scalar("SELECT COUNT(*) FROM mem_atom WHERE unread=1", ())
+                value = await self.store.scalar(
+                    "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND unread=1", ())
                 await self.store.execute("UPDATE mem_atom SET unread=0 WHERE unread=1", ())
             return int(value or 0)
         except Exception:
@@ -144,8 +145,8 @@ class Crawler:
         """面板用：列出还没爬的记忆。"""
         try:
             rows = await self.store.fetch_all(
-                "SELECT id, text, kind, session_label, unread_since FROM mem_atom "
-                "WHERE unread=1 ORDER BY unread_since DESC LIMIT ?",
+                "SELECT id, text, kind, session_id, session_label, unread_since, created_at FROM mem_atom "
+                "WHERE status='active' AND unread=1 ORDER BY unread_since DESC LIMIT ?",
                 (max(1, limit),),
             )
             return [dict(row) for row in rows]

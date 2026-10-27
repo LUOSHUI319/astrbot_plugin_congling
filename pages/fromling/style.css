@@ -3154,3 +3154,37 @@ html[data-theme="dark"] .lv-4 { background: #2f2820; }
   border-radius: var(--radius-sm) !important;
 }
 .stat .num.small { font-size: 16.5px; line-height: 1.9; }
+
+/* 记忆等级点阵（0.7.0）：1~5 级亮几个点，0 级双环。颜色跟随各自主题 */
+.lv {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 14px;
+  vertical-align: -1px;
+}
+.lv i {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .22;
+  display: inline-block;
+}
+.lv i.on { opacity: 1; }
+.lv.lv0 {
+  position: relative;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.lv.lv0 i {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2.5px;
+  height: 2.5px;
+  margin: -1.25px 0 0 -1.25px;
+  opacity: 1;
+}

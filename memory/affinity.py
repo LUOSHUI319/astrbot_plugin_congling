@@ -197,14 +197,25 @@ class Affinity:
         *,
         score: float | None = None,
         stage: int | None = None,
+        delta: float | None = None,
     ) -> dict[str, Any]:
+        """面板手动调分。
+
+        score  直接设成这个数（绝对）
+        delta  在当前值上加/减（增量，面板上的 +10 / -10）
+        stage  跳到某一档的门槛分
+        三者按 score > delta > stage 的顺序取一个。
+        """
         if not self.editable():
             raise PermissionError("面板手动调整已关闭")
         data = await self.get(subject_key)
         key = data["subject_key"]
-        target = float(data["score"])
+        before = float(data["score"])
+        target = before
         if score is not None:
             target = max(0.0, min(MAX_SCORE, float(score)))
+        elif delta is not None:
+            target = max(0.0, min(MAX_SCORE, before + float(delta)))
         elif stage is not None:
             th = self.thresholds()
             idx = max(0, min(5, int(stage)))
@@ -216,7 +227,13 @@ class Affinity:
             (target, new_stage, self.stage_floor(new_stage), int(time.time()),
              self.config.persona_id, key),
         )
-        return await self.get(key)
+        result = await self.get(key)
+        try:
+            result["before"] = round(before, 1)
+            result["after"] = round(target, 1)
+        except Exception:
+            pass
+        return result
 
     async def reset_today(self) -> None:
         await self.store.execute("UPDATE affinity SET delta_today=0")

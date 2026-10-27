@@ -17,6 +17,9 @@ from typing import Any
 
 from ..core.contracts import PerceivedMessage, WakeAttempt
 
+# 睡着的那几种 mode，用来判断要不要按睡眠阶段打折
+NIGHT_SLEEPING_MODES = ("asleep", "waking", "sleeping")
+
 MODE_NEVER = "never"
 MODE_PRIVATE = "private_only"
 MODE_BOTH = "both"
@@ -52,6 +55,29 @@ class Waker:
     def _step_count(self) -> int:
         return max(0, self.config.int("night.wake_step_count", 4))
 
+    # ------------------------------------------------------------ 睡眠阶段
+    def _stage_factor(self) -> tuple[float, str]:
+        """现在这个睡眠阶段有多难叫醒。深睡 0.45，刚躺下 1.3。"""
+        try:
+            night = getattr(self.plugin, "night", None)
+            service = getattr(night, "state", None)
+            state = getattr(service, "state", None)
+            if state is None or state.mode != NIGHT_SLEEPING_MODES:
+                return 1.0, ""
+            from . import stages as stages_mod
+
+            stage = stages_mod.at(
+                service.config,
+                sleep_at=int(state.sleep_at or 0),
+                wake_at=int(state.wake_at or 0),
+                kind=state.sleep_kind or "night",
+            )
+            if not stage:
+                return 1.0, ""
+            return stages_mod.wake_factor(stage), str(stage.get("label") or "")
+        except Exception:
+            return 1.0, ""
+
     # ------------------------------------------------------------ 主判定
     def check(self, msg: PerceivedMessage, *, self_id: str = "") -> WakeAttempt:
         """msg 是一条睡眠期间收到的消息。返回这次掷骰结果。"""
@@ -84,9 +110,10 @@ class Waker:
                 reason=f"还差 {start - counter.count} 次才开始掷骰",
             )
 
-        # 概率 = (count - start + 1) / (step + 1)
+        # 概率 = (count - start + 1) / (step + 1)，再按睡眠阶段打折
         reached = counter.count - start + 1
-        chance = min(1.0, reached / (step + 1))
+        factor, stage_label = self._stage_factor()
+        chance = min(1.0, reached / (step + 1)) * factor
         roll = random.random()
         woke = roll < chance
 
@@ -100,7 +127,11 @@ class Waker:
             needed=need,
             chance=round(chance, 3),
             roll=round(roll, 3),
-            reason=f"第 {counter.count} 次，概率 {chance:.0%}" + ("，醒了" if woke else "，没醒"),
+            reason=(
+                f"第 {counter.count} 次，概率 {chance:.0%}"
+                + (f"（{stage_label}，系数 {factor:g}）" if stage_label and factor != 1.0 else "")
+                + ("，醒了" if woke else "，没醒")
+            ),
         )
 
     # ------------------------------------------------------------ 计数

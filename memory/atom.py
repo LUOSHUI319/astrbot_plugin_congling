@@ -115,20 +115,28 @@ class AtomStore:
             level = 3
         strength = STRENGTH.get(level, 0.65)
         next_review = next_review_at(level, now)
-        # 睡着期间产生的记忆打上「未曾爬楼」，醒后要先爬楼才能读
+        # 睡着期间产生的记忆打上「未曾爬楼」，醒后要先爬楼才能读。
+        # 判定不能只看「写入这一刻在不在睡」：抽取是延后批量的（静默 90 秒 / 攒 30 条），
+        # 睡着期间的消息往往在醒来之后才入库，那时 is_asleep() 早就是假的了，
+        # 于是未读标记永远打不上，睡着期间的事直接进记忆库、又被检索层排除——
+        # 结果就是「面板看得见、她却想不起来」。先按证据消息的时间比对睡眠区间。
         unread = 0
         unread_since = 0
+        asleep_now = False
         night = getattr(self.plugin, "night", None)
+        crawl_on = True
         if night is not None and getattr(self.plugin, "cfg", None) is not None:
             try:
-                if (
-                    night.state.state.is_asleep()
-                    and self.plugin.cfg.bool("night.crawl_enabled", True)
-                ):
-                    unread = 1
-                    unread_since = now
+                crawl_on = self.plugin.cfg.bool("night.crawl_enabled", True)
+                asleep_now = bool(crawl_on and night.state.state.is_asleep())
             except Exception:
-                unread = 0
+                asleep_now = False
+        if asleep_now:
+            unread, unread_since = 1, now
+        elif crawl_on:
+            covered_at = await self._sleep_hit(draft.evidence_msg_ids)
+            if covered_at > 0:
+                unread, unread_since = 1, covered_at
 
         atom_id = await self.store.execute(
             "INSERT INTO mem_atom(persona_id, scope, subject_id, kind, text, norm_hash, keywords, "
@@ -181,6 +189,48 @@ class AtomStore:
             word in old_text for word in negations
         )
 
+    async def _sleep_hit(self, msg_ids: Any, limit: int = 50) -> int:
+        """这批证据消息里，有没有落在最近某段睡眠区间内的。
+
+        返回命中的那个时间戳（用来当 unread_since），没命中返回 0。
+        睡眠区间由 night.state 在醒来时落盘（kv night.last_sleep_window，最近三段）。
+        """
+        ids = [str(x) for x in (msg_ids or []) if str(x).strip()][:limit]
+        if not ids:
+            return 0
+        try:
+            marks = ",".join("?" * len(ids))
+            row = await self.store.fetch_one(
+                f"SELECT MIN(ts) AS lo, MAX(ts) AS hi FROM msg_archive WHERE msg_id IN ({marks})",
+                tuple(ids),
+            )
+        except Exception:
+            return 0
+        if not row:
+            return 0
+        lo = int(row.get("lo") or 0)
+        hi = int(row.get("hi") or 0)
+        if lo <= 0:
+            return 0
+        try:
+            windows = await self.store.kv_get("night.last_sleep_window", []) or []
+        except Exception:
+            return 0
+        if not isinstance(windows, list):
+            return 0
+        for item in windows:
+            if not isinstance(item, dict):
+                continue
+            start = int(item.get("sleep_at") or 0)
+            end = int(item.get("wake_at") or 0)
+            if start <= 0:
+                continue
+            end = end if end > start else start
+            # 区间有交集就算：一条记忆可能跨了几个消息，取头尾比一下
+            if hi >= start and lo <= end:
+                return max(lo, start)
+        return 0
+
     async def _reinforce(self, atom_id: int, importance: float) -> None:
         now = int(time.time())
         boost = 1.5
@@ -218,9 +268,14 @@ class AtomStore:
         session_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_unread: bool = False,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM mem_atom WHERE 1=1"
         params: list[Any] = []
+        # 「未曾爬楼」的记忆不算进记忆库：她还没看过，拿不出来用，
+        # 也不该跟看过的混在一起展示。要看得显式传 include_unread。
+        if not include_unread:
+            sql += " AND (unread IS NULL OR unread=0)"
         if session_id:
             sql += " AND session_id=?"
             params.append(session_id)
@@ -252,12 +307,13 @@ class AtomStore:
             )
         return rows
 
-    async def sessions(self, status: str = "active") -> list[dict[str, Any]]:
+    async def sessions(self, status: str = "active", include_unread: bool = False) -> list[dict[str, Any]]:
         """按会话汇总记忆条数，给管理页做左侧会话列表。"""
+        gate = "" if include_unread else " AND (unread IS NULL OR unread=0)"
         rows = await self.store.fetch_all(
             "SELECT session_id, session_kind, session_label, COUNT(*) AS cnt, "
             "MAX(created_at) AS last_at, SUM(CASE WHEN importance>=0.85 THEN 1 ELSE 0 END) AS important "
-            "FROM mem_atom WHERE status=? GROUP BY session_id, session_kind, session_label "
+            "FROM mem_atom WHERE status=?" + gate + " GROUP BY session_id, session_kind, session_label "
             "ORDER BY last_at DESC",
             (status,),
         )
@@ -271,10 +327,21 @@ class AtomStore:
             row["label"] = str(row.get("session_label") or row.get("session_id") or "未知会话")
         return rows
 
-    async def count(self, status: str = "active") -> int:
+    async def count(self, status: str = "active", include_unread: bool = False) -> int:
+        gate = "" if include_unread else " AND (unread IS NULL OR unread=0)"
         value = await self.store.scalar(
-            "SELECT COUNT(*) FROM mem_atom WHERE status=?", (status,), 0
+            "SELECT COUNT(*) FROM mem_atom WHERE status=?" + gate, (status,), 0
         )
+        return int(value or 0)
+
+    async def count_unread(self) -> int:
+        """未爬记忆条数（面板黄条与统计卡用）。"""
+        try:
+            value = await self.store.scalar(
+                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND unread=1", (), 0
+            )
+        except Exception:
+            return 0
         return int(value or 0)
 
     # ================================================================ 修改

@@ -1055,10 +1055,13 @@
 .nj-card-head h3 { margin: 0; font-size: var(--nj-fs-module); font-weight: 600; color: #eee8dc; letter-spacing: .02em; }
 .nj-card-head .note { font-family: var(--nj-mono); font-size: 10.5px; color: #718277; letter-spacing: .05em; }
 .nj-session-list { display: flex; flex-direction: column; gap: 2px; }
+/* 会话行改用 flex：原来两列 grid 里塞了 4 个子元素（头像/名字/计数/摘要），
+   名字被挤到 auto 列、计数掉到第二行左边，看起来就是「重叠」。 */
 .nj-session {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 1px 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
   padding: 8px 9px;
   border: 1px solid transparent;
   border-radius: 10px;
@@ -1071,9 +1074,9 @@
   transition: background .16s var(--ease), border-color .16s var(--ease);
 }
 .nj-session:hover { background: rgba(243, 238, 227, .035); }
-.nj-session .label { font-size: 14.5px; line-height: 1.35; color: #bdc7bd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.nj-session b { font-family: var(--nj-mono); font-size: 11px; font-weight: 400; color: #718277; line-height: 1.6; }
-.nj-session small { grid-column: 1 / -1; font-size: 11px; color: #67786d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nj-session .label { flex: 1 1 auto; min-width: 0; font-size: 14.5px; line-height: 1.35; color: #bdc7bd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nj-session b { flex: none; margin-left: auto; font-family: var(--nj-mono); font-size: 11px; font-weight: 400; color: #718277; line-height: 1.6; }
+.nj-session small { flex: 0 0 100%; font-size: 11px; color: #67786d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nj-session.is-on { background: rgba(155, 196, 177, .095); border-color: rgba(155, 196, 177, .15); }
 .nj-session.is-on .label { color: #f2ecdf; }
 .nj-session.is-on b { color: #a9c8b9; }
@@ -2135,3 +2138,1112 @@
     transition: none !important;
   }
 }
+
+
+/* ==================================================================
+   v7 新增（0.7.0）
+   ================================================================== */
+
+/* 记忆库顶部「未爬记忆」提示条：一条就够，不占版面，点了去长夜 */
+:root[data-ui="night"] .nj-tipbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 12px 0 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(210, 169, 104, .24);
+  border-left: 3px solid var(--nj-gold);
+  border-radius: 10px;
+  background: var(--nj-gold-soft);
+  color: #d9c9a9;
+  font-family: inherit;
+  font-size: var(--nj-fs-meta);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .16s var(--ease), background .16s var(--ease);
+}
+:root[data-ui="night"] .nj-tipbar:hover {
+  border-color: rgba(210, 169, 104, .42);
+  background: rgba(210, 169, 104, .17);
+}
+:root[data-ui="night"] .nj-tipbar i {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--nj-gold);
+}
+:root[data-ui="night"] .nj-tipbar b {
+  margin-left: auto;
+  color: var(--nj-gold-2);
+  font-weight: 400;
+}
+:root[data-ui="night"] .nj-ms .note em.unread {
+  color: var(--nj-gold-2);
+  font-style: normal;
+}
+
+/* 来源会话行：20px 头像 + 名称 + 条数 */
+:root[data-ui="night"] .nj-session {
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+}
+:root[data-ui="night"] .nj-session small { grid-column: 2 / -1; }
+:root[data-ui="night"] .nj-session .nj-avatar { width: 20px; height: 20px; font-size: 10px; }
+/* 记忆条目来源标签：16px 迷你头像 */
+:root[data-ui="night"] .nj-ev-where {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+:root[data-ui="night"] .nj-ev-where .nj-avatar { width: 16px; height: 16px; font-size: 9px; border-radius: 5px; }
+:root[data-ui="night"] .nj-ev-where .nj-avatar:not(.sq) { border-radius: 50%; }
+:root[data-ui="night"] .nj-ev-head .nj-avatar { width: 16px; height: 16px; font-size: 9px; }
+
+/* 记忆等级点阵（0.7.0）：1~5 级亮几个点，0 级双环 */
+:root[data-ui="night"] .nj-lv,
+:root[data-ui="night"] .lv {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  vertical-align: -1px;
+}
+:root[data-ui="night"] .nj-lv i,
+:root[data-ui="night"] .lv i {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .22;
+}
+:root[data-ui="night"] .nj-lv i.on,
+:root[data-ui="night"] .lv i.on { opacity: 1; }
+:root[data-ui="night"] .nj-lv.lv0,
+:root[data-ui="night"] .lv.lv0 {
+  position: relative;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--nj-gold);
+  border-radius: 50%;
+  color: var(--nj-gold);
+}
+:root[data-ui="night"] .nj-lv.lv0 i,
+:root[data-ui="night"] .lv.lv0 i {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2.5px;
+  height: 2.5px;
+  margin: -1.25px 0 0 -1.25px;
+  opacity: 1;
+}
+
+/* 好感度排行：头像 + 加减（0.7.0） */
+:root[data-ui="night"] .nj-rank li { align-items: center; }
+:root[data-ui="night"] .nj-rank .nj-avatar { width: 20px; height: 20px; font-size: 10px; }
+:root[data-ui="night"] .aff-ops {
+  display: inline-flex;
+  margin-left: auto;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity .16s var(--ease);
+}
+:root[data-ui="night"] .nj-rank li:hover .aff-ops,
+:root[data-ui="night"] .nj-rank li:focus-within .aff-ops { opacity: 1; }
+:root[data-ui="night"] .aff-ops button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--nj-line);
+  border-radius: 5px;
+  background: none;
+  color: var(--nj-ink-3);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+:root[data-ui="night"] .aff-ops button:hover { color: var(--nj-gold-2); border-color: var(--nj-gold); }
+:root[data-ui="night"] .aff-ops button:disabled { opacity: .35; cursor: default; }
+
+/* ==================================================================
+   三板块等高 + 各自内部滚动（0.7.0 · U1）
+   过去是整页跟着 body 滚，三栏长短不齐，滚到底才看见右边那栏的下半截。
+   现在把壳固定在视口上，滚动交给页面内部，主体块撑满剩余高度。
+   ================================================================== */
+:root[data-ui="night"] .app {
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+}
+:root[data-ui="night"] .main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 100vh;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+:root[data-ui="night"] .head,
+:root[data-ui="night"] #subtabs { flex: 0 0 auto; }
+
+:root[data-ui="night"] .view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 36px;
+}
+:root[data-ui="night"] .view > * { flex: 0 0 auto; }
+
+/* 主体块吃掉剩余高度：拉满 → 两栏/三栏自然等高 */
+:root[data-ui="night"] .view > .nj-mem-body,
+:root[data-ui="night"] .view > .nj-split,
+:root[data-ui="night"] .view > .nj-fill-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+:root[data-ui="night"] .nj-mem-body { align-items: stretch; }
+:root[data-ui="night"] .nj-split { align-items: stretch; }
+:root[data-ui="night"] .nj-mem-body > *,
+:root[data-ui="night"] .nj-split > * {
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 只剩一栏时（窄屏）不要硬撑，避免把内容压扁 */
+@media (max-width: 1080px) {
+  :root[data-ui="night"] .nj-mem-body,
+  :root[data-ui="night"] .nj-split { align-items: start; }
+  :root[data-ui="night"] .nj-mem-body > *,
+  :root[data-ui="night"] .nj-split > * { max-height: none; }
+}
+
+/* ==================================================================
+   日记（0.7.0 · 第 6 条）
+   时间轴式竖排卡片，正文 4 行截断，点「⋯」展开。克制些，别做成博客。
+   ================================================================== */
+:root[data-ui="night"] .nj-diary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+:root[data-ui="night"] .nj-diary {
+  position: relative;
+  padding: 15px 18px 13px;
+  border: 1px solid var(--nj-line);
+  border-radius: 16px;
+  background: linear-gradient(160deg, rgba(243, 238, 227, .04), rgba(243, 238, 227, .012));
+  transition: border-color .16s var(--ease);
+}
+:root[data-ui="night"] .nj-diary:hover { border-color: var(--nj-line-2); }
+:root[data-ui="night"] .nj-diary.is-pinned {
+  border-color: rgba(210, 169, 104, .38);
+  background: linear-gradient(160deg, rgba(210, 169, 104, .07), rgba(243, 238, 227, .012));
+}
+:root[data-ui="night"] .nj-diary header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+:root[data-ui="night"] .nj-diary-day {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+:root[data-ui="night"] .nj-diary-day b {
+  font-size: var(--nj-fs-sub);
+  font-weight: 600;
+  color: var(--nj-ink-2);
+  letter-spacing: .01em;
+}
+:root[data-ui="night"] .nj-diary-mood {
+  padding: 1px 7px;
+  border-radius: 20px;
+  background: var(--nj-gold-soft);
+  color: var(--nj-gold-2);
+  font-size: 11.5px;
+}
+:root[data-ui="night"] .nj-diary-refs { font-size: 11.5px; color: var(--nj-ink-4); }
+:root[data-ui="night"] .nj-diary-ops { display: flex; gap: 4px; flex: none; }
+:root[data-ui="night"] .nj-diary-ops button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--nj-ink-4);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+:root[data-ui="night"] .nj-diary-ops button:hover { color: var(--nj-gold-2); background: rgba(236, 226, 205, .06); }
+:root[data-ui="night"] .nj-diary.is-pinned .nj-diary-ops [data-diary-pin] { color: var(--nj-gold); }
+:root[data-ui="night"] .nj-diary h4 {
+  margin: 7px 0 0;
+  font-family: var(--nj-serif);
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--nj-cream);
+}
+:root[data-ui="night"] .nj-diary-text {
+  margin: 6px 0 0;
+  font-size: var(--nj-fs-body);
+  line-height: 1.85;
+  color: var(--nj-ink-2);
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+:root[data-ui="night"] .nj-diary.is-open .nj-diary-text { display: block; }
+:root[data-ui="night"] .nj-diary footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 9px;
+  font-size: 11.5px;
+  color: var(--nj-ink-4);
+}
+:root[data-ui="night"] .nj-diary-del {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--nj-ink-4);
+  font-size: 11.5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .16s var(--ease);
+}
+:root[data-ui="night"] .nj-diary:hover .nj-diary-del { opacity: 1; }
+:root[data-ui="night"] .nj-diary-del:hover { color: var(--nj-rose); }
+
+/* 日记页的设置区：放在列表下面，不和日记正文抢注意力 */
+:root[data-ui="night"] .nj-diary-cfg { margin-top: 26px; }
+:root[data-ui="night"] .nj-diary-cfg .cfg-group {
+  border-radius: 16px;
+  border-color: var(--nj-line);
+  background: linear-gradient(160deg, rgba(243, 238, 227, .035), rgba(243, 238, 227, .01));
+}
+
+/* ==================================================================
+   主动找人（0.7.0 · 第 11 条）
+   左「谁会被找」右「最近主动」，行内两个小动作：发 / 静。
+   ================================================================== */
+:root[data-ui="night"] .nj-px-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+:root[data-ui="night"] .nj-px-head h3 {
+  margin: 0;
+  font-family: var(--nj-serif);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--nj-cream);
+}
+:root[data-ui="night"] .nj-px-head span {
+  font-family: var(--nj-mono);
+  font-size: 11px;
+  color: var(--nj-ink-4);
+}
+:root[data-ui="night"] .nj-px-list { max-height: 420px; }
+:root[data-ui="night"] .nj-px-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 2px;
+  border-top: 1px solid rgba(236, 226, 205, .07);
+}
+:root[data-ui="night"] .nj-px-row:first-child { border-top: 0; }
+:root[data-ui="night"] .nj-px-row.is-muted { opacity: .5; }
+:root[data-ui="night"] .nj-px-main { min-width: 0; }
+:root[data-ui="night"] .nj-px-main b {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--nj-ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root[data-ui="night"] .nj-px-badge {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(236, 226, 205, .09);
+  font-size: 10.5px;
+  color: var(--nj-ink-4);
+}
+:root[data-ui="night"] .nj-px-main span {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--nj-ink-4);
+}
+:root[data-ui="night"] .nj-px-ops { display: flex; gap: 4px; }
+:root[data-ui="night"] .nj-px-ops button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(236, 226, 205, .12);
+  border-radius: 6px;
+  background: none;
+  color: var(--nj-ink-3);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all .15s var(--ease);
+}
+:root[data-ui="night"] .nj-px-ops button:hover {
+  border-color: rgba(210, 169, 104, .45);
+  color: var(--nj-gold-2);
+}
+:root[data-ui="night"] .nj-px-log {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 2px;
+  border-top: 1px solid rgba(236, 226, 205, .07);
+  font-size: 13px;
+}
+:root[data-ui="night"] .nj-px-log:first-child { border-top: 0; }
+:root[data-ui="night"] .nj-px-time { font-family: var(--nj-mono); font-size: 10.5px; color: var(--nj-ink-4); }
+:root[data-ui="night"] .nj-px-text {
+  color: var(--nj-ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root[data-ui="night"] .nj-px-state { font-size: 11px; color: var(--nj-ink-4); }
+:root[data-ui="night"] .nj-px-log.is-replied .nj-px-state { color: var(--nj-gold-2); }
+
+/* ==================================================================
+   0.7.0 · 板块状态栏（njHeroBar）
+   一层渐变底 + 右上暖光 + 一枚细线图案 + 右对齐指标。
+   光只做氛围，别抢内容：整体透明度压在 0.2 以下。
+   ================================================================== */
+:root[data-ui="night"] .nj-herobar {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 22px;
+  align-items: center;
+  padding: 20px 24px;
+  margin-bottom: 18px;
+  border: 1px solid var(--nj-line);
+  border-radius: 20px;
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(210, 169, 104, .07), transparent 58%),
+    linear-gradient(135deg, rgba(243, 238, 227, .05), rgba(243, 238, 227, .012));
+}
+:root[data-ui="night"] .nj-herobar-glow {
+  position: absolute;
+  right: -90px;
+  top: -160px;
+  width: 380px;
+  height: 380px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(210, 169, 104, .18), rgba(210, 169, 104, .04) 46%, transparent 66%);
+  filter: blur(4px);
+  pointer-events: none;
+}
+:root[data-ui="night"] .nj-herobar::after {
+  content: "";
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(210, 169, 104, .28), transparent);
+  pointer-events: none;
+}
+:root[data-ui="night"] .nj-herobar-pattern {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  width: 132px;
+  height: 132px;
+  transform: translateY(-50%);
+  color: var(--nj-gold-2);
+  opacity: .13;
+  pointer-events: none;
+}
+:root[data-ui="night"] .nj-herobar-pattern svg { width: 100%; height: 100%; }
+:root[data-ui="night"] .nj-herobar-main { position: relative; min-width: 0; }
+:root[data-ui="night"] .nj-herobar-eyebrow {
+  display: block;
+  font-family: var(--nj-mono);
+  font-size: 10.5px;
+  letter-spacing: .16em;
+  color: var(--nj-gold-2);
+  opacity: .8;
+}
+:root[data-ui="night"] .nj-herobar-main h2 {
+  margin: 6px 0 0;
+  font-family: var(--nj-serif);
+  font-size: 27px;
+  line-height: 1.15;
+  font-weight: 600;
+  color: var(--nj-cream);
+  letter-spacing: .01em;
+}
+:root[data-ui="night"] .nj-herobar-main p {
+  margin: 7px 0 0;
+  max-width: 62ch;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--nj-ink-3);
+}
+:root[data-ui="night"] .nj-herobar-side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  flex: none;
+}
+:root[data-ui="night"] .nj-herobar-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(64px, auto));
+  gap: 14px;
+  text-align: right;
+}
+:root[data-ui="night"] .nj-herobar-stats > div { min-width: 0; }
+:root[data-ui="night"] .nj-herobar-stats span {
+  display: block;
+  font-size: 11px;
+  color: var(--nj-ink-4);
+  letter-spacing: .04em;
+}
+:root[data-ui="night"] .nj-herobar-stats b {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--nj-serif);
+  font-size: 20px;
+  font-weight: 600;
+  color: #f2ecdf;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+:root[data-ui="night"] .nj-herobar-stats b small {
+  margin-left: 2px;
+  font-family: var(--nj-sans);
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--nj-ink-4);
+}
+:root[data-ui="night"] .nj-herobar-stats .is-warn b { color: var(--nj-rose, #c98a7f); }
+:root[data-ui="night"] .nj-herobar-foot {
+  font-family: var(--nj-mono);
+  font-size: 10.5px;
+  color: var(--nj-ink-4);
+}
+@media (max-width: 1080px) {
+  :root[data-ui="night"] .nj-herobar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    padding: 18px 18px 16px;
+  }
+  :root[data-ui="night"] .nj-herobar-side { align-items: flex-start; }
+  :root[data-ui="night"] .nj-herobar-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); text-align: left; width: 100%; }
+  :root[data-ui="night"] .nj-herobar-pattern { width: 96px; height: 96px; opacity: .09; }
+}
+
+/* ==================================================================
+   0.7.0 · 自定义确认框（iframe 里 window.confirm 会被静默拦掉）
+   ================================================================== */
+.nj-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 14, 11, .58);
+  backdrop-filter: blur(3px);
+}
+.nj-modal-card {
+  width: min(420px, 100%);
+  padding: 20px 22px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(236, 226, 205, .14);
+  background: #16241d;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+}
+.nj-modal-card p {
+  margin: 0 0 16px;
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: #e7e0d3;
+  white-space: pre-wrap;
+}
+.nj-modal-ops { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ==================================================================
+   记忆库布局修整（0.7.0）：三栏在窄 iframe 里会互相压字，
+   这里把宽度、高度、滚动都收到可控范围，窄屏直接退成单列。
+   ================================================================== */
+:root[data-ui="night"] .nj-mem-body {
+  display: grid;
+  grid-template-columns: minmax(0, 232px) minmax(0, 1fr) minmax(0, 288px);
+  gap: 14px;
+  align-items: start;
+}
+:root[data-ui="night"] .nj-mem-body > * { min-width: 0; }
+:root[data-ui="night"] .nj-session-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 13px 12px 10px;
+}
+:root[data-ui="night"] .nj-session-list {
+  /* basis 0：只吃剩余高度，别拿内容高度当基准，否则会把底下的密度图顶出框外 */
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+  padding-right: 2px;
+}
+:root[data-ui="night"] .nj-session-list::-webkit-scrollbar { width: 5px; }
+:root[data-ui="night"] .nj-session-list::-webkit-scrollbar-thumb {
+  background: rgba(236, 226, 205, .16);
+  border-radius: 3px;
+}
+/* 记忆库：让三栏正好等于内容区剩下的高度，时间轴在框里滚。
+   高度不能再拿 100vh 去猜——猜大了整个卡片就伸出可视区，
+   看起来就像「时间轴变成很长一条」。 */
+:root[data-ui="night"] .nj-page-body.is-mem {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+:root[data-ui="night"] .nj-page-body.is-mem .nj-mem-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+:root[data-ui="night"] .nj-page-body.is-mem .nj-mem-card,
+:root[data-ui="night"] .nj-page-body.is-mem .nj-session-col {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+/* 右栏两格（构成 / 最近会忘）也收在栏内滚，否则会顺着行高溢到下面的设置区 */
+:root[data-ui="night"] .nj-page-body.is-mem .nj-mem-side {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+}
+:root[data-ui="night"] .nj-page-body.is-mem .nj-mem-side::-webkit-scrollbar { width: 6px; }
+:root[data-ui="night"] .nj-page-body.is-mem .nj-mem-side::-webkit-scrollbar-thumb {
+  background: rgba(236, 226, 205, .16);
+  border-radius: 3px;
+}
+/* 可视高度太小时（笔记本半屏那种），别死撑，退回自然高度由外层滚 */
+@media (max-height: 620px) {
+  :root[data-ui="night"] .nj-page-body.is-mem { display: block; }
+  :root[data-ui="night"] .nj-page-body.is-mem .nj-mem-card,
+  :root[data-ui="night"] .nj-page-body.is-mem .nj-session-col {
+    height: clamp(320px, 70vh, 520px);
+  }
+}
+:root[data-ui="night"] .nj-mem-card .nj-scroll { min-height: 0; }
+/* 这里必须给「确定的高度」而不是 max-height：
+   卡是 flex column，中间滚动区用 max-height 时高度不确定，
+   grid 行高会算成几百像素的零头，卡片就会溢出压住下面的设置区。 */
+:root[data-ui="night"] .nj-mem-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+}
+:root[data-ui="night"] .nj-mem-scroll::-webkit-scrollbar { width: 6px; }
+:root[data-ui="night"] .nj-mem-scroll::-webkit-scrollbar-thumb {
+  background: rgba(236, 226, 205, .16);
+  border-radius: 3px;
+}
+:root[data-ui="night"] .nj-mem-side { min-width: 0; }
+:root[data-ui="night"] .nj-mem-side .nj-card { min-width: 0; }
+:root[data-ui="night"] .nj-tl-group { min-width: 0; }
+:root[data-ui="night"] .nj-ev { min-width: 0; overflow-wrap: anywhere; }
+:root[data-ui="night"] .nj-ev p { overflow-wrap: anywhere; }
+/* 窄一点就别硬摆三栏：直接竖着排，谁也压不到谁 */
+@media (max-width: 1220px) {
+  :root[data-ui="night"] .nj-mem-body { grid-template-columns: minmax(0, 1fr); }
+  :root[data-ui="night"] .nj-mem-side { flex-direction: row; flex-wrap: wrap; }
+  :root[data-ui="night"] .nj-mem-side > .nj-card { flex: 1 1 280px; }
+  /* 单列时别再让卡片去分剩余高度：会被压成只剩个标题壳，
+     改成各自给个高度，整页交给外层滚 */
+  :root[data-ui="night"] .nj-page-body.is-mem { display: block; }
+  :root[data-ui="night"] .nj-page-body.is-mem .nj-mem-card,
+  :root[data-ui="night"] .nj-page-body.is-mem .nj-session-col {
+    height: clamp(320px, 56vh, 460px);
+  }
+  :root[data-ui="night"] .nj-page-body.is-mem .nj-mem-side {
+    height: auto;
+    overflow: visible;
+  }
+}
+
+/* 0.7.0 · 轻提示（替代 alert：iframe 里 alert 会被沙箱吞掉） */
+.nj-toast-box {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 95;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+.nj-toast {
+  max-width: 340px;
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(236, 226, 205, .16);
+  background: #17261f;
+  color: #e7e0d3;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .35);
+  opacity: 0;
+  transform: translateY(6px);
+  animation: nj-toast-in .18s var(--ease, ease) forwards;
+}
+.nj-toast.is-ok { border-color: rgba(120, 170, 130, .38); color: #cfe6d2; }
+.nj-toast.is-err { border-color: rgba(190, 120, 110, .42); color: #edcdc7; }
+.nj-toast.is-out { opacity: 0; transition: opacity .3s ease; }
+@keyframes nj-toast-in {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 会话列改 flex 之后，底部密度图和说明不能被压扁 */
+:root[data-ui="night"] .nj-session-col .nj-card-head,
+:root[data-ui="night"] .nj-session-col .nj-card-foot,
+:root[data-ui="night"] .nj-session-col .nj-chart-bars { flex: 0 0 auto; }
+:root[data-ui="night"] .nj-session-col .nj-chart-bars {
+  flex: 0 0 auto;
+  min-height: 38px;
+  height: 38px;
+  margin-top: 4px;
+  padding: 4px 2px 0;
+}
+/* 会话列高度是定死的，底部这两块要收紧，不然密度图会被裁掉半截 */
+:root[data-ui="night"] .nj-session-col .nj-card-foot {
+  margin-top: 6px !important;
+  padding-top: 6px !important;
+}
+
+/* ==================================================================
+   0.7.0 · 页面骨架：状态栏常驻 + 内容区自己滚
+   #view 在夜航下是 flex column，所以给内容包一层拿走剩余高度，
+   在它里面滚——上面的状态栏就不会被滚走，也不用整页滚。
+   ================================================================== */
+:root[data-ui="night"] .nj-page-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  margin: 14px 0 0;
+  padding: 16px 16px 18px;
+  border: 1px solid rgba(236, 226, 205, .10);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(243, 238, 227, .028), rgba(243, 238, 227, .008));
+  box-shadow: inset 0 1px 0 rgba(243, 238, 227, .04);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+}
+:root[data-ui="night"] .nj-page-body::-webkit-scrollbar { width: 6px; }
+:root[data-ui="night"] .nj-page-body::-webkit-scrollbar-thumb {
+  background: rgba(236, 226, 205, .15);
+  border-radius: 3px;
+}
+/* 内容区内部的卡片不再自己抢高度：外层已经滚了 */
+:root[data-ui="night"] .nj-page-body .nj-mem-body,
+:root[data-ui="night"] .nj-page-body .nj-split { min-height: 0; }
+:root[data-ui="night"] .nj-page-body > *:first-child { margin-top: 0; }
+
+/* 记忆库那种「内容本身就是卡片」的页面：外层别再套一层框 */
+:root[data-ui="night"] .nj-page-body.is-plain {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  padding: 2px 6px 8px 2px;
+}
+
+/* ==================================================================
+   状态栏变体
+   · 默认   左字右指标 + 光斑 + 图案（概览式）
+   · compact 一条窄的，指标横排（工具 / QQ / 系统）
+   · ring   右侧一个环，看额度或强度（主动找人 / 记忆总览）
+   · quote  大字引言（人格页那种「她是谁」）
+   · tape   底下一条刻度尺（行为页那种数字感）
+   ================================================================== */
+:root[data-ui="night"] .nj-herobar.is-compact {
+  padding: 13px 18px;
+  gap: 16px;
+  border-radius: 16px;
+}
+:root[data-ui="night"] .nj-herobar.is-compact .nj-herobar-main h2 { font-size: 20px; margin-top: 3px; }
+:root[data-ui="night"] .nj-herobar.is-compact .nj-herobar-main p {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  max-width: 78ch;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+}
+:root[data-ui="night"] .nj-herobar.is-compact .nj-herobar-stats { grid-template-columns: repeat(4, minmax(56px, auto)); gap: 16px; }
+:root[data-ui="night"] .nj-herobar.is-compact .nj-herobar-stats b { font-size: 17px; margin-top: 1px; }
+:root[data-ui="night"] .nj-herobar.is-compact .nj-herobar-pattern { width: 74px; height: 74px; right: 12px; opacity: .1; }
+:root[data-ui="night"] .nj-herobar.is-compact .nj-herobar-glow { width: 260px; height: 260px; top: -120px; right: -60px; }
+
+:root[data-ui="night"] .nj-herobar.is-quote {
+  padding: 26px 26px 24px;
+  display: block;
+}
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-main h2 {
+  margin-top: 10px;
+  font-size: 30px;
+  line-height: 1.34;
+  max-width: 26ch;
+}
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-main h2::before {
+  content: "「";
+  color: rgba(210, 169, 104, .55);
+}
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-main h2::after {
+  content: "」";
+  color: rgba(210, 169, 104, .55);
+}
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-main p { max-width: 56ch; }
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-side {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin-top: 18px;
+}
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-stats { text-align: left; }
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-pattern { right: 18px; top: 22px; transform: none; width: 150px; height: 150px; opacity: .1; }
+:root[data-ui="night"] .nj-herobar.is-quote .nj-herobar-glow { right: 40px; top: -140px; }
+
+:root[data-ui="night"] .nj-herobar.is-tape { padding-bottom: 30px; }
+:root[data-ui="night"] .nj-herobar-tape {
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: 14px;
+  height: 9px;
+  border-radius: 5px;
+  background:
+    repeating-linear-gradient(to right, rgba(236, 226, 205, .22) 0 1px, transparent 1px 9px),
+    linear-gradient(to bottom, transparent 40%, rgba(236, 226, 205, .10) 40%, rgba(236, 226, 205, .10) 42%, transparent 42%);
+  opacity: .7;
+  pointer-events: none;
+}
+:root[data-ui="night"] .nj-herobar-tape i {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(to right, rgba(210, 169, 104, .2), var(--nj-gold-2));
+  box-shadow: 0 0 10px rgba(210, 169, 104, .35);
+}
+:root[data-ui="night"] .nj-herobar-tape b {
+  position: absolute;
+  bottom: -3px;
+  width: 2px;
+  height: 15px;
+  border-radius: 2px;
+  background: var(--nj-gold-2);
+  box-shadow: 0 0 8px rgba(210, 169, 104, .5);
+}
+
+/* 环 */
+:root[data-ui="night"] .nj-ring {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  flex: none;
+}
+:root[data-ui="night"] .nj-ring svg { width: 100%; height: 100%; display: block; }
+:root[data-ui="night"] .nj-ring .bg { fill: none; stroke: rgba(236, 226, 205, .12); stroke-width: 5; }
+:root[data-ui="night"] .nj-ring .fg {
+  fill: none;
+  stroke: var(--nj-gold-2);
+  stroke-width: 5;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 6px rgba(210, 169, 104, .45));
+  transition: stroke-dashoffset .5s var(--ease);
+}
+:root[data-ui="night"] .nj-ring-txt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+:root[data-ui="night"] .nj-ring-txt b {
+  font-family: var(--nj-serif);
+  font-size: 21px;
+  font-weight: 600;
+  color: #f2ecdf;
+  line-height: 1;
+}
+:root[data-ui="night"] .nj-ring-txt small { font-size: 10.5px; color: var(--nj-ink-4); }
+:root[data-ui="night"] .nj-ring-label {
+  position: absolute;
+  left: 50%;
+  bottom: -15px;
+  transform: translateX(-50%);
+  font-size: 10.5px;
+  color: var(--nj-ink-4);
+  letter-spacing: .05em;
+  white-space: nowrap;
+}
+:root[data-ui="night"] .nj-herobar.is-ring { padding-bottom: 30px; }
+:root[data-ui="night"] .nj-herobar.is-ring .nj-herobar-side { flex-direction: row; align-items: center; gap: 22px; }
+:root[data-ui="night"] .nj-herobar.is-ring .nj-ring { margin-bottom: 14px; }
+:root[data-ui="night"] .nj-herobar.is-ring .nj-herobar-main p { max-width: 54ch; }
+
+/* 记忆库顶上那排数字：窄一点的窗口会顶出格子，两列排放 */
+:root[data-ui="night"] .nj-ms { overflow: hidden; }
+:root[data-ui="night"] .nj-ms .note { overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 1240px) {
+  :root[data-ui="night"] .nj-mem-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  :root[data-ui="night"] .nj-mem-stats { grid-template-columns: minmax(0, 1fr); }
+  :root[data-ui="night"] .nj-page-body { padding: 12px 10px 14px; }
+}
+
+/* ==================================================================
+   记忆库：底下那两条（记忆设置 / 归档消息）收一收，
+   把省下来的纵向空间给上面三栏（三栏仍然等高）
+   ================================================================== */
+:root[data-ui="night"] .nj-page-body.is-mem .nj-mem-extra {
+  flex: 0 0 auto;
+  margin-top: 10px;
+  gap: 8px;
+}
+:root[data-ui="night"] .nj-page-body.is-mem .nj-details > summary {
+  padding: 9px 14px;
+  font-size: 13px;
+}
+:root[data-ui="night"] .nj-page-body.is-mem .nj-details > summary::after { font-size: 10px; }
+/* 展开时在框内滚，不许把上面的三栏顶小，也不许盖住别人 */
+:root[data-ui="night"] .nj-page-body.is-mem .nj-details > .body {
+  max-height: min(38vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 14px;
+  scrollbar-width: thin;
+}
+:root[data-ui="night"] .nj-page-body.is-mem .nj-details[open] { flex: 0 1 auto; }
+
+/* 按会话分：左侧会话列表给足高度，右栏内容不挤 */
+:root[data-ui="night"] .nj-split-wide {
+  grid-template-columns: 300px minmax(0, 1fr);
+  align-items: stretch;
+}
+:root[data-ui="night"] .nj-page-body .nj-person-list {
+  max-height: none;
+  flex: 0 0 auto;
+}
+
+/* ==================================================================
+   按会话分：整页不滚，左边会话列表、右边时间轴各自在框里滚
+   ================================================================== */
+:root[data-ui="night"] .nj-page-body.is-sessions {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+:root[data-ui="night"] .nj-page-body.is-sessions > .nj-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-split > .nj-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-person-list {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+}
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-split > div:last-child {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+}
+/* 右边「记住的事」这个框：固定高度、框内滚，条数再多也不撑破页面 */
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-list-scroll {
+  height: clamp(260px, calc(100vh - 470px), 560px);
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+}
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-list-scroll::-webkit-scrollbar,
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-person-list::-webkit-scrollbar {
+  width: 6px;
+}
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-list-scroll::-webkit-scrollbar-thumb,
+:root[data-ui="night"] .nj-page-body.is-sessions .nj-person-list::-webkit-scrollbar-thumb {
+  background: rgba(236, 226, 205, .16);
+  border-radius: 3px;
+}
+
+/* ==================================================================
+   睡眠阶段：状态栏那一行 + 各阶段配色
+   ================================================================== */
+.nj-stage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.nj-stage b {
+  font-size: 14.5px;
+  color: var(--nj-cream);
+  letter-spacing: .01em;
+}
+.nj-stage span {
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+.nj-stage-bar {
+  flex: 0 0 150px;
+  height: 3px;
+  border-radius: 99px;
+  background: rgba(236, 226, 205, .1);
+  overflow: hidden;
+}
+.nj-stage-bar u {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--nj-gold);
+  transition: width .4s ease;
+}
+.nj-stage[data-stage="n1"] .nj-stage-bar u { background: #8b9c92; }
+.nj-stage[data-stage="n2"] .nj-stage-bar u { background: #7fb5a2; }
+.nj-stage[data-stage="n3"] .nj-stage-bar u { background: #7d8fd0; }
+.nj-stage[data-stage="rem"] .nj-stage-bar u { background: var(--nj-gold); }
+.nj-stage[data-stage="n1"] b { color: #a9b8ae; }
+.nj-stage[data-stage="n2"] b { color: #9bc4b1; }
+.nj-stage[data-stage="n3"] b { color: #a3b2e2; }
+.nj-stage[data-stage="rem"] b { color: #e0c182; }
+
+/* 整夜睡眠结构：一条甘特 + 图例 */
+.nj-stage-card {
+  margin-top: 16px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--nj-line);
+  border-radius: var(--nj-r-lg, 16px);
+  background: var(--nj-panel, rgba(255, 255, 255, .02));
+}
+.nj-stage-gantt {
+  position: relative;
+  height: 26px;
+  margin: 10px 0 8px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: rgba(236, 226, 205, .05);
+}
+.nj-stage-gantt .stage-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: block;
+  border-right: 1px solid rgba(0, 0, 0, .35);
+}
+.nj-stage-gantt .stage-seg:last-child { border-right: none; }
+.nj-stage-gantt .stage-seg[data-stage="n1"] { background: #4b5b52; }
+.nj-stage-gantt .stage-seg[data-stage="n2"] { background: #6d9b88; }
+.nj-stage-gantt .stage-seg[data-stage="n3"] { background: #5f6ea8; }
+.nj-stage-gantt .stage-seg[data-stage="rem"] { background: #b79a5e; }
+.nj-stage-gantt .now {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 1.5px;
+  background: var(--nj-cream, #ece2cd);
+  box-shadow: 0 0 6px rgba(236, 226, 205, .7);
+}
+.nj-stage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+.nj-stage-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.nj-stage-legend span::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: #6d9b88;
+}
+.nj-stage-legend span[data-stage="n1"]::before { background: #4b5b52; }
+.nj-stage-legend span[data-stage="n2"]::before { background: #6d9b88; }
+.nj-stage-legend span[data-stage="n3"]::before { background: #5f6ea8; }
+.nj-stage-legend span[data-stage="rem"]::before { background: #b79a5e; }

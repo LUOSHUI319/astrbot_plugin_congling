@@ -56,9 +56,27 @@ SKIP = {
     "night_dream_delete",
     "night_dream_pin",
     "night_crawl",
+    # 0.7.0 日记：全部走 query / body
+    "diary_list",
+    "diary_get",
+    "diary_generate",
+    "diary_delete",
+    "diary_pin",
+    # 0.7.0 主动找人：now / mute 读请求体
+    "proactive_now",
+    "proactive_mute",
+    # 这个本来就靠 query 里的 session_id，之前漏在 SKIP 外面
+    "memory_session_detail",
+    "memory_session",
 }
 """这些 handler 依请求体或 query（astrbot.api.web.request），
 在无 HTTP 上下文的脚本里调不通；它们的异常兜底已经由 _err 覆盖。"""
+
+# 空配置下「返回 error」就是正确行为：这类 handler 要模型 / 开关 / 真实数据才跑得动
+ALLOW_ERR = {
+    # 做梦：脚本里没模型、配置里 dream_enabled 也是关的，返回「开关关着」是对的
+    "night_dream_make",
+}
 
 
 class FakeStar:
@@ -123,8 +141,10 @@ async def main() -> int:
             result = await handler()
             ok = isinstance(result, dict) and result.get("status") == "ok"
             print(f"  [{'ok ' if ok else 'err'}] {methods[0]:4} {route}")
-            if not ok:
+            if not ok and name not in ALLOW_ERR:
                 problems.append(f"返回异常 {route}: {str(result)[:120]}")
+            elif not ok:
+                print(f"       ↳ 空配置下正常拒（{str(result.get('message') or '')[:40]}）")
         except Exception as exc:
             problems.append(f"调用抛错 {route}: {exc!r}")
             print(f"  [exception] {methods[0]:4} {route}: {exc!r}")

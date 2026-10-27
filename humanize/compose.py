@@ -57,9 +57,8 @@ class Composer:
             self.guard.clean_chain(chain)
             return
 
-        msg = getattr(self.plugin, "_last_perceived", None)
-        session_id = getattr(msg, "session_id", "") if msg else ""
-        session_kind = getattr(msg, "session_kind", "group") if msg else "group"
+        session_id, session_kind = self._session_of(event)
+        msg = self._message_for(event, session_id)
 
         bubbles = self.split(original_text, session_kind)
         bubbles = self._dedupe(session_id, bubbles)
@@ -69,12 +68,21 @@ class Composer:
             return
 
         quote = self._should_quote(msg)
+        delayer = getattr(self.plugin, "delayer", None)
+        hold = 0.0
+        if delayer is not None:
+            try:
+                delayer.describe()
+                hold = delayer.extra_hold(session_kind) if delayer.should_hold(session_kind) else 0.0
+            except Exception:
+                hold = 0.0
         plan = self.rhythm.build_plan(
             bubbles,
             input_chars=len(getattr(msg, "text", "") or "") if msg else 0,
             session_kind=session_kind,
             quote=quote,
-            reason="分句" + ("+引用" if quote else ""),
+            reason="分句" + ("+引用" if quote else "") + (f"+犹豫{hold:.1f}s" if hold else ""),
+            extra_hold=hold,
         )
 
         if quote and msg is not None:
@@ -194,6 +202,44 @@ class Composer:
             bucket.pop(0)
 
     # ================================================================ 引用
+    # ------------------------------------------------------------ 引用谁
+    @staticmethod
+    def _session_of(event: Any) -> tuple[str, str]:
+        try:
+            group_id = str(event.get_group_id() or "")
+            if group_id:
+                return group_id, "group"
+            return str(event.get_sender_id() or ""), "private"
+        except Exception:
+            return "", "private"
+
+    def _message_for(self, event: Any, session_id: str) -> PerceivedMessage | None:
+        """这条回复对应的那条消息。
+
+        以前直接拿 `plugin._last_perceived`——那是全局「最后一条被感知的消息」，
+        于是三种情况都会引错：
+        - 主动消息 / 定时任务发的回复：上下文里根本没有新消息，引用会落到几小时前那条
+        - 两条消息挨着进来：先处理完的那条会引用后一条
+        - 延时回复：等它发的时候 _last_perceived 早换了
+        现在优先取挂在事件上的那一份，并且要求会话对得上、不是太久以前的事。
+        """
+        msg = getattr(event, "_congling_perceived", None)
+        if msg is None:
+            return None
+        # 会话对不上说明事件被复用或串了，宁可不引用
+        msg_session = str(getattr(msg, "session_id", "") or "")
+        if session_id and msg_session and msg_session != session_id:
+            return None
+        # 引用一条几分钟前的话，对方看着莫名其妙
+        try:
+            age = time.time() - float(getattr(msg, "ts", 0) or 0)
+        except (TypeError, ValueError):
+            age = 0.0
+        limit = self.config.float("humanize.quote_max_age_seconds", 180)
+        if limit > 0 and age > limit:
+            return None
+        return msg
+
     def _quote_cooldown(self) -> float:
         try:
             return max(0.0, float(self.config.float("humanize.quote_cooldown_seconds", QUOTE_COOLDOWN)))
@@ -214,7 +260,9 @@ class Composer:
         cooldown = self._quote_cooldown()
         if cooldown > 0 and now - self._last_quote.get(session_id, 0.0) < cooldown:
             return False
-        if not msg.msg_id:
+        # 没有可引用的 id 就别引：id 是空的或者占位值，QQ 那边会引到别的地方去
+        msg_id = str(getattr(msg, "msg_id", "") or "").strip()
+        if not msg_id or msg_id in ("0", "None", "null"):
             return False
 
         probability = self.config.float("humanize.quote_probability", 0.08)
@@ -235,7 +283,7 @@ class Composer:
     def _insert_quote(chain: list[Any], msg: PerceivedMessage, event: Any) -> None:
         try:
             reply = Reply(
-                id=msg.msg_id,
+                id=str(msg.msg_id).strip(),
                 sender_id=int(msg.sender_id) if str(msg.sender_id).isdigit() else 0,
                 sender_nickname=msg.sender_name,
                 time=int(msg.ts),

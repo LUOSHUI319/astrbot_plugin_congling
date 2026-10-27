@@ -95,7 +95,9 @@ class Dreamer:
             payload = [dream.to_dict() for dream in self._dreams[-MAX_KEEP:]]
             await self.store.kv_set(KV_KEY, payload)
         except Exception as exc:
-            logger.debug(f"[congling] 保存梦境失败: {exc!r}")
+            # 这里的失败是「梦做了但没存下来」，面板上看着就是一条都没有，
+            # 别再拿 debug 埋掉了
+            logger.warning(f"[congling] 保存梦境失败: {exc!r}")
 
     # ================================================================ 时机
     def due(self, *, sleep_at: int, already: int, now: float | None = None) -> bool:
@@ -132,6 +134,10 @@ class Dreamer:
     ) -> DreamEntry | None:
         if not self.enabled:
             return None
+        # 梦的开关可能是运行中才打开的，_dreams 还没从库里读出来；
+        # 这时候直接 append + save 会把以前的梦整段覆盖掉
+        if not self._loaded:
+            await self.load()
 
         fragments = await self._pick_fragments()
         if not fragments:
@@ -210,7 +216,13 @@ class Dreamer:
             )
         except Exception:
             return []
-        return [str(row[0]) for row in rows if row and row[0]]
+        # 同上：行是 dict，取 row[0] 会 KeyError，梦就一段也做不出来
+        out: list[str] = []
+        for row in rows or []:
+            value = row.get("text") if isinstance(row, dict) else (row[0] if row else None)
+            if value:
+                out.append(str(value))
+        return out
 
     # ================================================================ 衰减
     async def daily_tick(self) -> int:

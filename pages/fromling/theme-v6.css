@@ -1,78 +1,4 @@
-/* ==================================================================
-   v6 · 三套主题（夜航 / 仪表台 / 尺素）
-   主题通过 <html data-theme="night|console|scroll"> 切换
-   ================================================================== */
 
-/* ---- 主题二：仪表台（浅色 · 高可读 · 等宽数字） ---- */
-:root[data-ui="console"] {
-  --bg: #fbfbfa;
-  --bg-2: #ffffff;
-  --bg-soft: #f3f5f3;
-  --panel: #ffffff;
-  --panel-2: #fdfdfc;
-  --ink: #101211;
-  --ink-soft: #4e5453;
-  --ink-faint: #8b918f;
-  --line: #e6e8e6;
-  --line-soft: #f0f2f0;
-  --side-bg: #fdfdfc;
-  --side-bg-2: #f7f8f7;
-  --side-ink: #101211;
-  --side-ink-soft: #8b918f;
-  --accent: #1f5f4e;
-  --accent-2: #2f7f68;
-  --accent-soft: #e9f2ee;
-  --accent-line: #d3e5dd;
-  --warn: #c2603c;
-  --warn-soft: #fbeee8;
-  --info: #40617d;
-  --info-soft: #eaf0f5;
-  --violet: #4f5390;
-  --violet-soft: #eeeef8;
-  --shadow-sm: 0 1px 2px rgba(16, 18, 17, .04);
-  --shadow-md: 0 2px 6px rgba(16, 18, 17, .05), 0 18px 34px -26px rgba(16, 18, 17, .3);
-  --shadow-lg: 0 4px 10px rgba(16, 18, 17, .06), 0 30px 50px -32px rgba(16, 18, 17, .35);
-  --v6-gold: #b8892f;
-}
-
-/* ---- 主题三：尺素（宣纸 · 墨 · 赭石 · 宋体） ---- */
-:root[data-ui="scroll"] {
-  --bg: #f4efe4;
-  --bg-2: #f8f4ea;
-  --bg-soft: #ece5d6;
-  --panel: #fbf7ee;
-  --panel-2: #f7f2e6;
-  --ink: #2b2b28;
-  --ink-soft: #5c574c;
-  --ink-faint: #8b8477;
-  --line: rgba(43, 43, 40, .13);
-  --line-soft: rgba(43, 43, 40, .07);
-  --side-bg: #f0eade;
-  --side-bg-2: #ece5d6;
-  --side-ink: #2b2b28;
-  --side-ink-soft: #7a7466;
-  --accent: #8a6a3c;
-  --accent-2: #a8865a;
-  --accent-soft: rgba(138, 106, 60, .10);
-  --accent-line: rgba(138, 106, 60, .28);
-  --warn: #a8442f;
-  --warn-soft: rgba(168, 68, 47, .10);
-  --info: #4a6b74;
-  --info-soft: rgba(74, 107, 116, .10);
-  --violet: #6b5f7a;
-  --violet-soft: rgba(107, 95, 122, .10);
-  --shadow-sm: 0 1px 2px rgba(43, 43, 40, .06);
-  --shadow-md: 0 2px 6px rgba(43, 43, 40, .06), 0 18px 34px -28px rgba(43, 43, 40, .45);
-  --shadow-lg: 0 4px 10px rgba(43, 43, 40, .07), 0 30px 50px -34px rgba(43, 43, 40, .5);
-  --v6-gold: #a8865a;
-}
-:root[data-ui="scroll"] body {
-  font-family: Georgia, "Songti SC", "SimSun", "Microsoft YaHei", serif;
-}
-:root[data-ui="scroll"] .mono,
-:root[data-ui="scroll"] code {
-  font-family: var(--v6-mono);
-}
 
 /* ---- 通用外观：底色、卡片、滚动条 ---- */
 body {
@@ -80,16 +6,6 @@ body {
     radial-gradient(1100px 620px at 6% -8%, rgba(96, 150, 124, .16), transparent 62%),
     radial-gradient(900px 520px at 102% 0%, rgba(210, 169, 104, .10), transparent 58%),
     linear-gradient(180deg, var(--bg) 0%, #060b09 100%);
-  background-attachment: fixed;
-}
-:root[data-ui="console"] body {
-  background: var(--bg);
-}
-:root[data-ui="scroll"] body {
-  background:
-    radial-gradient(900px 520px at 8% -6%, rgba(168, 68, 47, .05), transparent 60%),
-    radial-gradient(800px 480px at 100% 0%, rgba(138, 106, 60, .07), transparent 58%),
-    linear-gradient(180deg, #f6f1e7 0%, #f1eadc 100%);
   background-attachment: fixed;
 }
 
@@ -137,10 +53,6 @@ body {
 }
 .view h1, .main h1, #title { letter-spacing: -.6px; }
 .card h3, .card h2 { letter-spacing: -.2px; }
-:root:not([data-ui="console"]) .view .mono,
-:root:not([data-ui="console"]) [data-num] {
-  font-family: var(--v6-mono);
-}
 
 /* ---- v6 头像组件 ---- */
 .v6-av {
@@ -153,7 +65,6 @@ body {
 .v6-av.lg { width: 46px; height: 46px; flex: 0 0 46px; }
 .v6-av img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .v6-av .fb { width: 100%; height: 100%; display: grid; place-items: center; }
-
 
 /* ---- 覆盖旧的硬编码半透明白底（深色主题下会变成亮块） ---- */
 .cfg-group,
@@ -302,14 +213,12 @@ pre.block {
 .m3-bars i.hi { background: linear-gradient(180deg, var(--accent-2), var(--accent)); }
 .m3-barlbl { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--ink-faint); }
 
-
 /* 章节标题不铺底色，只留左侧那道竖线 */
 h2.sec, .sec { background: transparent !important; box-shadow: none !important; }
 
 .m3-ev .bd .meta { display: flex; align-items: center; gap: 9px; margin-bottom: 4px; }
 .m3-ev .bd .meta em { margin-left: auto; font-style: normal; font-size: 12.5px; color: var(--ink-faint); white-space: nowrap; }
 .m3-ev .bd p { font-size: 15.5px; line-height: 1.65; color: var(--ink); }
-
 
 /* ==================================================================
    三套 UI 的版式差异（不是换色，是排版）
@@ -337,124 +246,8 @@ h2.sec, .sec { background: transparent !important; box-shadow: none !important; 
 }
 :root[data-ui="night"] .m3-st .v { font-size: 40px; }
 
-/* ---------- 二、仪表台：窄图标栏，细分割线，无卡片阴影 ---------- */
-:root[data-ui="console"] .side { padding: 22px 0; align-items: center; }
-:root[data-ui="console"] .brand { justify-content: center; padding: 0; }
-:root[data-ui="console"] .brand-cn,
-:root[data-ui="console"] .brand-en { display: none; }
-:root[data-ui="console"] .brand-mark { width: 40px; height: 40px; border-radius: 12px; }
-:root[data-ui="console"] .brand-mark img { width: 26px; height: 26px; }
-:root[data-ui="console"] #nav { width: 100%; align-items: center; gap: 2px; margin-top: 6px; }
-:root[data-ui="console"] .nav-item {
-  width: 46px; height: 42px; padding: 0; justify-content: center;
-  font-size: 0; border-radius: 12px; color: var(--ink-faint);
-}
-
-
-:root[data-ui="console"] .nav-item::after {
-  content: attr(data-abbr); font-size: 14.5px; letter-spacing: 0; opacity: .8;
-}
-:root[data-ui="console"] .nav-item.is-active::after { opacity: 1; }
-:root[data-ui="console"] .side-foot { width: 100%; padding: 0 8px; }
-:root[data-ui="console"] .group-card { display: none; }
-:root[data-ui="console"] #compat-line { writing-mode: vertical-rl; font-size: 11.5px; margin: 0 auto; opacity: .6; }
-:root[data-ui="console"] .main { padding: 32px 44px 34px; }
-:root[data-ui="console"] .head { border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 18px; }
-:root[data-ui="console"] #title { font-size: 36px; font-weight: 680; letter-spacing: -1.2px; }
-:root[data-ui="console"] .subtabs { border-bottom: 1px solid var(--line); gap: 26px; }
-:root[data-ui="console"] .subtab {
-  border-radius: 0; padding: 10px 2px; border-bottom: 2px solid transparent;
-  background: none !important; box-shadow: none !important;
-}
-:root[data-ui="console"] .subtab.is-active { border-bottom-color: var(--accent); color: var(--ink); }
-:root[data-ui="console"] .cfg-group,
-:root[data-ui="console"] .entry,
-:root[data-ui="console"] .mode-card,
-:root[data-ui="console"] .mem-card,
-:root[data-ui="console"] .m3-list {
-  border-radius: 0; border: 0; border-top: 1px solid var(--line);
-  box-shadow: none; background: transparent;
-}
-:root[data-ui="console"] .entry { border: 1px solid var(--line); border-radius: 0; }
-:root[data-ui="console"] .m3-strip { border-color: var(--line); }
-:root[data-ui="console"] .m3-st .v { font-family: var(--v6-mono); }
-:root[data-ui="console"] .m3-row.is-on { background: var(--accent-soft); }
-
-/* ---------- 三、尺素：宣纸书页，宋体，朱砂分隔，留白更宽 ---------- */
-:root[data-ui="scroll"] .side { padding: 30px 20px; }
-:root[data-ui="scroll"] .brand-cn { font-size: 22px; letter-spacing: .16em; font-family: Georgia, "Songti SC", "SimSun", serif; }
-:root[data-ui="scroll"] .brand-en { display: none; }
-:root[data-ui="scroll"] .nav-item {
-  font-family: Georgia, "Songti SC", "SimSun", serif;
-  letter-spacing: .12em; border-radius: 4px; font-size: 16px;
-}
-:root[data-ui="scroll"] .nav-item.is-active {
-  background: transparent; color: var(--warn);
-  box-shadow: inset 2px 0 0 var(--warn);
-}
-:root[data-ui="scroll"] .main { padding: 34px 52px; }
-:root[data-ui="scroll"] #title {
-  font-family: Georgia, "Songti SC", "SimSun", serif;
-  font-size: 33px; letter-spacing: .18em; font-weight: 600;
-}
-:root[data-ui="scroll"] .head::after {
-  content: "卷"; display: inline-block; margin-left: 14px;
-  font-size: 12px; letter-spacing: .3em; color: var(--warn);
-  border: 1px solid rgba(168,68,47,.5); border-radius: 3px; padding: 2px 5px 2px 8px;
-  vertical-align: super;
-}
-:root[data-ui="scroll"] .subtabs { gap: 30px; }
-:root[data-ui="scroll"] .subtab {
-  background: none !important; box-shadow: none !important; border-radius: 0;
-  font-family: Georgia, "Songti SC", "SimSun", serif; letter-spacing: .1em;
-  border-bottom: 1px solid transparent;
-}
-:root[data-ui="scroll"] .subtab.is-active { color: var(--warn); border-bottom-color: var(--warn); }
-:root[data-ui="scroll"] .cfg-group,
-:root[data-ui="scroll"] .entry,
-:root[data-ui="scroll"] .mode-card,
-:root[data-ui="scroll"] .mem-card,
-:root[data-ui="scroll"] .m3-list {
-  border-radius: 2px; box-shadow: none;
-  border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 92%, #fff 8%);
-}
-:root[data-ui="scroll"] .m3-blk-h { border-bottom: 1px solid rgba(168,68,47,.35); }
-:root[data-ui="scroll"] .m3-blk-h h2 {
-  font-family: Georgia, "Songti SC", "SimSun", serif; letter-spacing: .1em; font-weight: 600;
-}
-:root[data-ui="scroll"] .m3-ev .bd p { line-height: 1.95; }
-:root[data-ui="scroll"] .m3-st { border-right: 1px dashed var(--line); }
-:root[data-ui="scroll"] .m3-note { border-left-color: var(--warn); }
-:root[data-ui="scroll"] .m3-note em { color: var(--warn); }
-
-
 /* ---- 三套 UI 的栅格列宽（.app 是 grid，侧栏宽度由列宽决定，写 width 会溢出重叠） ---- */
-:root[data-ui="night"] .app { grid-template-columns: 252px minmax(0, 1fr); }
-:root[data-ui="console"] .app { grid-template-columns: 78px minmax(0, 1fr); }
-:root[data-ui="scroll"] .app { grid-template-columns: 232px minmax(0, 1fr); }
-:root[data-ui="night"] .main,
-:root[data-ui="console"] .main,
-:root[data-ui="scroll"] .main { max-width: none; min-width: 0; }
-/* 窄图标栏下，侧栏里的文字全部收掉，避免挤压 */
-:root[data-ui="console"] .brand-row { justify-content: center; }
-:root[data-ui="console"] .nav-group-label { display: none; }
-:root[data-ui="console"] .nav-badge { display: none; }
-:root[data-ui="console"] .nav-item { position: relative; }
-:root[data-ui="console"] .nav-item > * { display: none; }
-
-
-/* ---- 仪表台窄栏：导航做成方块，居中，去掉底部小字 ---- */
-:root[data-ui="console"] #nav { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; }
-:root[data-ui="console"] .nav-item {
-  width: 44px; height: 40px; padding: 0; display: grid; place-items: center;
-  border: 0; box-shadow: none !important; background: none;
-}
-:root[data-ui="console"] .nav-item.is-active { background: var(--accent-soft); }
-:root[data-ui="console"] .nav-item::before { display: none; }
-:root[data-ui="console"] .side-foot { display: none; }
-:root[data-ui="console"] .brand { padding: 0 0 6px; }
-
+:root[data-ui="night"] .app { grid-template-columns: 252px minmax(0, 1fr); }:root[data-ui="night"] .main { max-width: none; min-width: 0; }
 
 /* ==================================================================
    夜航专属排版（n6-*）：问候卡 / 指标带 / 功能卡 / 折线 / 长夜状态卡

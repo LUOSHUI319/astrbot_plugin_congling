@@ -30,8 +30,9 @@ from .core.prompt_parts import add_temp_part
 from .core.probe import Probe
 from .core.rhythm import RhythmController
 from .core.store import Store
+from .humanize.delay import ReplyDelayer
 
-PLUGIN_VERSION = "0.6.1"
+PLUGIN_VERSION = "0.7.0"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -62,6 +63,7 @@ class ConglingPlugin(Star):
         self.probe = Probe(context, self.cfg)
         self.guard = OutputGuard(self.cfg, self.probe)
         self.rhythm = RhythmController(self.cfg, self.guard, self.probe)
+        self.delayer = ReplyDelayer(self.cfg, self.probe)
         self.budget = Budget(self.cfg)
         self.decision = DecisionLogger(self.store, self.cfg)
 
@@ -71,6 +73,8 @@ class ConglingPlugin(Star):
         self.decider: Any = None
         self.composer: Any = None
         self.memory: Any = None
+        self.diary: Any = None
+        self.proactive: Any = None
         self.extractor: Any = None
         self.retriever: Any = None
         self.reflector: Any = None
@@ -102,6 +106,8 @@ class ConglingPlugin(Star):
         await self._safe_boot("persona", self._boot_persona)
         await self._safe_boot("humanize", self._boot_humanize)
         await self._safe_boot("memory", self._boot_memory)
+        await self._safe_boot("diary", self._boot_diary)
+        await self._safe_boot("proactive", self._boot_proactive)
         await self._safe_boot("night", self._boot_night)
         await self._safe_boot("capability", self._boot_capability)
         await self._safe_boot("qqext", self._boot_qqext)
@@ -207,6 +213,32 @@ class ConglingPlugin(Star):
 
         self.commands = Commands(self)
 
+    async def _boot_proactive(self) -> None:
+        """主动找人：唯一的主动发送通道，所以放在最后启动。"""
+        from .humanize.proactive import Proactive
+
+        self.proactive = Proactive(self)
+        await self.proactive.load()
+        try:
+            stars = self.context.get_all_stars() or []
+            names = [str(getattr(star, "name", "")) for star in stars]
+            if any("proactive_chat" in name for name in names):
+                logger.warning(
+                    "[congling] 检测到 astrbot_plugin_proactive_chat：两个插件都会主动发消息，建议只留一个"
+                )
+        except Exception:
+            pass
+
+    async def _boot_diary(self) -> None:
+        """日记：数据表在 store 里已经有了，这里只建服务 + 补写昨天。"""
+        from .memory.diary import Diary
+
+        self.diary = Diary(self)
+        try:
+            asyncio.get_running_loop().create_task(self.diary.backfill())
+        except RuntimeError:
+            pass
+
     async def _boot_page_api(self) -> None:
         from .page_api import PageApi
 
@@ -220,6 +252,10 @@ class ConglingPlugin(Star):
             try:
                 if self.memory is not None and hasattr(self.memory, "daily_tick"):
                     await self.memory.daily_tick()
+                if self.diary is not None:
+                    await self.diary.tick()
+                if self.proactive is not None:
+                    await self.proactive.tick()
                 await self.decision.purge()
                 await self._purge_cache()
                 await self._qq_daily_tick()
@@ -473,6 +509,14 @@ class ConglingPlugin(Star):
                 avatar_hint = self.qqext.avatar_hint()
                 if avatar_hint:
                     add_temp_part(req, avatar_hint, "<!--congling:avatar-->")
+            if self.diary is not None and self.cfg.bool("diary.feel_in_prompt", False):
+                snippet = await self.diary.latest_snippet(200)
+                if snippet:
+                    add_temp_part(
+                        req,
+                        "你最近写过一篇日记，里面有这几句：" + snippet,
+                        "<!--congling:diary-->",
+                    )
             if self.capabilities is not None:
                 self.capabilities.attach_tools(req)
         except Exception as exc:
@@ -510,6 +554,31 @@ class ConglingPlugin(Star):
                 if not result.is_llm_result():
                     self.guard.clean_chain(result.chain)
                     return
+            # 爬楼：醒来后的第一句，先把「等我翻翻」发出去，再走正式回复。
+            # 必须在发送前做——原来放在 after_message_sent，句子生成完就丢了。
+            if self.night is not None:
+                try:
+                    session_id = str(event.get_group_id() or event.get_sender_id() or "")
+                    line = await self.night.take_crawl_line(session_id)
+                    if line:
+                        from astrbot.api.message_components import Plain
+
+                        result.chain.insert(0, Plain(text=line))
+                except Exception as exc:
+                    logger.debug(f"[congling] 爬楼插入失败: {exc!r}")
+            # 延时回复：只有 rhythm 让位（装了外部节奏/延时插件）时才独立接管发送；
+            # rhythm 在位时延时是通过 build_plan 的 extra_hold 实现的，这里什么都不做。
+            try:
+                if self.delayer is not None:
+                    kind = "private"
+                    try:
+                        kind = "group" if event.get_group_id() else "private"
+                    except Exception:
+                        kind = "private"
+                    if self.delayer.mode() == "standalone":
+                        self.delayer.patch(event, session_kind=kind)
+            except Exception as exc:
+                logger.debug(f"[congling] 延时接管跳过: {exc!r}")
             if self.composer is not None:
                 await self.composer.decorate(event, result)
             else:

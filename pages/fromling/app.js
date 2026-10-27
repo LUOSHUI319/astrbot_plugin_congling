@@ -13,12 +13,9 @@ let bridgePromise = null;
 
 
 /* ------------------------------------------------------------------ 外观 */
-const THEMES = [
-  /* v6 三套 UI：排版与风格各自独立，不是换色 */
-  { id: "night", name: "夜航手账", color: "#9bc4b1" },
-  { id: "console", name: "仪表台", color: "#1f5f4e" },
-  { id: "scroll", name: "尺素", color: "#8a6a3c" },
-];
+/* 只剩夜航手账一套。另外两套（仪表台 / 尺素）已经删掉，
+   旧版本存在 localStorage 里的 theme 值在 readLook 里会被拉回 night。 */
+const THEMES = [{ id: "night", name: "夜航手账", color: "#9bc4b1" }];
 
 const FONTS = [
   { id: "sans", name: "黑体", sample: "从" },
@@ -34,7 +31,8 @@ function readLook() {
   try {
     const raw = localStorage.getItem(LOOK_KEY);
     const data = raw ? JSON.parse(raw) : {};
-    return { theme: data.theme || "night", font: data.font || "sans" };
+    const font = data.font || "sans";
+    return { theme: "night", font };
   } catch (err) {
     return { theme: "night", font: "sans" };
   }
@@ -42,8 +40,7 @@ function readLook() {
 
 function applyLook(look) {
   const root = document.documentElement;
-  const ui = look.theme || "night";
-  root.dataset.ui = ui;
+  root.dataset.ui = "night";
   if (look.font && look.font !== "sans") root.dataset.font = look.font;
   else root.removeAttribute("data-font");
   /* 仪表台是窄图标栏，导航只留一个字的缩写 */
@@ -56,26 +53,13 @@ function applyLook(look) {
     });
   }
   try {
-    localStorage.setItem(LOOK_KEY, JSON.stringify(look));
+    localStorage.setItem(LOOK_KEY, JSON.stringify({ theme: "night", font: look.font || "sans" }));
   } catch (err) {
     /* 存不了就算了 */
   }
 }
 
 function paintPickers(look) {
-  const theme = THEMES.find((t) => t.id === look.theme) || THEMES[0];
-  const dot = document.querySelector("#theme-picker .picker-dot");
-  if (dot) dot.style.background = theme.color;
-
-  const themeMenu = document.getElementById("theme-menu");
-  if (themeMenu) {
-    themeMenu.innerHTML = THEMES.map(
-      (item) => `<button class="picker-item ${item.id === look.theme ? "is-on" : ""}" data-theme-id="${item.id}">
-        <span class="picker-swatch" style="background:${item.color}"></span>${esc(item.name)}
-      </button>`
-    ).join("");
-  }
-
   const fontMenu = document.getElementById("font-menu");
   if (fontMenu) {
     fontMenu.innerHTML = FONTS.map(
@@ -91,10 +75,7 @@ function initLook() {
   applyLook(look);
   paintPickers(look);
 
-  const pickers = [
-    ["theme-picker", "theme", "theme-menu"],
-    ["font-picker", "font", "font-menu"],
-  ];
+  const pickers = [["font-picker", "font", "font-menu"]];
 
   pickers.forEach(([pickerId, field, menuId]) => {
     const picker = document.getElementById(pickerId);
@@ -117,7 +98,6 @@ function initLook() {
     const fontBtn = event.target.closest("[data-font-id]");
     if (themeBtn || fontBtn) {
       const next = readLook();
-      if (themeBtn) next.theme = themeBtn.dataset.themeId;
       if (fontBtn) next.font = fontBtn.dataset.fontId;
       applyLook(next);
       paintPickers(next);
@@ -147,6 +127,56 @@ function ensureBridge() {
     return api;
   })();
   return bridgePromise;
+}
+
+/** iframe 沙箱里 window.confirm 会静默返回 false，用户看到的就是「点了没反应」 */
+/** 轻提示：iframe 里 alert 会被拦，用它代替 */
+function askToast(message, kind) {
+  if (document.documentElement.dataset.ui === "night" && typeof njToast === "function") {
+    return njToast(message, kind);
+  }
+  let box = document.getElementById("ask-toast-box");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "ask-toast-box";
+    box.className = "nj-toast-box";
+    document.body.appendChild(box);
+  }
+  const item = document.createElement("div");
+  item.className = `nj-toast${kind === "ok" ? " is-ok" : kind === "err" ? " is-err" : ""}`;
+  item.textContent = String(message == null ? "" : message);
+  box.appendChild(item);
+  setTimeout(() => item.classList.add("is-out"), 2600);
+  setTimeout(() => item.remove(), 3100);
+}
+
+function askConfirm(message, opts) {
+  const o = opts || {};
+  const isNight = document.documentElement.dataset.ui === "night" && typeof njConfirm === "function";
+  if (isNight) return njConfirm(message, o);
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.className = "nj-modal";
+    wrap.innerHTML = `<div class="nj-modal-card">
+      <p>${esc(message)}</p>
+      <div class="nj-modal-ops">
+        <button type="button" class="btn ghost" data-no>${esc(o.cancel || "算了")}</button>
+        <button type="button" class="btn primary" data-yes>${esc(o.ok || "确定")}</button>
+      </div>
+    </div>`;
+    const close = (value) => {
+      wrap.remove();
+      resolve(value);
+    };
+    wrap.querySelector("[data-no]").onclick = () => close(false);
+    wrap.querySelector("[data-yes]").onclick = () => close(true);
+    wrap.onclick = (ev) => {
+      if (ev.target === wrap) close(false);
+    };
+    document.body.appendChild(wrap);
+    const yes = wrap.querySelector("[data-yes]");
+    if (yes) yes.focus();
+  });
 }
 
 function unwrap(resp) {
@@ -396,9 +426,9 @@ function nightHero(s) {
   const waking = mode === "waking";
   const title = asleep ? "睡着中" : waking ? "刚醒，还没爬起来" : s.fatigue ? "醒着 · 疲劳期" : "醒着";
   const sub = asleep
-    ? `还剩 ${esc(s.remaining_text || "—")}，预计 ${esc(s.wake_window || "")} 醒`
+    ? `还剩 ${esc(s.remaining_text || "—")}，预计 ${esc((s.wake_day_label || "") + (s.wake_label || s.wake_window || ""))} 醒`
     : waking
-      ? "正在翻昨晚的消息"
+      ? `正在翻没收的消息（${esc(s.pending_crawl || 0)} 个会话）`
       : `起床点 ${esc(s.wake_time || "08:00")}，浮动 ±${esc(s.wake_jitter || 0)} 分钟`;
 
   return `
@@ -668,6 +698,122 @@ function nightSettingsPage(settings) {
 }
 
 /* ---- 主渲染 ---- */
+async function renderDiary() {
+  if (isNightUI() && typeof njDiaryPage === "function") return njDiaryPage();
+  const data = await get("diary/list", { limit: 60 }).catch(() => ({ items: [], enabled: false }));
+  const rows = data.items || [];
+  const cards = rows.length
+    ? rows
+        .map(
+          (row) => `<details class="adv">
+            <summary>${esc(row.day_label || row.day_key || "")} · ${esc(row.mood || "安静")}${
+              (row.refs || []).length ? ` · 引了 ${(row.refs || []).length} 条记忆` : ""
+            }${row.pinned ? " · 置顶" : ""}</summary>
+            <div style="padding:14px 18px 16px">
+              ${row.title ? `<h3 style="margin:0 0 6px">${esc(row.title)}</h3>` : ""}
+              <p style="white-space:pre-wrap;line-height:1.85;margin:0">${esc(row.text || "")}</p>
+              <div class="page-actions">
+                <button class="ghost" data-diary-pin="${esc(row.id)}" data-pinned="${row.pinned ? 1 : 0}">${row.pinned ? "取消置顶" : "置顶"}</button>
+                <button class="ghost" data-diary-del="${esc(row.id)}">删掉</button>
+              </div>
+            </div>
+          </details>`
+        )
+        .join("")
+    : `<div class="empty">她还没开始写${data.enabled ? "" : "（日记开关是关的）"}</div>`;
+
+  view.innerHTML = `
+    <div class="settings-intro">她自己的日记：晚上把这一天记下来，只写给自己看。素材只来自真实记忆、梦境和作息，写不出来就不写。</div>
+    ${pageActions("现在就写一篇")}
+    ${cards}
+  `;
+  const btn = document.getElementById("page-save");
+  if (btn) {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "写着…";
+      try {
+        await post("diary/generate", {});
+        renderDiary();
+      } catch (err) {
+        askToast(err.message || "这次没写成", "err");
+        btn.disabled = false;
+        btn.textContent = "现在就写一篇";
+      }
+    };
+  }
+  view.querySelectorAll("[data-diary-pin]").forEach((el) => {
+    el.onclick = async () => {
+      try {
+        await post("diary/pin", { id: Number(el.dataset.diaryPin), pinned: el.dataset.pinned !== "1" });
+        renderDiary();
+      } catch (err) {
+        askToast(err.message || "置顶失败", "err");
+      }
+    };
+  });
+  view.querySelectorAll("[data-diary-del]").forEach((el) => {
+    el.onclick = async () => {
+      if (!(await askConfirm("删掉这篇日记？删了就找不回来了"))) return;
+      try {
+        await post("diary/delete", { id: Number(el.dataset.diaryDel) });
+        renderDiary();
+      } catch (err) {
+        askToast(err.message || "删除失败", "err");
+      }
+    };
+  });
+}
+
+async function renderProactive() {
+  if (isNightUI() && typeof njProactive === "function") return njProactive();
+  const [stateData, sessionsData, logData] = await Promise.all([
+    get("proactive/state").catch(() => ({})),
+    get("proactive/sessions").catch(() => ({ items: [] })),
+    get("proactive/log", { limit: 20 }).catch(() => ({ items: [] })),
+  ]);
+  const items = sessionsData.items || [];
+  const logs = logData.items || [];
+  view.innerHTML = `
+    <div class="settings-intro">
+      没人说话的时候她自己会想找你。睡着不发、免打扰时段不发、连着没被回会退避。
+      今天已发 ${esc(stateData.sent_today || 0)}/${esc(stateData.daily_cap || 6)} 条。
+    </div>
+    ${items.length
+      ? `<table class="table"><thead><tr><th>会话</th><th>空闲</th><th>未回复</th><th></th></tr></thead><tbody>
+        ${items.map((item) => `<tr>
+          <td>${esc(item.label || item.session_id)}${item.session_kind === "group" ? "（群）" : ""}</td>
+          <td>${esc(item.idle_text || "")}</td>
+          <td>${esc(item.unanswered || 0)}</td>
+          <td><button class="ghost" data-px-send="${esc(item.session_id)}">发一条</button></td>
+        </tr>`).join("")}
+      </tbody></table>`
+      : `<div class="empty">最近没人说话，她也没处可找</div>`}
+    ${logs.length
+      ? `<div class="settings-intro" style="margin-top:22px">最近主动</div>
+        <table class="table"><tbody>
+          ${logs.map((row) => `<tr>
+            <td>${esc(row.at_text || "")}</td>
+            <td>${esc(row.text || "")}</td>
+            <td>${row.replied ? "回了" : "没回"}</td>
+          </tr>`).join("")}
+        </tbody></table>`
+      : ""}
+  `;
+  view.querySelectorAll("[data-px-send]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await post("proactive/now", { session_id: btn.dataset.pxSend });
+        renderProactive();
+      } catch (err) {
+        askToast(err.message || "没发出去", "err");
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
 async function renderNight() {
   if (isNightUI() && typeof njNight === "function") return njNight();
   const TABS = [
@@ -730,7 +876,7 @@ async function renderNight() {
         await post("/night/wake");
         await renderNight();
       } catch (err) {
-        alert(err.message || "唤醒失败");
+        askToast(err.message || "唤醒失败", "err");
         wakeBtn.disabled = false;
       }
     };
@@ -746,7 +892,7 @@ async function renderNight() {
         await post("/night/sleep", {});
         await renderNight();
       } catch (err) {
-        alert(err.message || "入睡失败");
+        askToast(err.message || "入睡失败", "err");
         sleepBtn.disabled = false;
       }
     };
@@ -761,7 +907,7 @@ async function renderNight() {
         settingsCache = null;
         await renderNight();
       } catch (err) {
-        alert(err.message || "操作失败");
+        askToast(err.message || "操作失败", "err");
         crawlBtn.disabled = false;
       }
     };
@@ -775,7 +921,7 @@ async function renderNight() {
         await post("/night/dream/pin", { dream_id: btn.dataset.id, pinned: !pinned });
         await renderNight();
       } catch (err) {
-        alert(err.message || "操作失败");
+        askToast(err.message || "操作失败", "err");
         btn.disabled = false;
       }
     };
@@ -788,7 +934,7 @@ async function renderNight() {
         await post("/night/dream/delete", { dream_id: btn.dataset.id });
         await renderNight();
       } catch (err) {
-        alert(err.message || "删除失败");
+        askToast(err.message || "删除失败", "err");
         btn.disabled = false;
       }
     };
@@ -802,6 +948,7 @@ const VIEWS = {
   behavior: { title: "行为", render: renderBehavior },
   memory: { title: "记忆", render: renderMemory },
   night: { title: "长夜", render: renderNight },
+  diary: { title: "日记", render: renderDiary },
   tools: { title: "工具", render: renderTools },
   qq: { title: "QQ", render: renderQQ },
   system: { title: "系统", render: renderSystem },
@@ -817,11 +964,15 @@ let settingsCache = null;
 const SUBTABS = {
   memory: [
     { key: "summary", title: "记忆总览", render: renderM3Overview },
-    { key: "people", title: "按用户分", render: renderM3Users },
+    /* 0.7.0：「按用户分」取消，认识的人合并进好感度页 */
     { key: "sessions", title: "按会话分", render: renderM3Sessions },
     { key: "library", title: "记忆库", render: () => renderMemory() },
     { key: "levels", title: "等级与遗忘", render: renderMemoryLevels },
     { key: "affinity", title: "好感度", render: renderAffinityPage },
+  ],
+  behavior: [
+    { key: "express", title: "表达", render: () => renderBehavior() },
+    { key: "proactive", title: "主动找人", render: renderProactive },
   ],
   qq: [
     { key: "space", title: "空间", render: () => renderQQ() },
@@ -1073,6 +1224,10 @@ function bindPageSave() {
       settingsCache = null;
       const note = `已保存 ${result.applied} 项${result.saved ? "" : "（未写入文件）"}`;
       if (currentView === "night") await renderNight();
+      else if (currentView === "diary") {
+        if (isNightUI() && typeof njDiaryPage === "function") await njDiaryPage();
+        else await renderDiary();
+      }
       const again = document.getElementById("page-msg");
       if (again) again.textContent = note;
     } catch (err) {
@@ -1515,12 +1670,12 @@ async function renderMemory(keyword, sessionId, kind) {
   });
   view.querySelectorAll("[data-forget]").forEach((btn) => {
     btn.onclick = async () => {
-      if (!confirm("让它忘掉这一条？")) return;
+      if (!(await askConfirm("让它忘掉这一条？"))) return;
       try {
         await post("page/memory/delete", { id: Number(btn.dataset.forget) });
         renderMemory(current(), sessionId, currentKind());
       } catch (err) {
-        alert(err.message);
+        askToast(err.message, "err");
       }
     };
   });
@@ -1598,18 +1753,19 @@ async function renderTools() {
       try {
         params = raw.trim() ? JSON.parse(raw) : {};
       } catch (err) {
-        alert("JSON 格式不对");
+        askToast("JSON 格式不对", "err");
         return;
       }
       try {
         const result = await post("page/tools/test", { name: btn.dataset.test, params });
-        alert(
-          `${result.ok ? "成功" : "失败"} · ${result.elapsed}s${result.cached ? "（缓存）" : ""}\n\n${
+        askToast(
+          `${result.ok ? "成功" : "失败"} · ${result.elapsed}s${result.cached ? "（缓存）" : ""} · ${
             result.text || result.error
-          }`
+          }`,
+          result.ok ? "ok" : "err"
         );
       } catch (err) {
-        alert(err.message);
+        askToast(err.message, "err");
       }
     };
   });
@@ -1746,7 +1902,7 @@ async function renderQQ() {
       pubMsg.textContent = "内容是空的";
       return;
     }
-    if (!confirm(`确认发这条说说？\n\n${text.slice(0, 120)}`)) return;
+    if (!(await askConfirm(`确认发这条说说？\n\n${text.slice(0, 120)}`))) return;
     pubMsg.textContent = "发送中…";
     publishBtn.disabled = true;
     try {
@@ -2002,7 +2158,10 @@ let subjectKey = "";
 
 function levelTag(level) {
   const n = Math.max(0, Math.min(5, Number(level) || 0));
-  return `<span class="lv lv-${n}">${n === 0 ? "不可忘" : "L" + n}</span>`;
+  const name = LEVEL_NAMES[n] || "";
+  if (n === 0) return `<span class="lv lv0" title="0 级 · ${esc(name)}"><i></i></span>`;
+  const dots = Array.from({ length: 5 }, (_, i) => `<i class="${i < n ? "on" : ""}"></i>`).join("");
+  return `<span class="lv lv${n}" title="${n} 级 · ${esc(name)}">${dots}</span>`;
 }
 
 function stageChip(stage, name) {
@@ -2560,21 +2719,35 @@ function m3KindClass(kind) {
   return "p";
 }
 
-/* 头像：私聊圆形、群聊方形；取不到就回落首字 */
-function avatarUrl(kind, id) {
-  const key = String(id == null ? "" : id).trim();
-  /* 只有纯数字才是 QQ 号或群号，昵称类主体直接回落首字 */
-  if (!/^\d{5,12}$/.test(key)) return "";
-  if (kind === "group") return `https://p.qlogo.cn/gh/${key}/${key}/640`;
-  return `https://q1.qlogo.cn/g?b=qq&nk=${key}&s=640`;
+/* 头像：私聊圆形、群聊方形；取不到就回落首字。
+   session_id 可能是纯号码（msg_archive 的存法），也可能是 umo，两种都认。 */
+function avatarParts(kind, id, sessionId) {
+  const raw = String(id == null ? "" : id).trim();
+  const sid = String(sessionId || "").trim();
+  const group = (sid.match(/GroupMessage[:_](\d{5,12})/i) || sid.match(/group[:_](\d{5,12})/i) || [])[1];
+  const user = (sid.match(/(?:FriendMessage|PrivateMessage|private|friend)[:_](\d{5,12})/i) || [])[1];
+  if (kind === "group") return { kind: "group", key: group || (/^\d{5,12}$/.test(raw) ? raw : "") };
+  if (group) return { kind: "group", key: group };
+  if (user) return { kind: "user", key: user };
+  if (/^\d{5,12}$/.test(raw)) return { kind: kind || "user", key: raw };
+  return { kind: kind || "user", key: "" };
 }
 
-function avatarHtml(kind, id, name, cls) {
-  const url = avatarUrl(kind, id);
+function avatarUrl(kind, id, sessionId) {
+  const parts = avatarParts(kind, id, sessionId);
+  /* 只有纯数字才是 QQ 号或群号，昵称类主体直接回落首字 */
+  if (!parts.key) return "";
+  if (parts.kind === "group") return `https://p.qlogo.cn/gh/${parts.key}/${parts.key}/640`;
+  return `https://q1.qlogo.cn/g?b=qq&nk=${parts.key}&s=640`;
+}
+
+function avatarHtml(kind, id, name, cls, sessionId) {
+  const url = avatarUrl(kind, id, sessionId);
+  const parts = avatarParts(kind, id, sessionId);
   const initial = esc(String(name || id || "?").slice(0, 1));
-  const klass = `v6-av${kind === "group" ? " sq" : ""}${cls ? " " + cls : ""}`;
+  const klass = `v6-av${parts.kind === "group" ? " sq" : ""}${cls ? " " + cls : ""}`;
   if (!url) return `<span class="${klass}"><span class="fb">${initial}</span></span>`;
-  return `<span class="${klass}"><img src="${esc(url)}" alt="" loading="lazy" data-fb="${initial}" onerror="var p=this.parentNode;this.remove();p.textContent=this.dataset.fb"></span>`;
+  return `<span class="${klass}"><img src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-fb="${initial}" onerror="var p=this.parentNode;this.remove();p.textContent=this.dataset.fb"></span>`;
 }
 
 function m3Day(ts) {
@@ -2691,6 +2864,7 @@ async function renderM3Overview() {
 
 /* ------------------------------------------------------------ 按用户分 */
 let m3UserId = "";
+/* @deprecated 0.7.0 起不再挂 tab（「按用户分」取消）。函数留着，回溯用。 */
 async function renderM3Users() {
   if (isNightUI() && typeof njM3Users === "function") return njM3Users();
   const list = await get("page/memory/subjects", { limit: 200 });

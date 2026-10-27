@@ -132,6 +132,53 @@
         "type": "float",
         "default": 1.2
       },
+      "reply_delay": {
+        "description": "延时回复（额外犹豫）",
+        "hint": "在原本的思考延时之上再随机等一会儿，像人在打字。关掉不影响正常节奏",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用延时回复",
+            "hint": "默认关闭。开启后首条回复会多等 min~max 秒（与节奏控制合并，不会重复发送）",
+            "type": "bool",
+            "default": false
+          },
+          "min_seconds": {
+            "description": "最短额外等待（秒）",
+            "type": "float",
+            "default": 2.0
+          },
+          "max_seconds": {
+            "description": "最长额外等待（秒）",
+            "hint": "与思考延时相加后上限 25 秒，超了会自动收",
+            "type": "float",
+            "default": 8.0
+          },
+          "probability": {
+            "description": "触发概率",
+            "hint": "0~1，1 表示每次回复都犹豫",
+            "type": "float",
+            "default": 1.0
+          },
+          "apply_private": {
+            "description": "私聊生效",
+            "type": "bool",
+            "default": true
+          },
+          "apply_group": {
+            "description": "群聊生效",
+            "hint": "群里慢吞吞容易被当成掉线，默认关",
+            "type": "bool",
+            "default": false
+          },
+          "night_scale": {
+            "description": "深夜倍率",
+            "hint": "凌晨 1~5 点把等待时间乘以这个系数，困了慢但别慢到像掉线",
+            "type": "float",
+            "default": 0.7
+          }
+        }
+      },
       "bubble_delay_factor": {
         "description": "逐条延迟系数（秒/字）",
         "hint": "实际延迟 = 0.6 + 系数 * 本条字数",
@@ -155,6 +202,12 @@
         "hint": "刚引用过就别再引用，0 表示不冷却",
         "type": "int",
         "default": 30
+      },
+      "quote_max_age_seconds": {
+        "description": "引用时效（秒）",
+        "hint": "只引用这个时间以内的消息；主动消息、延时回复不会去引几小时前那句。0 表示不限",
+        "type": "int",
+        "default": 180
       },
       "typo_probability": {
         "description": "打错再改概率",
@@ -968,6 +1021,297 @@
         "hint": "1 级 20%，逐级 +20%，5 级必说",
         "type": "bool",
         "default": true
+      },
+      "stage_enabled": {
+        "description": "睡眠阶段",
+        "hint": "睡着时区分刚入睡 / 浅层 / 深度 / 快速眼动，会影响精力恢复和叫醒难度",
+        "type": "bool",
+        "default": true
+      },
+      "stage_cycle_minutes": {
+        "description": "睡眠周期长度（分钟）",
+        "hint": "一个周期内会走一遍浅睡→深睡→REM，一晚重复 4~6 次",
+        "type": "int",
+        "default": 90
+      },
+      "stage_n1_minutes": {
+        "description": "入睡期时长（分钟）",
+        "hint": "只有第一周期开头有",
+        "type": "int",
+        "default": 8
+      },
+      "stage_deep_max_minutes": {
+        "description": "第一周期深睡上限（分钟）",
+        "type": "int",
+        "default": 36
+      },
+      "stage_deep_decay": {
+        "description": "深睡每周期衰减比例",
+        "hint": "0.32 表示往后每个周期深睡少三成",
+        "type": "float",
+        "default": 0.28
+      },
+      "stage_rem_base_minutes": {
+        "description": "第一周期 REM 时长（分钟）",
+        "type": "int",
+        "default": 10
+      },
+      "stage_rem_grow_minutes": {
+        "description": "每周期 REM 增加（分钟）",
+        "type": "int",
+        "default": 6
+      },
+      "stage_rem_max_minutes": {
+        "description": "REM 时长上限（分钟）",
+        "type": "int",
+        "default": 28
+      },
+      "stage_noon_light_only": {
+        "description": "午睡只走浅睡",
+        "hint": "午睡不进入深睡，尾巴上给一小段轻 REM",
+        "type": "bool",
+        "default": true
+      },
+      "dream_in_rem_only": {
+        "description": "只在 REM 期做梦",
+        "hint": "关掉就退回「按固定间隔做梦」",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "diary": {
+    "description": "日记",
+    "hint": "她自己的日记：晚上把这一天记下来。素材只来自真实记忆、梦境和作息，写不出来就不写。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用日记",
+        "hint": "默认关闭。开启后每天到点写一篇，可以手动让她现在就写",
+        "type": "bool",
+        "default": false
+      },
+      "hour": {
+        "description": "几点写",
+        "hint": "0~23。太早写会漏掉晚上的事，太晚会跨天",
+        "type": "int",
+        "default": 23
+      },
+      "jitter_minutes": {
+        "description": "抖动（分钟）",
+        "hint": "避免每天整点开写，看着像定时任务",
+        "type": "int",
+        "default": 40
+      },
+      "length": {
+        "description": "目标字数",
+        "type": "int",
+        "default": 700
+      },
+      "max_atoms": {
+        "description": "最多引几条记忆",
+        "type": "int",
+        "default": 12
+      },
+      "use_dreams": {
+        "description": "引用梦境",
+        "hint": "开启「长夜如梦」的做梦后才有素材",
+        "type": "bool",
+        "default": true
+      },
+      "affinity_aware": {
+        "description": "按好感度调语气",
+        "hint": "好感低时客气、不点名；高了才会直呼其名",
+        "type": "bool",
+        "default": true
+      },
+      "min_stage_to_name": {
+        "description": "几档以上才写名字",
+        "hint": "0~5。低于这档时日记里只写「有个人」",
+        "type": "int",
+        "default": 3
+      },
+      "skip_when_empty": {
+        "description": "这天没记忆就不写",
+        "hint": "关掉的话会退回最近 72 小时的记忆硬写一篇",
+        "type": "bool",
+        "default": true
+      },
+      "backfill": {
+        "description": "启动时补昨天",
+        "hint": "最多补一天，防止停机一周后一次刷出七篇",
+        "type": "bool",
+        "default": true
+      },
+      "feel_in_prompt": {
+        "description": "让日记影响说话",
+        "hint": "开启后最近一篇的前 200 字会进提示词。会让她的回复变得「太记得自己写过什么」，默认关",
+        "type": "bool",
+        "default": false
+      },
+      "llm_provider_id": {
+        "description": "写日记用的模型",
+        "hint": "留空用默认模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      }
+    }
+  },
+  "proactive": {
+    "description": "主动找人",
+    "hint": "没人说话的时候她自己会想找你。睡着不发、免打扰时段不发、连着没被回会退避。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用主动找人",
+        "hint": "默认关闭。开了先看「谁会收到」列表，确认没有不该找的人",
+        "type": "bool",
+        "default": false
+      },
+      "session_mode": {
+        "description": "对谁主动",
+        "hint": "recent = 最近聊过的私聊；whitelist = 只对白名单；all_private = 所有归档过的私聊",
+        "type": "string",
+        "options": [
+          "recent",
+          "whitelist",
+          "all_private"
+        ],
+        "default": "recent"
+      },
+      "whitelist": {
+        "description": "白名单",
+        "hint": "会话号（群号 / QQ 号），一行一个",
+        "type": "list",
+        "default": []
+      },
+      "idle_min_minutes": {
+        "description": "闲多久开始想人（分钟）",
+        "type": "int",
+        "default": 90
+      },
+      "idle_max_hours": {
+        "description": "超过多久就不再找（小时）",
+        "hint": "一周没说话的人突然冒一句很怪，所以有上限",
+        "type": "int",
+        "default": 48
+      },
+      "daily_cap": {
+        "description": "每天最多发几条",
+        "type": "int",
+        "default": 6
+      },
+      "per_session_cap": {
+        "description": "单个会话每天最多几条",
+        "type": "int",
+        "default": 2
+      },
+      "cooldown_minutes": {
+        "description": "同一会话冷却（分钟）",
+        "type": "int",
+        "default": 120
+      },
+      "unanswered_limit": {
+        "description": "连着几条没被回就退避",
+        "type": "int",
+        "default": 2
+      },
+      "backoff_hours": {
+        "description": "退避多久（小时）",
+        "type": "int",
+        "default": 12
+      },
+      "min_affinity_stage": {
+        "description": "几档好感以上才主动",
+        "hint": "0~5。默认 1，不熟的不会来找",
+        "type": "int",
+        "default": 1
+      },
+      "energy_min": {
+        "description": "精力低于多少不发",
+        "type": "int",
+        "default": 40
+      },
+      "respect_night": {
+        "description": "尊重长夜作息",
+        "hint": "睡着、刚醒、精力不够都不发",
+        "type": "bool",
+        "default": true
+      },
+      "quiet_hours": {
+        "description": "免打扰时段",
+        "hint": "格式 01:00-08:00，跨午夜也认",
+        "type": "string",
+        "default": "01:00-08:00"
+      },
+      "active_hours": {
+        "description": "活跃时段",
+        "hint": "留空跟随人格里的活跃时段",
+        "type": "string",
+        "default": ""
+      },
+      "allow_group": {
+        "description": "群里也主动",
+        "hint": "默认关。开了也只对安静满一段时间的群",
+        "type": "bool",
+        "default": false
+      },
+      "group_silence_minutes": {
+        "description": "群里要安静多久",
+        "type": "int",
+        "default": 30
+      },
+      "follow_up": {
+        "description": "补一句（你说了我没接）",
+        "type": "bool",
+        "default": true
+      },
+      "follow_up_delay_minutes": {
+        "description": "隔多久补",
+        "type": "int",
+        "default": 25
+      },
+      "promise_nudge": {
+        "description": "惦记没兑现的事",
+        "hint": "有「答应 / 说好 / 下次」这类记忆时加分",
+        "type": "bool",
+        "default": true
+      },
+      "use_quote": {
+        "description": "引用对方最后一句",
+        "type": "bool",
+        "default": false
+      },
+      "use_sticker": {
+        "description": "带表情包",
+        "hint": "能力层拿不到表情包就跳过",
+        "type": "bool",
+        "default": false
+      },
+      "as_voice": {
+        "description": "发语音",
+        "hint": "主动发语音太吵，默认关",
+        "type": "bool",
+        "default": false
+      },
+      "length": {
+        "description": "一句话多长（字）",
+        "type": "int",
+        "default": 40
+      },
+      "platform": {
+        "description": "老数据补平台名",
+        "hint": "归档里没有 umo 的老消息用这个拼",
+        "type": "string",
+        "default": "aiocqhttp"
+      },
+      "llm_provider_id": {
+        "description": "生成用的模型",
+        "hint": "留空用默认模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
       }
     }
   },

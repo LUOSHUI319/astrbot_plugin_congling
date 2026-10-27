@@ -17,7 +17,7 @@ from ..core.contracts import NIGHT_ASLEEP, NIGHT_AWAKE, PerceivedMessage
 from .close import close_minutes, is_closing, match_strength
 from .crawl import Crawler
 from .dream import Dreamer
-from .state import NightService
+from .state import SLEEP_WINDOW_KEY, NightService
 
 __all__ = [
     "NightModule",
@@ -36,6 +36,7 @@ class NightModule:
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self.config = plugin.cfg
+        self.store = plugin.store
         self.state = NightService(plugin)
         self.dreamer = Dreamer(plugin)
         self.crawler = Crawler(plugin)
@@ -46,8 +47,9 @@ class NightModule:
     # ================================================================ 生命周期
     async def start(self) -> None:
         await self.state.start()
-        if self.dreamer.enabled:
-            await self.dreamer.load()
+        # 开关关着也读一遍：面板要显示「共几段」，而且万一开着之后第一段梦
+        # 直接 append + save，会把以前存的梦整个覆盖掉
+        await self.dreamer.load()
 
     async def shutdown(self) -> None:
         await self.state.save()
@@ -94,17 +96,12 @@ class NightModule:
         return result
 
     async def after_reply(self, msg: PerceivedMessage | None = None, *, session_id: str = "") -> None:
-        """回完一句话之后：正在醒就先爬楼，否则执行收线入睡。"""
-        # 1) 爬楼：醒来后的第一句回复发完，就算翻完了
-        if self.state.state.mode == "waking":
-            try:
-                await self.crawl(session_id)
-                self._pick_morning_dream()
-            except Exception as exc:
-                logger.debug(f"[congling] 爬楼失败: {exc!r}")
-            return
+        """回完一句话之后：执行收线入睡。
 
-        # 2) 收线：刚才那句已经是最后一句，现在真的去睡
+        爬楼**不在这里**做。这里在 after_message_sent 之后才被调，
+        那时候回复已经发出去了，生成的爬楼语没人发得出去（原来就是这么丢的）。
+        爬楼统一走 take_crawl_line()，由 express_hook 在发送前插入。
+        """
         pending = self.pending_sleep
         if not pending:
             return
@@ -131,19 +128,74 @@ class NightModule:
 
     # ================================================================ 爬楼
     async def need_crawl(self, session_id: str) -> int:
+        """这个会话现在要不要爬楼，要的话还有多少条没翻。
+
+        只在 waking 状态、且该会话确实在「待爬清单」里时才为真。
+        清单在一次醒来时算好（见 state._do_wake），爬完一个划掉一个。
+        """
         if not self.config.bool("night.crawl_enabled", True):
             return 0
-        sleep_at = self.state.state.sleep_at
-        if sleep_at <= 0:
+        state = self.state.state
+        if state.mode != NIGHT_WAKING:
             return 0
-        return await self.crawler.unread_count(session_id, sleep_at)
+        if not session_id or session_id not in (state.pending_crawl or []):
+            return 0
+        since = await self._sleep_since()
+        if since <= 0:
+            return 1
+        return await self.crawler.unread_count(session_id, since)
+
+    async def _sleep_since(self) -> int:
+        """最近一次入睡的时间戳（从落盘的睡眠区间里取）。"""
+        try:
+            raw = await self.store.kv_get(SLEEP_WINDOW_KEY, []) or []
+        except Exception:
+            return 0
+        if not isinstance(raw, list) or not raw:
+            return 0
+        last = raw[-1]
+        if not isinstance(last, dict):
+            return 0
+        try:
+            return int(last.get("sleep_at") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def take_crawl_line(self, session_id: str) -> str:
+        """醒来后的第一句：先念一句爬楼语，然后把这个会话的未读清掉。
+
+        必须在**发送前**调用（main.express_hook），否则生成的句子没人发。
+        返回空串表示这次不用爬。
+        """
+        try:
+            if not await self.need_crawl(session_id):
+                return ""
+        except Exception as exc:
+            logger.debug(f"[congling] 爬楼判定失败: {exc!r}")
+            return ""
+        try:
+            line = await self.crawler.crawl_line()
+        except Exception as exc:
+            logger.debug(f"[congling] 爬楼语生成失败: {exc!r}")
+            line = ""
+        try:
+            removed = await self.crawler.mark_read(session_id)
+            await self.crawler.mark_crawled(session_id)
+            await self.state.crawl_done(session_id)
+            if self.state.state.mode != NIGHT_WAKING:
+                self._pick_morning_dream()
+            if removed:
+                logger.info(f"[congling] 爬楼完成：撤销 {removed} 条未读（{session_id}）")
+        except Exception as exc:
+            logger.debug(f"[congling] 爬楼收尾失败: {exc!r}")
+        return line
 
     async def crawl(self, session_id: str) -> str:
-        """执行爬楼，返回要说的话。"""
+        """执行爬楼，返回要说的话（面板/指令用；回复链路走 take_crawl_line）。"""
         line = await self.crawler.crawl_line()
         removed = await self.crawler.mark_read(session_id)
         await self.crawler.mark_crawled(session_id)
-        await self.state.finish_waking()
+        await self.state.crawl_done(session_id)
         self._waking_started.pop(session_id, None)
         if removed:
             logger.info(f"[congling] 爬楼完成：撤销 {removed} 条未读（{session_id}）")
@@ -164,6 +216,17 @@ class NightModule:
             already=state.dream_count_today,
         ):
             return
+        if self.config.bool("night.dream_in_rem_only", True):
+            from . import stages as stages_mod
+
+            stage = stages_mod.at(
+                self.config,
+                sleep_at=int(state.sleep_at or 0),
+                wake_at=int(state.wake_at or 0),
+                kind=state.sleep_kind or "night",
+            )
+            if not stage or stage.get("key") != "rem":
+                return
         last = self.dreamer.list_recent(1)
         continuation = ""
         if last:
@@ -185,6 +248,14 @@ class NightModule:
         lines: list[str] = []
         if state.mode == "waking":
             lines.append("你刚从睡眠里被叫醒，昨晚的消息还没看。不要直接回答具体内容，先说一句你要去翻消息。")
+
+        woke_from = getattr(self.state, "_woke_from", None) or {}
+        woke_key = str(woke_from.get("key") or "")
+        if state.mode in ("awake", "waking") and woke_key:
+            if woke_key == "n3":
+                lines.append("你是从深度睡眠里被硬拽起来的，脑子还是木的，说话短、慢，别急着接话题。")
+            elif woke_key == "rem":
+                lines.append("你是从梦里醒过来的，梦的碎片还挂在脑子里，可以顺手提一句你刚才梦见的东西。")
 
         if self.pending_sleep:
             limit = max(4, self.config.int("close.max_closing_chars", 12))

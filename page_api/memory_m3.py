@@ -58,31 +58,33 @@ class MemoryM3Mixin:
             now = int(time.time())
 
             total = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active'") or 0)
+                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0)") or 0)
             # level 0 = 不可忘（永久档）；fading = 衰减到快看不见的
             permanent = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND mem_level=0") or 0)
+                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND mem_level=0") or 0)
             fading = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND mem_level>0 AND decay IS NOT NULL AND decay<=0.35") or 0)
+                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND mem_level>0 AND decay IS NOT NULL AND decay<=0.35") or 0)
             pending = int(await store.scalar(
                 "SELECT COUNT(*) FROM mem_atom WHERE status='pending'") or 0)
             month_new = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND created_at>=?",
+                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND created_at>=?",
                 (now - 30 * DAY,)) or 0)
             people = int(await store.scalar(
-                "SELECT COUNT(DISTINCT subject_id) FROM mem_atom WHERE status='active' AND subject_id<>''") or 0)
+                "SELECT COUNT(DISTINCT subject_id) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND subject_id<>''") or 0)
             sessions = int(await store.scalar(
-                "SELECT COUNT(DISTINCT session_id) FROM mem_atom WHERE status='active' AND session_id<>''") or 0)
+                "SELECT COUNT(DISTINCT session_id) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id<>''") or 0)
+            unread = int(await store.scalar(
+                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND unread=1") or 0)
 
             kinds = await store.fetch_all(
-                "SELECT kind, COUNT(*) AS c FROM mem_atom WHERE status='active' GROUP BY kind ORDER BY c DESC")
+                "SELECT kind, COUNT(*) AS c FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) GROUP BY kind ORDER BY c DESC")
             heat = await store.fetch_all(
                 "SELECT date(created_at,'unixepoch','localtime') AS d, COUNT(*) AS c "
-                "FROM mem_atom WHERE status='active' AND created_at>=? GROUP BY d ORDER BY d",
+                "FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND created_at>=? GROUP BY d ORDER BY d",
                 (now - 26 * 7 * DAY,))
             recent = await store.fetch_all(
-                "SELECT id, kind, text, importance, created_at, expire_at, session_id, session_label, subject_id, mem_level "
-                "FROM mem_atom WHERE status='active' ORDER BY created_at DESC LIMIT 8")
+                "SELECT id, kind, text, importance, created_at, expire_at, session_id, session_kind, session_label, subject_id, mem_level "
+                "FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) ORDER BY created_at DESC LIMIT 8")
 
             kind_rows = [{"kind": str(r["kind"] or "fact"), "count": int(r["c"] or 0)} for r in kinds]
             heat_map = {str(r["d"]): int(r["c"] or 0) for r in heat}
@@ -96,6 +98,7 @@ class MemoryM3Mixin:
                 "month_new": month_new,
                 "people": people,
                 "sessions": sessions,
+                "unread": unread,
                 "kinds": kind_rows,
                 "heatmap": heat_map,
                 "recent": [dict(r) for r in recent],
@@ -124,7 +127,7 @@ class MemoryM3Mixin:
             rows = await store.fetch_all(
                 "SELECT session_id, session_kind, session_label, COUNT(*) AS c, "
                 "MAX(created_at) AS last_at, MIN(created_at) AS first_at "
-                "FROM mem_atom WHERE status='active' AND session_id<>'' "
+                "FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id<>'' "
                 "GROUP BY session_id ORDER BY last_at DESC LIMIT 200")
             items = []
             for r in rows:
@@ -155,14 +158,18 @@ class MemoryM3Mixin:
             store = self.plugin.store
             atoms = await store.fetch_all(
                 "SELECT id, kind, text, importance, created_at, expire_at, subject_id, mem_level "
-                "FROM mem_atom WHERE status='active' AND session_id=? ORDER BY created_at DESC LIMIT 100",
+                "FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id=? ORDER BY created_at DESC LIMIT 2000",
                 (sid,))
+            total_row = await store.fetch_one(
+                "SELECT COUNT(*) AS c FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id=?",
+                (sid,))
+            total_count = int((total_row or {}).get("c") or 0)
             kinds = await store.fetch_all(
-                "SELECT kind, COUNT(*) AS c FROM mem_atom WHERE status='active' AND session_id=? GROUP BY kind",
+                "SELECT kind, COUNT(*) AS c FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id=? GROUP BY kind",
                 (sid,))
             hours = await store.fetch_all(
                 "SELECT CAST(strftime('%H', created_at, 'unixepoch', 'localtime') AS INTEGER) AS h, COUNT(*) AS c "
-                "FROM mem_atom WHERE status='active' AND session_id=? GROUP BY h", (sid,))
+                "FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id=? GROUP BY h", (sid,))
             meta = await store.fetch_one(
                 "SELECT session_kind, session_label FROM mem_atom WHERE session_id=? LIMIT 1", (sid,))
             hour_map = {int(r["h"] or 0): int(r["c"] or 0) for r in hours}
@@ -171,6 +178,7 @@ class MemoryM3Mixin:
                 "kind": str((meta or {}).get("session_kind") or ""),
                 "label": str((meta or {}).get("session_label") or "") or sid,
                 "atoms": [dict(r) for r in atoms],
+                "total": total_count,
                 "kinds": [{"kind": str(r["kind"] or "fact"), "count": int(r["c"] or 0)} for r in kinds],
                 "hours": {str(h): hour_map.get(h, 0) for h in range(24)},
             })

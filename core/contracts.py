@@ -233,6 +233,12 @@ class NightState:
     dream_count_today: int = 0
     dream_skip: bool = False
     version: int = 1
+    # 这一觉是夜里睡还是午睡：决定状态栏文案（午睡不能报「明天早上醒」）
+    sleep_kind: str = ""
+    # 进 waking 的时刻，用来做超时兜底（卡在 waking 会让状态机僵住）
+    enter_waking_at: int = 0
+    # 醒来后还等着爬楼的会话
+    pending_crawl: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -244,6 +250,9 @@ class NightState:
             "last_tick": self.last_tick,
             "dream_count_today": self.dream_count_today,
             "dream_skip": self.dream_skip,
+            "sleep_kind": self.sleep_kind,
+            "enter_waking_at": self.enter_waking_at,
+            "pending_crawl": list(self.pending_crawl or []),
         }
 
     @classmethod
@@ -262,6 +271,10 @@ class NightState:
         state.last_tick = int(data.get("last_tick") or 0)
         state.dream_count_today = int(data.get("dream_count_today") or 0)
         state.dream_skip = bool(data.get("dream_skip"))
+        state.sleep_kind = str(data.get("sleep_kind") or "")
+        state.enter_waking_at = int(data.get("enter_waking_at") or 0)
+        raw_pending = data.get("pending_crawl") or []
+        state.pending_crawl = [str(x) for x in raw_pending if str(x).strip()] if isinstance(raw_pending, list) else []
         return state
 
     def is_asleep(self) -> bool:
