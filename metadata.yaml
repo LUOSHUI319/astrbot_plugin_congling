@@ -1,7 +1,7 @@
 name: astrbot_plugin_congling
 display_name: 从绫开始
 author: "洛水 & 望山"
-version: 0.7.1
+version: 0.7.2
 desc: "官方群 577084969。从绫开始——把「会聊天」做到像人。拟人化表达与分句节奏、会分级会淡忘的长期记忆（遗忘曲线 / 好感度 / 用户画像）、特殊消息解析（合并转发/引用/卡片/语音）、长夜如梦（会累会睡、四种睡眠阶段、只在 REM 做梦）、日记（素材只来自真实记忆与梦）、主动找人（会想起你）、实用查询工具集、QQ 扩展（空间说说/签名/资料卡/换头像），带一整套可视化配置面板。"
 repo: "https://github.com/LUOSHUI319/astrbot_plugin_congling"
 entry: main.py
