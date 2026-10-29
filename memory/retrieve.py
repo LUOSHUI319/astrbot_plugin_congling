@@ -67,17 +67,20 @@ class Retriever:
         *,
         scope: str = "user",
         subject: str = "",
-        persona_id: str = "ling",
+        persona_id: str | None = None,
         k: int | None = None,
         exclude: set[int] | None = None,
         cross_session: bool = False,
+        mode: str = "",
     ) -> list[MemoryHit]:
+        # 不许再退回写死的 "ling"：多分区环境下那会把所有人的记忆串到一起
+        persona_id = persona_id or self.config.persona_id
         query = (query or "").strip()
         top_k = int(k or self.config.int("memory.inject_top_k", 5))
         if not query or top_k <= 0:
             return []
 
-        rows = await self._candidates(scope, subject, persona_id, cross_session=cross_session)
+        rows = await self._candidates(scope, subject, persona_id, cross_session=cross_session, mode=mode)
         if not rows:
             return []
 
@@ -121,16 +124,55 @@ class Retriever:
 
     # ---------------------------------------------------------------- 候选
     async def _candidates(
-        self, scope: str, subject: str, persona_id: str, cross_session: bool = False
+        self,
+        scope: str,
+        subject: str,
+        persona_id: str,
+        cross_session: bool = False,
+        mode: str = "",
     ) -> list[dict[str, Any]]:
         if cross_session:
-            # 跨会话混合查：谁的记忆都捞，但把来源带上，别把私聊的话说成群里的
+            # 跨会话补齐的受众边界。四档：off / same_user / whitelist / all。
+            # 以前是全库捞，私聊里能翻出群聊别人的秘密，这是真事故。
+            mode = str(mode or self.config.str("memory.cross_session_scope", "same_user") or "same_user").strip().lower()
+            if mode in ("self",):
+                mode = "same_user"
+            if mode == "off":
+                return []
+            if mode == "whitelist":
+                # 只在指定会话之间互通。名单为空等于关闭 —— 空名单不能退化成全库
+                allow = [
+                    str(x).strip() for x in (self.config.list("memory.cross_session_whitelist", []) or [])
+                    if str(x).strip()
+                ]
+                if not allow:
+                    return []
+                marks = ",".join("?" * len(allow))
+                rows = await self.store.fetch_all(
+                    "SELECT id, text, kind, keywords, importance, decay, created_at, source_msg_ids, "
+                    "subject_id, scope, last_hit_at, session_id, session_kind, session_label FROM mem_atom "
+                    "WHERE persona_id=? AND status='active' AND decay>=0.15 AND (unread IS NULL OR unread=0) "
+                    f"AND session_id IN ({marks}) "
+                    "ORDER BY importance DESC, id DESC LIMIT 800",
+                    (persona_id, *allow),
+                )
+                return rows
+            if mode == "all":
+                rows = await self.store.fetch_all(
+                    "SELECT id, text, kind, keywords, importance, decay, created_at, source_msg_ids, "
+                    "subject_id, scope, last_hit_at, session_id, session_kind, session_label FROM mem_atom "
+                    "WHERE persona_id=? AND status='active' AND decay>=0.15 AND (unread IS NULL OR unread=0) "
+                    "ORDER BY importance DESC, id DESC LIMIT 800",
+                    (persona_id,),
+                )
+                return rows
             rows = await self.store.fetch_all(
                 "SELECT id, text, kind, keywords, importance, decay, created_at, source_msg_ids, "
                 "subject_id, scope, last_hit_at, session_id, session_kind, session_label FROM mem_atom "
                 "WHERE persona_id=? AND status='active' AND decay>=0.15 AND (unread IS NULL OR unread=0) "
+                "AND (subject_id=? OR scope='global') "
                 "ORDER BY importance DESC, id DESC LIMIT 800",
-                (persona_id,),
+                (persona_id, subject),
             )
             return rows
         rows = await self.store.fetch_all(

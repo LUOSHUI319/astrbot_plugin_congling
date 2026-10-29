@@ -842,7 +842,9 @@ async function njMemory(keyword, sessionId, kind) {
   njShell();
   njTitle("04");
   const settings = await loadSettings();
-  const params = { limit: 500, status: "active" };
+  // 和 app.js 那版一样：500 张卡滑起来必卡，先取 150
+  const shown = Number(window.__memShown || 150);
+  const params = { limit: shown, status: "active" };
   if (keyword) params.keyword = keyword;
   if (sessionId) params.session = sessionId;
   if (kind) params.kind = kind;
@@ -1418,7 +1420,7 @@ async function njM3Sessions() {
             <div class="nj-head" style="margin-top:0"><h2>这个会话里记住的事</h2><span>${esc(atomHead)}</span></div>
             <div class="nj-scroll nj-list-scroll">
               <div class="nj-timeline" style="padding-left:22px">
-                ${atoms.length ? atoms.map((a) => njAtomRow(a)).join("") : '<div class="nj-empty">这个会话还没有记忆</div>'}
+                ${atoms.length ? atoms.slice(0, 60).map((a) => njAtomRow(a)).join("") : '<div class="nj-empty">这个会话还没有记忆</div>'}
               </div>
             </div>
           </div>
@@ -1831,9 +1833,9 @@ async function njNight() {
     needState ? get("night/state").catch(() => ({})) : Promise.resolve({}),
     needUnread ? get("night/unread", { limit: 40 }).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
     nightTab === "state" ? get("page/memory/m3/overview").catch(() => ({})) : Promise.resolve({}),
-    nightTab === "dream" ? get("night/dreams", { limit: 60 }).catch(() => ({ items: [], nights: [], stats: {} })) : Promise.resolve(null),
+    nightTab === "dream" ? get("night/dreams", { limit: 60 }).catch((err) => ({ __error: String((err && err.message) || err) })) : Promise.resolve(null),
     nightTab === "config" ? loadSettings() : Promise.resolve(null),
-    nightTab === "state" ? get("night/dreams", { limit: 3 }).catch(() => ({ items: [] })) : Promise.resolve(null),
+    nightTab === "state" ? get("night/dreams", { limit: 3 }).catch((err) => ({ __error: String((err && err.message) || err) })) : Promise.resolve(null),
   ]);
   const unread = (unreadData.items || []).slice().sort((a, b) => Number(b.unread_since || 0) - Number(a.unread_since || 0));
   const heat = heatData.heatmap || {};
@@ -1841,7 +1843,9 @@ async function njNight() {
   let body = "";
   if (nightTab === "sleep") body = njNightSleep(st);
   else if (nightTab === "memory") body = njNightMemory(st, unread);
-  else if (nightTab === "dream") body = njNightDream(dreamData);
+  else if (nightTab === "dream") body = dreamData && dreamData.__error
+    ? `<div class="nj-empty">梦境读取失败：${dreamData.__error}<br><button class="nj-btn tiny" data-night-refresh>重试</button></div>`
+    : njNightDream(dreamData);
   else if (nightTab === "config") body = njNightSettings(settings);
   else body = njNightState(st, unread, heat, dreamPeek);
 
@@ -1849,7 +1853,7 @@ async function njNight() {
 
   njDiaryBind();
 
-  /* 子标签 / 快速跳转 */
+  /* 子标签 / 快速跳转（之前删旧代码时被误删，导致除「状态」外都点不进去） */
   view.querySelectorAll("[data-night-tab]").forEach((btn) => {
     btn.onclick = () => {
       nightTab = btn.dataset.nightTab;
@@ -1859,6 +1863,10 @@ async function njNight() {
   view.querySelectorAll("[data-night-refresh]").forEach((btn) => {
     btn.onclick = () => njNight();
   });
+
+  /* 主体合并入口暂时停用：夜航页会持续闪，先确认是不是它引起的。
+     侧边栏「记忆 → 主体合并」那个入口不受影响，继续可用。 */
+  // try { njInjectMergeEntry(nightTab); } catch (err) { console.warn(err); }
 
   /* 唤醒 / 入睡 */
   view.querySelectorAll("[data-night-act]").forEach((btn) => {
@@ -2081,6 +2089,135 @@ function njNightSleep(st) {
       ${info}
     </section>
   `;
+}
+
+let subjectMergeCache = null;
+let mergePanelOpen = false;
+
+/** 在记忆页顶部插一个入口按钮 + 一个独立面板（不参与主渲染，出错也不影响页面） */
+function njInjectMergeEntry(nightTab) {
+  const old = document.getElementById("nj-merge-entry");
+  if (old) old.remove();
+  const oldPanel = document.getElementById("nj-merge-panel");
+  if (oldPanel) oldPanel.remove();
+  if (nightTab !== "memory" || !view) return;
+
+  const bar = document.createElement("div");
+  bar.id = "nj-merge-entry";
+  bar.style.cssText = "display:flex;gap:8px;align-items:center;margin:10px 0 4px";
+  const btn = document.createElement("button");
+  btn.className = "nj-btn tiny";
+  btn.textContent = mergePanelOpen ? "收起主体合并" : "主体合并";
+  btn.onclick = () => {
+    mergePanelOpen = !mergePanelOpen;
+    if (!mergePanelOpen) subjectMergeCache = null;
+    njNight();
+  };
+  bar.appendChild(btn);
+  if (mergePanelOpen && subjectMergeCache) {
+    const tip = document.createElement("span");
+    tip.style.cssText = "font-size:11px;opacity:.6";
+    tip.textContent = subjectMergeCache.error
+      ? "扫描失败"
+      : `${(subjectMergeCache.items || []).length} 组候选`;
+    bar.appendChild(tip);
+  }
+  // 插到内容容器里，别碰顶部 sticky 结构 —— njWrapBody 会把 herobar 之后的
+  // 元素整体搬进 .nj-page-body，插在两者之间会打乱它的假设，进而反复重排
+  const hostBox = view.querySelector(".nj-page-body") || view;
+  hostBox.insertBefore(bar, hostBox.firstChild);
+
+  if (!mergePanelOpen) return;
+  const panel = document.createElement("div");
+  panel.id = "nj-merge-panel";
+  panel.className = "nj-card";
+  panel.style.cssText = "padding:12px 14px;margin:6px 0 10px";
+  panel.innerHTML = njSubjectMergeBlock();
+  hostBox.insertBefore(panel, bar.nextSibling);
+  njBindMergePanel(panel);
+}
+
+function njBindMergePanel(scope) {
+  scope.querySelectorAll("[data-merge-scan]").forEach((btn) => {
+    btn.onclick = async () => {
+      const old = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "扫描中…";
+      try {
+        const data = await get("subjects/merge_candidates");
+        subjectMergeCache = { items: (data && data.items) || [] };
+      } catch (err) {
+        subjectMergeCache = { items: [], error: String((err && err.message) || err) };
+      }
+      btn.textContent = old;
+      njNight();
+    };
+  });
+  scope.querySelectorAll("[data-merge-apply]").forEach((btn) => {
+    btn.onclick = async () => {
+      const cache = subjectMergeCache || { items: [] };
+      const picks = [...scope.querySelectorAll("[data-merge-idx]:checked")].map((el) => {
+        const it = cache.items[Number(el.dataset.mergeIdx)] || {};
+        return { from: it.from, to: it.to };
+      }).filter((x) => x.from && x.to);
+      if (!picks.length) {
+        njToast("先勾选要合并的项", "err");
+        return;
+      }
+      if (!confirm("合并 " + picks.length + " 组？会迁移相关记忆、合并好感度，不可撤销。执行前后台会自动备份数据库")) return;
+      btn.disabled = true;
+      btn.textContent = "合并中…";
+      try {
+        const r = await post("subjects/merge", { pairs: picks });
+        njToast("合并完成：" + ((r && r.merged) || 0) + " 组，迁移 " + ((r && r.atoms) || 0) + " 条记忆", "ok");
+        subjectMergeCache = null;
+      } catch (err) {
+        njToast((err && err.message) || "合并失败", "err");
+      }
+      btn.textContent = "合并选中";
+      njNight();
+    };
+  });
+}
+
+function njSubjectMergeBlock() {
+  if (subjectMergeCache === null) {
+    return `<div class="nj-card">
+      <div class="nj-card-head"><h3>主体合并</h3><span>同一个人的不同叫法可以合到一起</span></div>
+      <div class="pad"><button class="nj-btn tiny" data-merge-scan>扫描重复主体</button></div>
+    </div>`;
+  }
+  if (subjectMergeCache.error) {
+    return `<div class="nj-card">
+      <div class="nj-card-head"><h3>主体合并</h3></div>
+      <div class="pad"><p class="nj-dim">扫描失败：${esc(subjectMergeCache.error)}</p>
+        <button class="nj-btn tiny" data-merge-scan>重试</button></div>
+    </div>`;
+  }
+  const items = subjectMergeCache.items || [];
+  if (!items.length) {
+    return `<div class="nj-card">
+      <div class="nj-card-head"><h3>主体合并</h3><span>没有发现可合并的</span></div>
+      <div class="pad"><button class="nj-btn tiny" data-merge-scan>重新扫描</button></div>
+    </div>`;
+  }
+  const rows = items.map((x, i) => `<label class="nj-ev" style="display:flex;gap:8px;align-items:center;cursor:pointer;padding:6px 8px">
+      <input type="checkbox" data-merge-idx="${i}" ${x.atoms > 0 ? "checked" : ""} style="flex:none">
+      <span style="flex:none;max-width:26%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.from)}">${esc(x.from)}</span>
+      <span style="flex:none;opacity:.5">→</span>
+      <span style="flex:none;max-width:26%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.to_name)}">${esc(x.to_name)}</span>
+      <span style="flex:1;min-width:0;font-size:11px;opacity:.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.why)}</span>
+      <span style="flex:none;font-variant-numeric:tabular-nums;opacity:.7">${x.atoms}</span>
+    </label>`).join("");
+  return `<div class="nj-card">
+    <div class="nj-card-head"><h3>主体合并</h3><span>共 ${items.length} 组，最后一行数字是关联记忆条数</span></div>
+    <div class="pad" style="display:flex;flex-direction:column;gap:4px">${rows}
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="nj-btn tiny" data-merge-apply>合并选中</button>
+        <button class="nj-btn tiny" data-merge-scan>重新扫描</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function njNightMemory(st, unread) {

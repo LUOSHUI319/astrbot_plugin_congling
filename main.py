@@ -32,7 +32,7 @@ from .core.rhythm import RhythmController
 from .core.store import Store
 from .humanize.delay import ReplyDelayer
 
-PLUGIN_VERSION = "0.7.3"
+PLUGIN_VERSION = "1.0.0"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -66,6 +66,12 @@ class ConglingPlugin(Star):
         self.delayer = ReplyDelayer(self.cfg, self.probe)
         self.budget = Budget(self.cfg)
         self.decision = DecisionLogger(self.store, self.cfg)
+        try:
+            from .core.diagnostics import Diagnostics
+
+            self.diag = Diagnostics(self)
+        except Exception:
+            self.diag = None
 
         # 业务模块（可能缺席，全部按 Optional 处理）
         self.perception: Any = None
@@ -125,6 +131,7 @@ class ConglingPlugin(Star):
 
         try:
             asyncio.get_running_loop().create_task(self._housekeeping())
+            asyncio.get_running_loop().create_task(self._beat_loop())
             if self.night is not None:
                 asyncio.get_running_loop().create_task(self._dream_loop())
         except RuntimeError:
@@ -254,8 +261,7 @@ class ConglingPlugin(Star):
                     await self.memory.daily_tick()
                 if self.diary is not None:
                     await self.diary.tick()
-                if self.proactive is not None:
-                    await self.proactive.tick()
+                # 主动找人已挪到 _beat_loop（60 秒一拍），这里不能再调一次
                 await self.decision.purge()
                 await self._purge_cache()
                 await self._qq_daily_tick()
@@ -264,6 +270,34 @@ class ConglingPlugin(Star):
             except Exception as exc:
                 logger.debug(f"[congling] 维护任务出错: {exc!r}")
             await asyncio.sleep(3600)
+
+    async def _beat_loop(self) -> None:
+        """作息心跳：60 秒一拍，推进夜间状态机和主动找人。
+
+        这两件事以前挂在 _housekeeping 的每小时循环里，导致：
+        - 白天没人说话时精力冻住、无人说话不会自然醒
+        - waking 的超时兜底永远跑不到（超时 5 分钟，检查间隔 1 小时）
+        - 主动找人判定频率比设计慢 60 倍
+
+        tick 内部按 last_tick 补算，所以漏拍、重启都能补齐。
+        """
+        if not self.cfg.bool("night.beat_enabled", True):
+            logger.info("[congling] 作息心跳已关闭（night.beat_enabled=false）")
+            return
+        interval = max(15, min(300, self.cfg.int("night.beat_interval_seconds", 60)))
+        await asyncio.sleep(20)  # 避开启动时的插件竞争
+        while True:
+            try:
+                if self.night is not None:
+                    await self.night.state.tick()
+                if self.proactive is not None:
+                    # tick 内部自带 60 秒节流和启动 3 分钟静默，这里不用再挡
+                    await self.proactive.tick()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.debug(f"[congling] 心跳出错: {exc!r}")
+            await asyncio.sleep(interval)
 
     async def _dream_loop(self) -> None:
         """每 5 分钟看一次该不该做梦。比整点轮询细，开销可以忽略。"""
@@ -457,6 +491,32 @@ class ConglingPlugin(Star):
                     except Exception:
                         continue
             result = await self.night.on_message(msg, self_id=self_id)
+            if getattr(self, "diag", None) is not None:
+                await self.diag.trace(
+                    "night",
+                    session=str(getattr(msg, "session_id", "")),
+                    kind=str(getattr(msg, "session_kind", "")),
+                    block=bool(result.get("block")),
+                    hint=str(result.get("hint") or ""),
+                    mode=str(getattr(self.night.state.state, "mode", "")),
+                )
+            # 诊断：把这次判定落库，异常也能看到（log_level=INFO 时 debug 看不见）
+            try:
+                await self.store.kv_set(
+                    "night:diag",
+                    {
+                        "at": int(time.time()),
+                        "session": str(getattr(msg, "session_id", "")),
+                        "kind": str(getattr(msg, "session_kind", "")),
+                        "block": bool(result.get("block")),
+                        "hint": str(result.get("hint") or "")[:160],
+                        "mode": str(getattr(self.night.state.state, "mode", "")),
+                        "energy": getattr(self.night.state.state, "energy", None),
+                        "pending": len(getattr(self.night.state.state, "pending_crawl", []) or []),
+                    },
+                )
+            except Exception:
+                pass
             if result.get("block"):
                 # 记一条决策日志，方便你回头看成因为什么没理人
                 try:
@@ -474,7 +534,14 @@ class ConglingPlugin(Star):
                     pass
                 event.stop_event()
         except Exception as exc:
-            logger.debug(f"[congling] 长夜拦截失败: {exc!r}")
+            try:
+                await self.store.kv_set(
+                    "night:diag_err",
+                    {"at": int(time.time()), "err": repr(exc)[:400]},
+                )
+            except Exception:
+                pass
+            logger.warning(f"[congling] 长夜拦截失败: {exc!r}")
 
     @filter.on_llm_request(priority=PRIO_PERCEIVE)
     async def perceive_hook(self, event: AstrMessageEvent, req: Any) -> None:
@@ -536,15 +603,31 @@ class ConglingPlugin(Star):
         """最后一道工序：清理 → 分句 → 接管发送节奏。"""
         if not self.enabled_for(event):
             return
+
+        async def _note(why: str, extra: dict | None = None) -> None:
+            """把表达阶段走到的分支记下来，排查"为什么不分句/不引用"用。"""
+            if getattr(self, "diag", None) is not None:
+                await self.diag.trace("express", why=why, **(extra or {}))
+            try:
+                payload = {"at": int(time.time()), "why": why}
+                if extra:
+                    payload.update(extra)
+                await self.store.kv_set("express:diag", payload)
+            except Exception:
+                pass
+
         try:
             result = event.get_result()
             if result is None or not getattr(result, "chain", None):
+                await _note("no_chain")
                 return
             # 流式输出不做分句：分句会把流式体验撕碎
             try:
                 from astrbot.core.message.message_event_result import ResultContentType
 
                 if getattr(result, "result_content_type", None) == ResultContentType.STREAMING_RESULT:
+                    # 流式结果不分句 —— 这是插件里的既定行为，但用户会觉得"分句没了"
+                    await _note("streaming")
                     self.guard.clean_chain(result.chain)
                     return
             except Exception:
@@ -552,6 +635,7 @@ class ConglingPlugin(Star):
             # 工具调用类结果不动（图片、卡片由各模块自己保证格式）
             if self.composer is not None and hasattr(result, "is_llm_result"):
                 if not result.is_llm_result():
+                    await _note("not_llm")
                     self.guard.clean_chain(result.chain)
                     return
             # 爬楼：醒来后的第一句，先把「等我翻翻」发出去，再走正式回复。
@@ -580,8 +664,10 @@ class ConglingPlugin(Star):
             except Exception as exc:
                 logger.debug(f"[congling] 延时接管跳过: {exc!r}")
             if self.composer is not None:
+                await _note("decorate", {"bubbles": len(getattr(result, "chain", []) or [])})
                 await self.composer.decorate(event, result)
             else:
+                await _note("no_composer")
                 self.guard.clean_chain(result.chain)
         except Exception as exc:
             logger.debug(f"[congling] 表达阶段失败: {exc!r}")

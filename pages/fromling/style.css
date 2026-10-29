@@ -695,6 +695,10 @@ details.adv[open] > summary { border-bottom: 1px solid var(--line); }
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
+  /* 只用 will-change 提示浏览器「这里会滚」，不要用 contain: paint ——
+     它会把绘制裁到容器边界，滚动时一旦有内容溢出就整块不画，看起来像被剪掉一块。
+     translateZ(0) 同理：提升合成层后滚动容易和纹理更新不同步，出现黑块。 */
+  will-change: scroll-position;
 }
 .mem-scroll::-webkit-scrollbar { width: 8px; }
 .mem-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -2909,6 +2913,9 @@ html[data-theme="dark"] .brand-mark {
   outline: none;
 }
 .tip::after {
+  /* 停用：CSS 绝对定位的 tooltip 会被父容器的 overflow 裁掉，
+     靠近屏幕边缘时也会溢出。改用 JS 驱动的全局 fixed 层（见 app.js 末尾）。 */
+  display: none;
   content: attr(data-tip);
   position: absolute;
   left: 50%;
@@ -3188,3 +3195,166 @@ html[data-theme="dark"] .lv-4 { background: #2f2820; }
   margin: -1.25px 0 0 -1.25px;
   opacity: 1;
 }
+
+
+/* 全局 tooltip：fixed 定位，不受任何父容器 overflow 影响，自动避让屏幕边缘 */
+#cg-tip {
+  position: fixed;
+  z-index: 9999;
+  max-width: min(340px, 76vw);
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 13.5px;
+  line-height: 1.58;
+  white-space: pre-wrap;
+  text-align: left;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .14s ease;
+}
+
+
+/* ==================================================================
+   更新日志页（0.7.3 → 1.0.0）
+   编辑排版：眉题、致歉卡、分组、条目。不用 emoji，靠字距和线做层次。
+   ================================================================== */
+.cl-eyebrow {
+  font-size: calc(12px * var(--cl-fs, 1));
+  letter-spacing: .26em;
+  text-transform: uppercase;
+  color: var(--accent, #c8a86a);
+  opacity: .82;
+  margin-bottom: 10px;
+}
+.cl-appeal {
+  margin: 4px 0 22px;
+  padding: 18px 20px 18px 22px;
+  border-left: 2px solid var(--accent-line, rgba(200, 168, 106, .5));
+  background: linear-gradient(96deg, rgba(200, 168, 106, .06), transparent 72%);
+  border-radius: 0 10px 10px 0;
+}
+.cl-appeal h2 {
+  margin: 0 0 12px;
+  font-size: calc(25px * var(--cl-fs, 1));
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+.cl-appeal p {
+  margin: 0 0 11px;
+  font-size: calc(15.5px * var(--cl-fs, 1));
+  line-height: 2.0;
+  opacity: .88;
+}
+.cl-appeal p:last-child { margin-bottom: 0; }
+.cl-appeal p.sig {
+  font-size: calc(13.5px * var(--cl-fs, 1));
+  opacity: .6;
+  letter-spacing: .04em;
+  margin-top: 14px;
+}
+.cl-lead {
+  margin: 0 0 20px;
+  padding: 12px 0 12px 16px;
+  border-left: 1px solid var(--line, rgba(255, 255, 255, .14));
+  font-size: calc(15.5px * var(--cl-fs, 1));
+  line-height: 1.9;
+  opacity: .8;
+}
+.cl-group { margin: 0 0 26px; }
+.cl-group h3 {
+  margin: 0 0 12px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line, rgba(255, 255, 255, .1));
+  font-size: calc(13.5px * var(--cl-fs, 1));
+  font-weight: 600;
+  letter-spacing: .18em;
+  color: var(--accent, #c8a86a);
+  opacity: .9;
+}
+.cl-group ol, .cl-list { margin: 0; padding-left: 19px; }
+.cl-list { list-style: none; padding-left: 0; counter-reset: cl; }
+.cl-list > li { counter-increment: cl; position: relative; padding-left: 30px; }
+.cl-list > li::before {
+  content: counter(cl, decimal-leading-zero);
+  position: absolute;
+  left: 0; top: 1px;
+  font-size: calc(12px * var(--cl-fs, 1));
+  font-family: ui-monospace, monospace;
+  color: var(--accent, #c8a86a);
+  opacity: .55;
+  letter-spacing: .06em;
+}
+.cl-group li, .cl-list li {
+  margin: 0 0 13px;
+  font-size: calc(15px * var(--cl-fs, 1));
+  line-height: 1.9;
+}
+.cl-group li b, .cl-list li b {
+  display: block;
+  margin-bottom: 4px;
+  font-size: calc(16px * var(--cl-fs, 1));
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+.cl-group li span {
+  opacity: .72;
+}
+.cl-paths { margin: 0; padding: 0; list-style: none; }
+.cl-paths li {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line, rgba(255, 255, 255, .1));
+  border-radius: 9px;
+  font-size: calc(15px * var(--cl-fs, 1));
+  line-height: 1.85;
+}
+.cl-paths li b {
+  display: block;
+  margin-bottom: 6px;
+  font-size: calc(16px * var(--cl-fs, 1));
+  font-weight: 600;
+}
+.cl-paths code {
+  display: inline-block;
+  margin: 0 0 4px;
+  vertical-align: middle;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(200, 168, 106, .12);
+  color: var(--accent, #c8a86a);
+  font-size: calc(13px * var(--cl-fs, 1));
+  letter-spacing: .02em;
+}
+.cl-paths span { opacity: .74; }
+
+
+/* 更新日志的字号调节条 */
+.cl-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 5px 10px;
+  border: 1px solid var(--line, rgba(255,255,255,.12));
+  border-radius: 999px;
+  font-size: 12px;
+  letter-spacing: .06em;
+}
+.cl-zoom button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: .7;
+}
+.cl-zoom button:hover { opacity: 1; background: rgba(255,255,255,.06); }
+.cl-zoom output { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }

@@ -48,14 +48,14 @@
     "items": {
       "mode": {
         "description": "人设来源",
-        "hint": "builtin=使用本插件内置的「绫」；astrbot=使用 AstrBot 里已有的人格；none=完全交给 AstrBot 默认人设，本插件不注入任何人设文本",
+        "hint": "astrbot＝用 AstrBot 里正在使用的那个（推荐，默认）；builtin＝用插件内置的「绫」；none＝完全交给 AstrBot 默认，本插件不注入任何人设",
         "type": "string",
         "options": [
           "builtin",
           "astrbot",
           "none"
         ],
-        "default": "builtin"
+        "default": "astrbot"
       },
       "astrbot_persona_id": {
         "description": "选择 AstrBot 人格",
@@ -571,6 +571,41 @@
             "default": 32
           }
         }
+      },
+      "cross_session_recall": {
+        "description": "允许跨会话检索",
+        "hint": "总开关。关掉之后完全不跨会话，变成「只查当前会话」，下面的档位设置不生效",
+        "type": "bool",
+        "default": true
+      },
+      "cross_session_scope": {
+        "description": "普通用户的跨会话检索范围",
+        "hint": "off＝只查当前会话；same_user＝查这个人在所有会话里说过的话，看不到别人（推荐）；whitelist＝只在与白名单里的会话之间互通；all＝查全库，包含所有用户的私聊，模型可能把别人的私密内容说出来",
+        "type": "string",
+        "options": [
+          "off",
+          "same_user",
+          "whitelist",
+          "all"
+        ],
+        "default": "same_user"
+      },
+      "cross_session_admin_mode": {
+        "description": "管理员的跨会话检索范围",
+        "hint": "off＝只查当前会话，和普通用户一样；self＝查管理员自己在所有会话里说过的话，看不到别人的私聊（推荐）；all＝查全库，包含所有用户的私聊，开启后模型可能把别人的私密内容说出来",
+        "type": "string",
+        "options": [
+          "off",
+          "self",
+          "all"
+        ],
+        "default": "self"
+      },
+      "cross_session_whitelist": {
+        "description": "跨会话白名单（whitelist 档生效）",
+        "hint": "填会话号，一行一个。只有这些会话之间的记忆可以互通。留空等于关闭这一档，不会退化成全库",
+        "type": "list",
+        "default": []
       }
     }
   },

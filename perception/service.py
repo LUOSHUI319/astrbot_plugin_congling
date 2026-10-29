@@ -145,8 +145,16 @@ class PerceptionService:
         return "\n".join(lines)
 
     async def inject(self, event: Any, req: Any) -> None:
+        # 把这条消息挂到事件上，后面 memory / persona / quote 都从 event 取，
+        # 别再依赖 plugin._last_perceived（那是全局的，并发时会串）
         """把特殊消息展开结果注入 prompt（独立区块 + marker 去重）。"""
         msg = await self.perceive(event)
+        # 挂到事件上：同一个请求里后面的 memory / persona / quote 都从 event 取，
+        # 不再读 plugin._last_perceived（那是全局的，两会话并发时会用错消息）
+        try:
+            event._congling_msg = msg
+        except Exception:
+            pass
         # 每条被感知到的消息都归档，抽取器才有原料；
         # 之前只有在有转发/引用/图片时才归档，纯文字消息全丢了。
         await self.archive(msg)
@@ -282,28 +290,38 @@ class PerceptionService:
     async def archive(self, msg: PerceivedMessage) -> None:
         if not msg.text and not msg.blocks:
             return
+        # msg_id 为空时不能拿它去重：`msg_id IS ''` 会在第一条空 id 之后
+        # 把所有后续的也判成"已存在"，消息就静默丢了。合成一个去重键顶上。
+        dedupe_id = str(msg.msg_id or "")
+        if not dedupe_id:
+            dedupe_id = f"~{msg.session_id}:{int(msg.ts or 0)}:{msg.sender_id}:{len(msg.text or '')}"
+
+        # 截断必须保证 JSON 合法：直接切字符串会切出半个对象，
+        # 读回来 json.loads 直接抛错，整条消息的块信息就废了。
+        blocks = [
+            {"kind": b.kind, "text": b.text, "meta": {k: v for k, v in b.meta.items() if k != "chain"}}
+            for b in msg.blocks
+        ]
+        blocks_json = json.dumps(blocks, ensure_ascii=False, default=str)
+        while blocks and len(blocks_json) > 20000:
+            blocks.pop()
+            blocks_json = json.dumps(blocks, ensure_ascii=False, default=str)
+
         try:
             await self.store.execute(
                 "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
                 "blocks_json, expanded, forward_id, umo, platform) "
                 "SELECT ?,?,?,?,?,?,?,?,?,?,?,? "
-                "WHERE NOT EXISTS(SELECT 1 FROM msg_archive WHERE msg_id IS ? AND session_id = ?)",
+                "WHERE NOT EXISTS(SELECT 1 FROM msg_archive WHERE msg_id = ? AND session_id = ?)",
                 (
-                    msg.msg_id,
+                    dedupe_id,
                     msg.session_id,
                     msg.session_kind,
                     msg.sender_id,
                     msg.sender_name,
                     msg.ts,
                     msg.text,
-                    json.dumps(
-                        [
-                            {"kind": b.kind, "text": b.text, "meta": {k: v for k, v in b.meta.items() if k != "chain"}}
-                            for b in msg.blocks
-                        ],
-                        ensure_ascii=False,
-                        default=str,
-                    )[:20000],
+                    blocks_json,
                     1 if msg.is_forward_expanded else 0,
                     next(
                         (
@@ -315,7 +333,7 @@ class PerceptionService:
                     ),
                     str(msg.meta.get("umo") or ""),
                     str(msg.meta.get("platform") or ""),
-                    msg.msg_id,
+                    dedupe_id,
                     msg.session_id,
                 ),
             )

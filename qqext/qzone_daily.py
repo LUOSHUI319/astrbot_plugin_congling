@@ -17,14 +17,17 @@ from typing import Any
 
 from astrbot.api import logger
 
-PROMPT = """你要发一条 QQ 空间的说说，像随手写的一小段日常。
+PROMPT = """你是{name}{identity_line}。你要发一条 QQ 空间的说说，像随手写的一小段日常。
 
-今天的素材：
+今天的素材（方括号里「关于 X」表示这条说的是 X 的事，不是你的事；
+没有标注的才是你自己经历的）：
 {materials}
 
 要求：
 1. 不超过 60 个字，一到两句话
 2. 第一人称，口语，别写成文案、别励志、别总结人生
+2.1 视角不能颠倒：素材标了「关于别人」的，那是别人的事，只能当作你观察到的事来写，
+    不能写成你自己经历的；也不要写出那个人的名字
 3. 不要 emoji，不要话题标签，不要括号注释
 4. 可以用素材里的细节，但不要逐字复述
 5. 只输出说说正文，不要任何前缀说明
@@ -171,7 +174,7 @@ class QzoneDaily:
         # 2) 今天新记下的事
         try:
             rows = await self.store.fetch_all(
-                "SELECT text, mem_level FROM mem_atom WHERE persona_id=? AND status='active' "
+                "SELECT text, mem_level, subject_id FROM mem_atom WHERE persona_id=? AND status='active' "
                 "AND created_at>=? AND mem_level BETWEEN 2 AND 4 ORDER BY created_at DESC LIMIT 8",
                 (self.config.persona_id, now - 86400),
             )
@@ -180,6 +183,7 @@ class QzoneDaily:
                     {
                         "kind": "memory",
                         "text": str(row.get("text") or "")[:200],
+                        "subject": str(row.get("subject_id") or ""),
                         "weight": float(row.get("mem_level") or 3),
                     }
                 )
@@ -189,12 +193,17 @@ class QzoneDaily:
         # 3) 情绪浓度高的记忆（近三天）
         try:
             rows = await self.store.fetch_all(
-                "SELECT text FROM mem_atom WHERE persona_id=? AND status='active' "
+                "SELECT text, subject_id FROM mem_atom WHERE persona_id=? AND status='active' "
                 "AND level_tags LIKE '%emotion_high%' AND created_at>=? ORDER BY created_at DESC LIMIT 4",
                 (self.config.persona_id, now - 3 * 86400),
             )
             for row in rows:
-                items.append({"kind": "emotion", "text": str(row.get("text") or "")[:200], "weight": 2.5})
+                items.append({
+                    "kind": "emotion",
+                    "text": str(row.get("text") or "")[:200],
+                    "subject": str(row.get("subject_id") or ""),
+                    "weight": 2.5,
+                })
         except Exception:
             pass
 
@@ -260,11 +269,32 @@ class QzoneDaily:
     # ------------------------------------------------------------ 生成
     async def compose(self, materials: list[dict[str, Any]]) -> str:
         provider = self._provider()
-        body = "\n".join(f"- {item['text']}" for item in materials)
+        # 素材要标出主体：不标的话模型会把"别人对她说的话"写成"她自己的事"，
+        # 说说又是公开的，视角一错就变成替别人立人设。
+        lines = []
+        for item in materials:
+            subject = str(item.get("subject") or "").strip()
+            head = f"[关于 {subject}] " if subject else ""
+            lines.append(f"- {head}{item['text']}")
+        body = "\n".join(lines)
         if provider is None:
             return ""
+        # 名字写进去，模型才知道这条说说署的是谁
+        name = self.config.str("persona.name", "绫") or "绫"
         try:
-            resp = await provider.text_chat(prompt=PROMPT.replace("{materials}", body[:1500]), contexts=[])
+            book = getattr(self.plugin, "persona", None)
+            if book is not None and hasattr(book, "display_name"):
+                name = await book.display_name() or name
+        except Exception:
+            pass
+        identity = self.config.str("persona.identity", "").strip()
+        prompt = (
+            PROMPT.replace("{name}", name)
+            .replace("{identity_line}", f"（{identity[:60]}）" if identity else "")
+            .replace("{materials}", body[:1500])
+        )
+        try:
+            resp = await provider.text_chat(prompt=prompt, contexts=[])
             text = str(getattr(resp, "completion_text", "") or "").strip()
         except Exception as exc:
             logger.debug(f"[congling] 说说生成失败: {exc!r}")

@@ -278,7 +278,9 @@ class NightState:
         return state
 
     def is_asleep(self) -> bool:
-        return self.mode in (NIGHT_ASLEEP, NIGHT_WAKING)
+        # waking 是「醒了但还没爬起来」，不是睡。把它算成睡会让状态机一直
+        # 走睡眠分支：消息被拦、精力不回、超时兜底也判断不了。
+        return self.mode == NIGHT_ASLEEP
 
 
 @dataclass

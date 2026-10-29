@@ -91,7 +91,7 @@ class MediaInterpreter:
                 {
                     "ok": False,
                     "why": f"{type(exc).__name__}: {exc}"[:250],
-                    "mode": self.hub.mode("stt"),
+                    "mode": self.hub.route("stt"),
                     "target": target[:160],
                 },
             )
@@ -101,11 +101,11 @@ class MediaInterpreter:
         if not text:
             await self._trace(
                 "voice:last",
-                {"ok": False, "why": "provider 返回空文本", "mode": self.hub.mode("stt"), "target": target[:160]},
+                {"ok": False, "why": "provider 返回空文本", "mode": self.hub.route("stt"), "target": target[:160]},
             )
             return "[语音]"
         await self._trace(
-            "voice:last", {"ok": True, "mode": self.hub.mode("stt"), "target": target[:160], "text": text[:100]}
+            "voice:last", {"ok": True, "mode": self.hub.route("stt"), "target": target[:160], "text": text[:100]}
         )
         return f"[语音：{text[:200]}]"
 

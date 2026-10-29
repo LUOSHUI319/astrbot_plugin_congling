@@ -30,15 +30,18 @@ STAGE_TONE = {
     5: "非常亲近，写的时候一直在想这个人",
 }
 
-PROMPT = """现在是{day}的晚上，你要写一篇日记。只写给自己看，不打算给谁检查。
+PROMPT = """现在是{day}的晚上。你是{name}{identity_line}，你要写一篇日记。
+只写给自己看，不打算给谁检查。
 
-今天留下的东西：
+今天留下的东西（每行开头是类型，方括号里「关于 X」表示那条事实的主体是 X，
+不是你；没有标注的就是泛指或你自己的状态）：
 {materials}
 
 {affinity_block}
 
 要求：
 1. 第一人称，像晚上趴在被窝里写的，一共 {length} 字上下
+1.1 视角不能颠倒：「他答应给我买」不能写成「我答应给他买」；素材没写清谁做的，就模糊处理，别替自己认领
 2. 只能基于上面这些真实发生过的事来写，不要编造具体事件、不要编对话
 3. 可以写感受、写没说完的话、写突然想起来的一件小事
 4. 分段自然，不要标题式的小标题，不要列表，不要 emoji
@@ -183,8 +186,22 @@ class Diary:
             return result
 
     async def _compose_by_model(self, day_key: str, bundle: dict[str, Any]) -> dict[str, Any] | None:
+        # 名字和身份必须写进 prompt：只写"第一人称"模型不知道"我"是谁，
+        # 容易把别人对她的称呼当成自己的名字，或者写出"作为AI"这种出戏的话。
+        name = self.config.str("persona.name", "绫") or "绫"
+        try:
+            book = getattr(self.plugin, "persona", None)
+            if book is not None and hasattr(book, "display_name"):
+                name = await book.display_name() or name
+        except Exception:
+            pass
+        identity = self.config.str("persona.identity", "").strip()
+        identity_line = f"（{identity[:60]}）" if identity else ""
+
         prompt = PROMPT.format(
             day=day_key,
+            name=name,
+            identity_line=identity_line,
             materials=bundle["materials"],
             affinity_block=bundle["affinity_block"],
             length=max(200, min(1500, self.config.int("diary.length", 700))),
@@ -246,7 +263,11 @@ class Diary:
         lines: list[str] = []
         for atom in picked:
             kind = str(atom.get("kind") or "fact")
-            lines.append(f"- [{kind}] {str(atom.get('text') or '').strip()}")
+            # 带上主体：不标的话模型分不清这句是"对他做的事"还是"他对我说的话"，
+            # 日记里就会出现"我答应给他充值"这种视角颠倒。
+            subject = str(atom.get("subject_id") or "").strip()
+            head = f"[{kind}]" + (f"[关于 {subject}]" if subject else "")
+            lines.append(f"- {head} {str(atom.get('text') or '').strip()}")
         if dreams:
             for dream in dreams:
                 lines.append(f"- [梦] {dream}")
@@ -356,7 +377,7 @@ class Diary:
         try:
             row = await self.store.fetch_one(
                 "SELECT display_name FROM mem_subject WHERE persona_id=? AND user_id=?",
-                (self.config.str("persona.id", "ling") or "ling", key),
+                (self.config.persona_id, key),
             )
             name = str((row or {}).get("display_name") or "").strip()
         except Exception:
@@ -394,7 +415,7 @@ class Diary:
     # ================================================================ 存取
     async def _insert(self, day_key: str, result: dict[str, Any], bundle: dict[str, Any]) -> int:
         refs = [int(a.get("id") or 0) for a in bundle.get("atoms", []) if int(a.get("id") or 0)]
-        persona = self.config.str("persona.id", "ling") or "ling"
+        persona = self.config.persona_id
         try:
             await self.store.execute(
                 "INSERT OR IGNORE INTO mem_diary(persona_id, day_key, created_at, title, text, mood, "
@@ -423,7 +444,7 @@ class Diary:
         return bool(row)
 
     async def get(self, day_key: str) -> dict[str, Any] | None:
-        persona = self.config.str("persona.id", "ling") or "ling"
+        persona = self.config.persona_id
         try:
             row = await self.store.fetch_one(
                 "SELECT * FROM mem_diary WHERE persona_id=? AND day_key=?",
@@ -434,7 +455,7 @@ class Diary:
         return self._shape(row) if row else None
 
     async def list(self, limit: int = 30, offset: int = 0) -> list[dict[str, Any]]:
-        persona = self.config.str("persona.id", "ling") or "ling"
+        persona = self.config.persona_id
         try:
             rows = await self.store.fetch_all(
                 "SELECT * FROM mem_diary WHERE persona_id=? AND hidden=0 "

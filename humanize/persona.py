@@ -15,6 +15,8 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core.prompt_parts import add_temp_part
+
 from ..core.contracts import Persona
 
 DEFAULT_IDENTITY = (
@@ -214,6 +216,26 @@ class PersonaService:
         result["default"] = str(getattr(manager, "default_persona", "default") or "default")
         return result
 
+    async def display_name(self) -> str:
+        """写作类模块（日记 / 说说）要用的「我是谁」。
+
+        astrbot 模式下取 AstrBot 当前人格的名字 —— 不然插件还叫自己「绫」，
+        而框架里挂的是别人，日记一开头就自我介绍了错的名字。
+        """
+        if self.mode == MODE_ASTRBOT:
+            try:
+                data = await self.available_personas()
+                items = data.get("items") or []
+                wanted = self.config.str("persona.astrbot_persona_id", "") or str(data.get("default") or "")
+                for item in items:
+                    if wanted and item.get("id") == wanted:
+                        return str(item.get("name") or wanted)
+                if items:
+                    return str(items[0].get("name") or "")
+            except Exception as exc:
+                logger.debug(f"[congling] 取 AstrBot 人格名失败: {exc!r}")
+        return self._persona.name or self.config.str("persona.name", "绫") or "绫"
+
     # ================================================================ 注入
     def style_text(self) -> str:
         style = self._persona.style or {}
@@ -251,26 +273,28 @@ class PersonaService:
         else:
             logger.debug("[congling] 人设来源=none，不注入任何人设")
 
+        # 静态人设（identity / style / taboos）每轮内容完全一样，留在 system_prompt
+        # 不影响前缀缓存；动态层（关系、状态、场景）每轮都变，必须走临时注入，
+        # 否则 system_prompt 每个请求都不同，prefix cache 全废 —— 这是上次审核打回的原因。
+        block = "\n\n".join(layer for layer in layers if layer)
+        if block:
+            marker = "<!--congling:persona-->"
+            existing = getattr(req, "system_prompt", "") or ""
+            if marker not in existing:
+                req.system_prompt = existing + f"\n\n{marker}\n{block}\n<!--congling:persona:end-->"
+
+        dynamic: list[str] = []
         relation = await self._relation_line(event)
         if relation:
-            layers.append(relation)
-
+            dynamic.append(relation)
         state = await self._state_line(event)
         if state:
-            layers.append(state)
-
+            dynamic.append(state)
         scene = self._scene_line(event)
         if scene:
-            layers.append(scene)
-
-        block = "\n\n".join(layer for layer in layers if layer)
-        if not block:
-            return
-        marker = "<!--congling:persona-->"
-        existing = getattr(req, "system_prompt", "") or ""
-        if marker in existing:
-            return
-        req.system_prompt = existing + f"\n\n{marker}\n{block}\n<!--congling:persona:end-->"
+            dynamic.append(scene)
+        if dynamic:
+            add_temp_part(req, "\n\n".join(dynamic), "<!--congling:persona:dynamic-->")
 
     # ---------------------------------------------------------------- 分层
     async def _relation_line(self, event: Any) -> str:

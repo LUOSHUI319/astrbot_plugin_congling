@@ -405,6 +405,11 @@ class MemoryV2Mixin:
             if key:
                 data["one"] = await mem.affinity.get(key)
                 data["name"] = await mem.subjects.display_name(key)
+                # 前端要据此显示"还会不会被自动加减"，不能由它自己猜
+                one = data["one"] or {}
+                data["manual"] = int(one.get("manual") or 0)
+                data["manual_override"] = bool(self.cfg.bool("memory.affinity.manual_override", False))
+                data["effective_frozen"] = bool(data["manual"] and data["manual_override"])
             data["ranking"] = await mem.affinity.leaderboard(10)
             return _ok(data)
         except Exception as exc:

@@ -277,6 +277,9 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
             ("/memory/delete", self.memory_delete, ["POST"]),
             ("/inbox", self.inbox, ["GET"]),
             ("/tools", self.tools, ["GET"]),
+            ("/subjects/merge_candidates", self.subject_merge_candidates, ["GET"]),
+            ("/subjects/merge", self.subject_merge, ["POST"]),
+            ("/subjects/rollback", self.subject_rollback, ["POST"]),
             ("/tools/test", self.tools_test, ["POST"]),
             ("/qzone", self.qzone, ["GET"]),
             ("/qzone/feed", self.qzone_feed, ["GET"]),
@@ -284,6 +287,7 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
             ("/qzone/auth", self.qzone_auth, ["POST"]),
             ("/admins", self.admins, ["GET"]),
             ("/health", self.health, ["GET"]),
+            ("/diagnostics", self.diagnostics_tail, ["GET"]),
             ("/night/state", self.night_state, ["GET"]),
             ("/night/dreams", self.night_dreams, ["GET"]),
             ("/night/wake", self.night_wake, ["POST"]),
@@ -606,6 +610,56 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
         except Exception as exc:
             return _err(repr(exc)[:200])
 
+    # ================================================================ 主体归并
+    async def subject_merge_candidates(self) -> dict[str, Any]:
+        try:
+            mem = getattr(self.plugin, "memory", None)
+            if mem is None:
+                return _err("记忆模块未就绪")
+            items = await mem.subjects.merge_candidates()
+            return _ok({"items": items, "count": len(items)})
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def subject_rollback(self) -> dict[str, Any]:
+        """撤销一次主体合并。之后有新写入会被拒绝，避免把别人的数据带回去。"""
+        try:
+            mem = getattr(self.plugin, "memory", None)
+            if mem is None:
+                return _err("记忆模块未就绪")
+            body = await _body()
+            run_id = str(body.get("run_id") or "").strip()
+            if not run_id:
+                return _err("缺 run_id")
+            result = await mem.subjects.rollback_merge(run_id)
+            return _ok(result) if result.get("ok") else _err(str(result.get("error") or "撤销失败"))
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def subject_merge(self) -> dict[str, Any]:
+        try:
+            mem = getattr(self.plugin, "memory", None)
+            if mem is None:
+                return _err("记忆模块未就绪")
+            body = await _body()
+            pairs = body.get("pairs")
+            if not isinstance(pairs, list) or not pairs:
+                return _err("没有勾选要合并的项")
+            result = await mem.subjects.merge_subjects(pairs)
+            return _ok(result) if result.get("ok") else _err(str(result.get("error") or "合并失败"))
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def diagnostics_tail(self) -> dict[str, Any]:
+        """最近一条诊断轨迹，只读。排查"为什么没生效"时先看这个。"""
+        try:
+            diag = getattr(self.plugin, "diag", None)
+            if diag is None:
+                return _err("诊断模块未就绪")
+            return _ok({"items": await diag.tail(30)})
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
     async def tools_test(self) -> dict[str, Any]:
         try:
             if self.plugin.capabilities is None:
@@ -614,16 +668,23 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
             name = str(body.get("name") or "").strip()
             if not name:
                 return _err("没给能力名")
+            # 前端一直发的是 params，后端只认 args，于是"试跑"永远等于空参调用
             args = body.get("args")
+            if not isinstance(args, dict):
+                args = body.get("params")
             kwargs = args if isinstance(args, dict) else {}
             result = await self.plugin.capabilities.invoke(name, admin=True, **kwargs)
+            elapsed = getattr(result, "elapsed", None)
+            if elapsed is None:
+                elapsed = getattr(result, "ms", 0)
             return _ok(
                 {
                     "name": name,
                     "ok": bool(getattr(result, "ok", False)),
                     "text": str(getattr(result, "text", "") or ""),
                     "error": str(getattr(result, "error", "") or ""),
-                    "ms": getattr(result, "ms", 0),
+                    "ms": elapsed,
+                    "cached": bool(getattr(result, "cached", False)),
                     "data": getattr(result, "data", None),
                 }
             )

@@ -53,6 +53,18 @@ class Maintenance:
         """
         curve = ForgettingCurve(self.plugin)
         now = int(time.time())
+
+        # 业务日幂等：同一天被触发两次（重启、多实例、定时器抖动）会把衰减系数乘两次。
+        # 用「人设 + 业务日 + phase」做标记，成功跑完才写，失败不落标。
+        day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+        mark_key = f"maintenance:decay:{self.config.persona_id}:{day_key}"
+        try:
+            if await self.store.kv_get(mark_key, "") == "done":
+                logger.debug(f"[congling] 今天已经衰减过（{day_key}），跳过")
+                return 0
+        except Exception:
+            pass
+
         archive_days = self.config.int("memory.archive_after_days", 30)
         forget_days = self.config.int("memory.forget_after_days", 90)
 
@@ -85,7 +97,8 @@ class Maintenance:
         for row in rows:
             if int(row.get("protect") or 0):
                 continue
-            level = int(row.get("mem_level") or 3)
+            _lv = row.get("mem_level")
+            level = 3 if _lv is None or _lv == "" else int(_lv)
             if level <= 0:
                 continue
             last = max(int(row.get("last_hit_at") or 0), int(row.get("created_at") or 0))
@@ -108,6 +121,11 @@ class Maintenance:
             await self.store.executemany(
                 "UPDATE mem_atom SET decay=?, status=?, next_review_at=? WHERE id=?", updates
             )
+        # 跑完才落标：中途抛异常不会写，下次还会重试
+        try:
+            await self.store.kv_set(mark_key, "done")
+        except Exception:
+            pass
         return changed
 
     async def reflect(self) -> None:

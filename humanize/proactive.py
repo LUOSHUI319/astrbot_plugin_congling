@@ -486,7 +486,7 @@ class Proactive:
                 "INSERT INTO proactive_log(persona_id, session_id, umo, at, reason, text, kind) "
                 "VALUES(?,?,?,?,?,?,?)",
                 (
-                    self.config.str("persona.id", "ling") or "ling",
+                    self.config.persona_id,
                     session_id,
                     umo,
                     int(time.time()),

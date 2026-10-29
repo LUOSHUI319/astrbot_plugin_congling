@@ -1089,6 +1089,9 @@
   position: relative;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* 不要 contain: paint / translateZ(0)：前者会裁掉溢出绘制（滚动时整块变黑），
+     后者提升合成层后容易和纹理更新不同步。只用 will-change 给个提示。 */
+  will-change: scroll-position;
   scrollbar-width: thin;
   scrollbar-color: rgba(236, 226, 205, .2) transparent;
   -webkit-overflow-scrolling: touch;
@@ -2252,23 +2255,30 @@
 :root[data-ui="night"] .aff-ops {
   display: inline-flex;
   margin-left: auto;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity .16s var(--ease);
+  gap: 6px;
+  /* 以前默认 opacity:0，只在 hover/focus 时显示。手机没有 hover，
+     等于这排加减按钮在移动端根本不存在 —— 用户反馈调不了分数就是这个。 */
+  opacity: 1;
+  transition: none;
 }
 :root[data-ui="night"] .nj-rank li:hover .aff-ops,
 :root[data-ui="night"] .nj-rank li:focus-within .aff-ops { opacity: 1; }
 :root[data-ui="night"] .aff-ops button {
-  width: 18px;
-  height: 18px;
-  padding: 0;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 6px;
   border: 1px solid var(--nj-line);
-  border-radius: 5px;
+  border-radius: 6px;
   background: none;
   color: var(--nj-ink-3);
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+/* 触屏设备上再放大一档，手指点得准 */
+@media (pointer: coarse) {
+  :root[data-ui="night"] .aff-ops button { min-width: 40px; min-height: 40px; font-size: 17px; }
 }
 :root[data-ui="night"] .aff-ops button:hover { color: var(--nj-gold-2); border-color: var(--nj-gold); }
 :root[data-ui="night"] .aff-ops button:disabled { opacity: .35; cursor: default; }
@@ -3247,3 +3257,11 @@
 .nj-stage-legend span[data-stage="n2"]::before { background: #6d9b88; }
 .nj-stage-legend span[data-stage="n3"]::before { background: #5f6ea8; }
 .nj-stage-legend span[data-stage="rem"]::before { background: #b79a5e; }
+
+
+/* 全局 tooltip 在夜航皮肤下的配色：深底浅字，跟界面统一 */
+:root[data-ui="night"] #cg-tip {
+  background: #f3eee3;
+  color: #0e1713;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .55), 0 0 0 1px rgba(243, 238, 227, .12);
+}

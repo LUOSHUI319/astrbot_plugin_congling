@@ -13,7 +13,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.contracts import NIGHT_ASLEEP, NIGHT_AWAKE, PerceivedMessage
+from ..core.contracts import NIGHT_ASLEEP, NIGHT_AWAKE, NIGHT_WAKING, PerceivedMessage
 from .close import close_minutes, is_closing, match_strength
 from .crawl import Crawler
 from .dream import Dreamer
@@ -42,6 +42,8 @@ class NightModule:
         self.crawler = Crawler(plugin)
         self._waking_started: dict[str, int] = {}
         self.pending_sleep: dict[str, Any] | None = None
+        # 爬楼语念过哪些会话（crawl_announce=once 时用）
+        self._announced: set[str] = set()
         self.morning_dream: Any = None
 
     # ================================================================ 生命周期
@@ -173,11 +175,20 @@ class NightModule:
         except Exception as exc:
             logger.debug(f"[congling] 爬楼判定失败: {exc!r}")
             return ""
-        try:
-            line = await self.crawler.crawl_line()
-        except Exception as exc:
-            logger.debug(f"[congling] 爬楼语生成失败: {exc!r}")
-            line = ""
+        # 静默档：off 只清未读不说话；once 每个会话只念一次；always 每次都念。
+        # 半夜被叫醒先来一句"我去翻翻"其实很人机，off 就是给这种情况留的。
+        mode = str(self.config.str("night.crawl_announce", "once") or "once").strip().lower()
+        announce = mode != "off"
+        if mode == "once" and session_id in self._announced:
+            announce = False
+        line = ""
+        if announce:
+            try:
+                line = await self.crawler.crawl_line()
+            except Exception as exc:
+                logger.debug(f"[congling] 爬楼语生成失败: {exc!r}")
+                line = ""
+        self._announced.add(session_id)
         try:
             removed = await self.crawler.mark_read(session_id)
             await self.crawler.mark_crawled(session_id)
@@ -240,7 +251,10 @@ class NightModule:
     def prompt_hint(self) -> str:
         """给 system prompt 加一段作息状态。空串表示不用加。"""
         state = self.state.state
-        if state.mode == "asleep":
+        if state.mode == "asleep" and not self.pending_sleep:
+            # 只挡「真的睡着了」。pending_sleep 表示"这条回完就睡"，
+            # 那时候必须继续往下走，好让下面那段把道别要求加进 prompt ——
+            # 原来这里一律 return ""，睡前道别永远没机会出现。
             return ""
 
         from . import energy as energy_mod

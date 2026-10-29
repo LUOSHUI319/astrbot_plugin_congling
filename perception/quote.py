@@ -79,11 +79,20 @@ class QuoteExpander:
         except Exception as exc:
             logger.debug(f"[congling] 拉取被引用消息失败: {exc!r}")
             return ""
-        payload = data.get("data") if isinstance(data, dict) else {}
-        if isinstance(payload, dict):
-            raw = payload.get("message") or payload.get("raw_message") or ""
-            if isinstance(raw, str):
-                return raw
-            if isinstance(raw, list):
-                return self._chain_to_text(raw)
+        if not isinstance(data, dict):
+            return ""
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            # 有的实现不套 data 壳，直接把 message/sender 放在顶层，
+            # 原来一律 payload = {} 就把这种回包整个丢了
+            payload = data
+        # 少数实现再用一层 result 包着
+        inner = payload.get("result")
+        if isinstance(inner, dict):
+            payload = inner
+        raw = payload.get("message") or payload.get("raw_message") or payload.get("content") or ""
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, list):
+            return self._chain_to_text(raw)
         return ""

@@ -25,9 +25,37 @@ def norm_hash(text: str) -> str:
     return hashlib.sha1(cleaned.encode("utf-8", "ignore")).hexdigest()[:24]
 
 
+# 「不 / 没 / 别」这类否定词一换，意思就反了。字符集 Jaccard 看不见这种差别，
+# 会把「我喜欢周末看电影」和「我不喜欢周末看电影」判成 94% 重复。
+_NEGATIONS = ("不", "没", "别", "勿", "未", "无", "甭")
+
+
+def negation_signature(text: str) -> frozenset[str]:
+    """文本里出现过哪些否定字，用来挡住「加个不字就被当复述」。"""
+    body = str(text or "")
+    return frozenset(ch for ch in _NEGATIONS if ch in body)
+
+
+def level_of(value: Any, default: int = 3) -> int:
+    """解析记忆等级。
+
+    0 是「不可忘」，它是个有意义的值，不能被 `or 3` 吞掉 —— 老代码
+    `int(x or 3)` 把 0 全变成了 3，禁区保护因此形同虚设。
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return max(0, min(5, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def similarity(a: str, b: str) -> float:
     left, right = set(a or ""), set(b or "")
     if not left or not right:
+        return 0.0
+    # 否定结构不同，直接判不相似，交给上层新增而不是强化旧条目
+    if negation_signature(a) != negation_signature(b):
         return 0.0
     return len(left & right) / len(left | right)
 
@@ -69,7 +97,12 @@ class AtomStore:
         text = (draft.text or "").strip()
         if not text:
             return 0
-        subject = draft.subject or subject
+        # 调用方算出来的主体（_prepare_drafts 反查过说话人）才是可信的。
+        # 模型给的 subject 只是自然语言文本，拿它当主键会把同一个人拆成
+        # 「望山」「望山（定制插件/远程部署）」好几份 —— 现实里已经发生了。
+        # subject_key 才是 _prepare_drafts 认出来的主体（QQ 号或已确认主体），
+        # draft.subject 只是模型写的自然语言称呼，只能兜底。
+        subject = getattr(draft, "subject_key", "") or subject or draft.subject
         digest = norm_hash(text)
 
         # 1) 精确重复
@@ -110,7 +143,7 @@ class AtomStore:
         now = int(time.time())
         # 等级：0 不可忘 / 1~5 依次加重。等级决定初始强度、衰减速度和复习时间
         try:
-            level = max(0, min(5, int(getattr(draft, "level", 3) or 3)))
+            level = level_of(getattr(draft, "level", 3))
         except (TypeError, ValueError):
             level = 3
         strength = STRENGTH.get(level, 0.65)
@@ -369,6 +402,12 @@ class AtomStore:
                 continue
             sets.append(f"{key}=?")
             params.append(value)
+        # 改正文时必须重算归一化 hash：它是"精确重复"判定的依据。
+        # 原来只改 text 不更新 norm_hash，旧 hash 会继续参与去重，
+        # 于是改过的条目永远匹配不上、还会和新写的同义条重复。
+        if "text" in fields and isinstance(fields.get("text"), str):
+            sets.append("norm_hash=?")
+            params.append(norm_hash(fields["text"]))
         if not sets:
             return
         params.append(int(atom_id))

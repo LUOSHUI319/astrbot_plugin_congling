@@ -21,7 +21,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "include_group_role": False,
     },
     "persona": {
-        "mode": "builtin",
+        "mode": "astrbot",
         "astrbot_persona_id": "",
         "persona_id": "ling",
         "name": "绫",
@@ -84,6 +84,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "inject_top_k": 5,
         "inject_budget_ratio": 0.25,
         "cross_session_recall": True,
+        # 跨会话补齐的受众范围（普通用户）：off / same_user / whitelist / all
+        "cross_session_scope": "same_user",
+        # 跨会话补齐的受众范围（管理员）：off / self / all
+        # self 是推荐默认 —— 只看管理员自己参与过的会话，不碰别人的私聊
+        "cross_session_admin_mode": "self",
+        # whitelist 档用的会话白名单；空列表等于关闭，不会退化成全库
+        "cross_session_whitelist": [],
         "decay_factor": 0.985,
         "archive_after_days": 30,
         "forget_after_days": 90,

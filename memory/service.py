@@ -211,7 +211,11 @@ class MemoryService:
             logger.debug("[congling] 记忆已让位给外部插件")
             return
 
-        msg: PerceivedMessage | None = getattr(self.plugin, "_last_perceived", None)
+        # 先看事件自己带着的消息，再退回全局变量。
+        # 全局变量是「最后一次被感知的消息」，两个会话并发时 A 会用 B 的话去搜。
+        msg: PerceivedMessage | None = getattr(event, "_congling_msg", None)
+        if msg is None:
+            msg = getattr(self.plugin, "_last_perceived", None)
         if msg is None:
             return
 
@@ -252,7 +256,27 @@ class MemoryService:
             logger.debug(f"[congling] 记忆召回失败: {exc!r}")
             return
         # 当前会话不够时跨会话补齐：混着查，但每条都带 [私聊 望山] 这种来源标签
-        if len(hits) < top_k and self.config.bool("memory.cross_session_recall", True):
+        # 跨会话档位：管理员和普通用户分开配。
+        # 「管理员 → 全库」这句话里藏着危险：全库包含别人的私聊。
+        # self 是推荐默认 —— 管理员能记得自己参与过的所有会话，但不碰别人的私聊。
+        is_admin = False
+        try:
+            checker = getattr(self.plugin, "is_admin", None)
+            if callable(checker):
+                is_admin = bool(checker(event))
+        except Exception:
+            is_admin = False
+        if is_admin:
+            cs_mode = str(self.config.str("memory.cross_session_admin_mode", "self") or "self")
+        else:
+            cs_mode = str(self.config.str("memory.cross_session_scope", "same_user") or "same_user")
+        cs_mode = cs_mode.strip().lower()
+        if cs_mode == "self":
+            cs_mode = "same_user"
+        if getattr(self.plugin, "diag", None) is not None:
+            await self.plugin.diag.trace("cross_session", admin=is_admin, mode=cs_mode)
+
+        if len(hits) < top_k and cs_mode != "off" and self.config.bool("memory.cross_session_recall", True):
             try:
                 seen = {hit.atom_id for hit in hits}
                 extra = await self.retriever.search(
@@ -262,6 +286,7 @@ class MemoryService:
                     exclude=recent_ids | seen,
                     k=top_k - len(hits),
                     cross_session=True,
+                    mode=cs_mode,
                 )
                 hits = hits + [hit for hit in extra if hit.atom_id not in seen]
             except Exception as exc:
@@ -276,12 +301,32 @@ class MemoryService:
                     extras.append(aff)
             except Exception as exc:
                 logger.debug(f"[congling] 好感度注入失败: {exc!r}")
+            # 受众门禁：画像只在这个人的私聊里注入。
+            # 群聊里注进去，她就会当着一屋子人说出"我对你这个人的印象"，
+            # 甚至是别处攒下的私密认识 —— 你库里群聊记忆占 98%，这个口子必须堵。
+            inject_profile = True
             try:
-                prof = await self.profiles.prompt_hint(speaker_key)
-                if prof:
-                    extras.append(f"你对 TA 已有的认识：{prof}")
-            except Exception as exc:
-                logger.debug(f"[congling] 画像注入失败: {exc!r}")
+                session_kind = str(getattr(msg, "session_kind", "") or "")
+                if session_kind == "group":
+                    inject_profile = bool(self.config.bool("memory.profile_inject_in_group", False))
+                elif str(getattr(msg, "sender_id", "") or "") != str(speaker_key or ""):
+                    # 私聊但主体对不上说话人（比如在群里聊第三人），不注入
+                    inject_profile = False
+            except Exception:
+                inject_profile = False
+            if inject_profile:
+                try:
+                    prof = await self.profiles.prompt_hint(speaker_key)
+                    if prof:
+                        extras.append(f"你对 TA 已有的认识：{prof}")
+                except Exception as exc:
+                    logger.debug(f"[congling] 画像注入失败: {exc!r}")
+            if getattr(self.plugin, "diag", None) is not None:
+                await self.plugin.diag.trace(
+                    "profile_gate",
+                    kind=str(getattr(msg, "session_kind", "")),
+                    injected=inject_profile,
+                )
 
         if not hits and not extras:
             return
@@ -449,7 +494,8 @@ class MemoryService:
         max_row = max(int(row["id"]) for row in rows)
         try:
             drafts = await self.extractor.extract(turns)
-            ok = bool(getattr(self.extractor, "last_ok", True))
+            # 默认 False：拿不到明确成功信号就不推水位，宁可下一轮重试
+            ok = bool(getattr(self.extractor, "last_ok", False))
             try:
                 await self.store.kv_set(
                     "memory:last_extract",
@@ -479,9 +525,18 @@ class MemoryService:
                     await self._link_subjects(drafts, ids)
                     await self.plugin.bus.emit(self.plugin.bus.ON_MEMORY_WRITTEN, drafts)
                     logger.debug(f"[congling] 写入 {len(ids)} 条记忆（{session_id}）")
-            # 只有解析成功才推水位：模型返回废话或调用失败，下一轮还要重试
+            # 只有解析成功才推水位：模型返回废话或调用失败，下一轮还要重试。
+            # 另外只推到「真的送进模型」的最后一行 —— 被 6000 字符截掉的尾巴
+            # 下一轮还得重新抽，不能让它们静默消失。
             if ok:
-                await self._set_water(session_id, max_row)
+                target = max_row
+                used = getattr(self.extractor, "consumed_turns", None)
+                if isinstance(used, list) and used and len(used) < len(rows):
+                    last_idx = max(used)
+                    if 0 <= last_idx < len(rows):
+                        target = int(rows[last_idx]["id"])
+                if target > 0:
+                    await self._set_water(session_id, target)
         except Exception as exc:
             logger.debug(f"[congling] 记忆抽取失败: {exc!r}")
             try:
@@ -501,23 +556,36 @@ class MemoryService:
         顺序不能反：先认出「这条说的是谁」，才知道该按谁的好感度去调等级。
         群里一句话可能是别人说的，所以只在草稿主体对得上最后一位发言人时才用他的 QQ 号。
         """
-        sender_id = ""
-        sender_name = ""
+        # 逐条证据反查说话人。以前是"整批都用最后一个发言人"，于是群里
+        # A 说「B 昨天吵架了」也会记到 A 头上，主体就这么分裂出去的。
+        by_idx = {
+            str(i): (str(r.get("sender_id") or ""), str(r.get("sender_name") or ""))
+            for i, r in enumerate(rows)
+        }
+        tail_id, tail_name = "", ""
         for row in reversed(rows):
-            sid = str(row.get("sender_id") or "")
-            if sid:
-                sender_id = sid
-                sender_name = str(row.get("sender_name") or "")
+            if str(row.get("sender_id") or ""):
+                tail_id = str(row.get("sender_id"))
+                tail_name = str(row.get("sender_name") or "")
                 break
+
         for draft in drafts:
             try:
                 hint = str(draft.subject or "").strip()
+                ev_id, ev_name = "", ""
+                for token in (getattr(draft, "evidence_msg_ids", []) or []):
+                    idx = str(token).lstrip("#").strip()
+                    if idx in by_idx and by_idx[idx][0]:
+                        ev_id, ev_name = by_idx[idx]
+                        break
+                speaker_id = ev_id or tail_id
+                speaker_name = ev_name or tail_name
                 same_person = bool(
-                    hint and sender_name and (hint == sender_name or hint in sender_name or sender_name in hint)
+                    hint and speaker_name and (hint == speaker_name or hint in speaker_name or speaker_name in hint)
                 )
                 key = await self.subjects.identify(
-                    sender_id=sender_id if (same_person or not hint) else "",
-                    sender_name=sender_name if same_person else "",
+                    sender_id=speaker_id if (same_person or not hint) else "",
+                    sender_name=speaker_name if same_person else "",
                     subject_text=hint,
                 )
                 draft.subject_key = key

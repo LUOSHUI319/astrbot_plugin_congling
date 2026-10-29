@@ -161,6 +161,22 @@ class ProfileBook:
         }
 
     # ------------------------------------------------------------ 读改删
+    @staticmethod
+    def _loads(raw: Any, default: Any) -> Any:
+        """把库里存的 JSON 文本还原成对象。
+
+        这个方法以前压根不存在，凡是有画像数据的人一调 get() 就
+        AttributeError，整个画像功能等于不可用。
+        """
+        if raw in (None, "", b""):
+            return default
+        if not isinstance(raw, str):
+            return raw
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return default
+
     async def get(self, subject_key: str) -> dict[str, Any]:
         key = str(subject_key or "").strip()
         row = await self.store.fetch_one(

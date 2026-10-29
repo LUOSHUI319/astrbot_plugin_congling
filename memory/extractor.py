@@ -49,12 +49,15 @@ class MemoryExtractor:
         self.config = plugin.cfg
         # 本次抽取是否真的拿到并解析了模型输出；失败时不能推进对话水位
         self.last_ok = False
+        # 上一次真正送进模型的 turn 下标，用来决定水位推到哪里
+        self.consumed_turns: list[int] = []
 
     async def extract(self, turns: list[dict[str, Any]]) -> list[MemoryDraft]:
         self.last_ok = False
         if not turns:
             return []
-        conversation = self._render(turns)
+        conversation, consumed = self._render(turns)
+        self.consumed_turns = consumed
         if not conversation.strip():
             return []
 
@@ -73,7 +76,7 @@ class MemoryExtractor:
         prompt = (
             PROMPT.replace("{today}", time.strftime("%Y-%m-%d", time.localtime()))
             .replace("{max_atoms}", str(max_atoms))
-            .replace("{conversation}", conversation[:MAX_INPUT_CHARS])
+            .replace("{conversation}", conversation)
         )
         try:
             resp = await provider.text_chat(prompt=prompt, contexts=[])
@@ -83,7 +86,10 @@ class MemoryExtractor:
             return []
 
         payload = self._parse(raw)
-        self.last_ok = bool(raw and ("[" in raw))
+        # 解析成功（哪怕返回空数组）才允许推水位；只有 "[" 不算
+        self.last_ok = isinstance(payload, list)
+        if payload is None:
+            payload = []
         try:
             await self.plugin.store.kv_set(
                 "memory:last_raw",
@@ -147,8 +153,15 @@ class MemoryExtractor:
             return None
 
     @staticmethod
-    def _render(turns: list[dict[str, Any]]) -> str:
+    def _render(turns: list[dict[str, Any]], limit: int = MAX_INPUT_CHARS) -> tuple[str, list[int]]:
+        """拼成对话文本，同时返回**真的被送进模型**的那些 turn 下标。
+
+        以前是先拼全文再在 prompt 里切 [:6000]，切掉的尾巴没人知道，
+        水位却照样推到整批末尾 —— 那部分内容等于被静默丢弃。
+        """
         lines: list[str] = []
+        used: list[int] = []
+        total = 0
         for turn in turns:
             is_user = turn.get("role") == "user"
             text = str(turn.get("text") or "").strip().replace("\n", " ")
@@ -160,24 +173,30 @@ class MemoryExtractor:
             # 群里要能看出是谁说的，否则事实会记到别人头上
             name = str(turn.get("sender_name") or "").strip()
             who = name if (is_user and name) else ("用户" if is_user else "机器人")
-            lines.append(f"[{turn.get('idx', 0)}] {stamp} {who}: {text}")
-        return "\n".join(lines)
+            line = f"[{turn.get('idx', 0)}] {stamp} {who}: {text}"
+            if lines and total + len(line) + 1 > limit:
+                break
+            lines.append(line)
+            used.append(int(turn.get("idx", 0)))
+            total += len(line) + 1
+        return "\n".join(lines), used
 
     @staticmethod
-    def _parse(raw: str) -> list[Any]:
+    def _parse(raw: str) -> list[Any] | None:
+        """解析成功返回 list（可能为空），失败返回 None。"""
         raw = (raw or "").strip()
         if not raw:
-            return []
+            return None
         # 去掉 ```json 包裹
         raw = re.sub(r"^```[a-zA-Z]*\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         start = raw.find("[")
         end = raw.rfind("]")
         if start == -1 or end == -1 or end <= start:
-            return []
+            return None
         try:
             data = json.loads(raw[start : end + 1])
         except ValueError:
             logger.debug("[congling] 记忆抽取返回不是合法 JSON")
-            return []
+            return None
         return data if isinstance(data, list) else []

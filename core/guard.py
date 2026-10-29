@@ -22,7 +22,8 @@ _EMOJI_RE = re.compile(
     "\U0000fe0f"
     "\U0000200d"
     "\U00002b00-\U00002bff"
-    "\U00002190-\U000021ff"
+    # 箭头区（2190-21FF）故意不删：← → ↑ ↓ ⇒ 这些在正文里是有语义的，
+    # 「A → B」「↑ 这个」被当成 emoji 抹掉，意思就断了。
     "\U0000fe00-\U0000fe0f"
     "]+",
     flags=re.UNICODE,
@@ -125,9 +126,13 @@ class OutputGuard:
         target = set(text)
         if not target:
             return False
+        neg = {ch for ch in ("不", "没", "别", "勿", "未", "无", "甭") if ch in text}
         for item in recent:
             other = set(item or "")
             if not other:
+                continue
+            # 否定结构不同的两句话不是重复，别把"我不去"当成"我去"复述掉
+            if {ch for ch in ("不", "没", "别", "勿", "未", "无", "甭") if ch in str(item or "")} != neg:
                 continue
             inter = len(target & other)
             union = len(target | other)

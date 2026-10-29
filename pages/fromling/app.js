@@ -209,6 +209,16 @@ async function post(path, body) {
 }
 
 /* ------------------------------------------------------------------ 工具 */
+// 手改不等于冻结：真正决定「还会不会被自动加减」的是 manual_override，
+// 而它默认是 false。以前这里无条件写「不再被自动加减」，跟实际行为相反。
+function affFrozenHint(data) {
+  const manual = Number(data && data.manual) === 1;
+  const frozen = !!(data && data.manual_override);
+  if (manual && frozen) return "已停用自动加减，分数只按你设的走";
+  if (manual) return "已手动设置，仍会参与每日自动结算";
+  return "还没手改过";
+}
+
 function esc(value) {
   return String(value == null ? "" : value)
     .replace(/&/g, "&amp;")
@@ -839,7 +849,7 @@ async function renderNight() {
   const [stateData, settings, dreamData, unreadData] = await Promise.all([
     needState ? get("night/state").catch(() => ({})) : Promise.resolve({}),
     needSettings ? loadSettings() : Promise.resolve(null),
-    needDreams ? get("/night/dreams", { limit: 40 }).catch(() => ({ items: [], nights: [], stats: {} })) : Promise.resolve(null),
+    needDreams ? get("/night/dreams", { limit: 40 }).catch((err) => ({ __error: String((err && err.message) || err) })) : Promise.resolve(null),
     needUnread ? get("/night/unread", { limit: 40 }).catch(() => ({ items: [] })) : Promise.resolve(null),
   ]);
 
@@ -944,6 +954,7 @@ async function renderNight() {
 /* ------------------------------------------------------------------ 路由 */
 const VIEWS = {
   overview: { title: "概览", render: renderOverview },
+  changelog: { title: "更新日志", render: renderChangelog },
   persona: { title: "人格", render: renderPersona },
   behavior: { title: "行为", render: renderBehavior },
   memory: { title: "记忆", render: renderMemory },
@@ -962,6 +973,10 @@ let settingsCache = null;
 /* 二级栏目：一个一级视图下面挂几个子页。
    没在这里登记的视图不显示子页栏，保持原来的长页。 */
 const SUBTABS = {
+  changelog: [
+    { key: "fixes", title: "问题与修复", render: () => renderChangelog("fixes") },
+    { key: "news", title: "新功能", render: () => renderChangelog("news") },
+  ],
   memory: [
     { key: "summary", title: "记忆总览", render: renderM3Overview },
     /* 0.7.0：「按用户分」取消，认识的人合并进好感度页 */
@@ -969,6 +984,7 @@ const SUBTABS = {
     { key: "library", title: "记忆库", render: () => renderMemory() },
     { key: "levels", title: "等级与遗忘", render: renderMemoryLevels },
     { key: "affinity", title: "好感度", render: renderAffinityPage },
+    { key: "merge", title: "主体合并", render: renderSubjectMerge },
   ],
   behavior: [
     { key: "express", title: "表达", render: () => renderBehavior() },
@@ -1244,6 +1260,188 @@ function pageActions(label) {
 }
 
 /* ------------------------------------------------------------------ 概览 */
+/* ------------------------------------------------------------------ 更新日志
+   0.7.3 → 1.0.0 的大更新。三块：出了什么问题、怎么修的、新功能在哪找。 */
+function changelogHtml(key) {
+  const sec = (title, inner) => `<h4 style="margin:16px 0 8px;font-size:14px;color:var(--accent,#c8a86a)">${title}</h4>${inner}`;
+  const item = (head, body) => `<li><b>${head}</b><span>${body}</span></li>`;
+  const ul = (inner) => `<ol class="cl-list">${inner}</ol>`;
+
+  const merged = ul([
+    item("发现并修复「唤醒后无响应」的问题",
+      "唤醒时仅更新状态标志，未记录起始时间与待补会话，状态机无法完成转移。修复后统一出口写入状态、起始时间、待补会话三项，并增加 5 分钟超时兜底。"),
+    item("发现并修复「睡眠与唤醒状态未区分」的问题",
+      "判定逻辑将 waking 视同 asleep，唤醒瞬间的消息仍被拦截。修复后 is_asleep() 仅匹配 asleep，waking 由独立方法判定。"),
+    item("发现并修复「补看消息从未执行」的问题",
+      "缺少常量导入，函数入口即抛异常并被兜底吞掉。修复后补全导入，该流程首次可正常执行。"),
+    item("发现并修复「作息依赖消息驱动」的问题",
+      "无独立心跳，无消息时状态机停止推进。修复后启动流程注册节拍任务，周期 60 秒，tick 按 last_tick 补算。"),
+    item("发现并修复「主动调度周期错误」的问题",
+      "调度挂载于小时级任务，实际周期为设计值的 60 倍。修复后迁至心跳循环，恢复分钟级。"),
+    item("发现并修复「精力补算偏移」的问题",
+      "以终点时刻的阶段系数乘整段时长，深睡区间被低估。修复后按阶段边界切分、逐段以中点系数累加，同一场景 594 修正为 724.8。"),
+    item("发现并修复「并发会话记忆串扰」的问题",
+      "注入查询读取全局「最后一条消息」，多会话并发时取到其他会话内容。修复后将消息挂载至 event，各模块从 event 读取。"),
+    item("发现并修复「跨会话召回缺少受众边界」的问题",
+      "检索条件仅限定 persona，未限定 subject，候选池覆盖全库。修复后拆分为普通用户四档与管理员三档，默认收在最保守一档。"),
+    item("发现并修复「人格键名不一致」的问题",
+      "部分查询读取 persona.id 而非 persona_id。修复后统一为 persona_id。"),
+    item("发现并修复「主体识别错误」的问题",
+      "整批草稿沿用最后发言人，模型输出称谓被当作主键，同一人被拆成多条并导致好感度重复结算。修复后按证据反查真实发送者、优先使用 subject_key 入库，并提供历史数据合并工具。"),
+    item("发现并修复「等级 0 被降级」的问题",
+      "int(x or 3) 将 0 转为 3，不可遗忘标记失效。修复后仅 None 取默认值，0 原样保留。"),
+    item("发现并修复「否定语义未参与去重」的问题",
+      "相似度基于字符重合，肯定与否定被判 94% 相同并合并。修复后否定、数字、时间差异均判为不相似。"),
+    item("发现并修复「抽取水位超前」的问题",
+      "输入按 6000 字符截断，水位却推进至整批末尾，尾部不再抽取。修复后仅推进至实际送入模型的行，解析成功需完整结构。"),
+    item("发现并修复「语音转写始终失败」的问题",
+      "调用不存在的 hub.mode()，异常被吞，STT 服务同时未启用。修复后改为 hub.route() 并启用 provider。"),
+    item("发现并修复「画像读取异常」的问题",
+      "profiles.get() 调用未定义的 _loads()，存在画像数据即抛异常。修复后补全该方法。"),
+    item("发现并修复「道别提示被屏蔽」的问题",
+      "prompt_hint() 在 asleep 分支提前返回，待睡状态同样命中。修复后条件改为「asleep 且无待睡意图」。"),
+    item("发现并修复「归档数据损坏」的问题",
+      "空 msg_id 以 IS '' 去重导致首条之后全部丢弃，blocks_json 硬截断产生非法结构。修复后空 id 生成合成键，超长内容从尾部整块丢弃。"),
+    item("发现并修复「输出清洗误删正文」的问题",
+      "emoji 正则包含箭头区 U+2190–U+21FF。修复后该区间移出正则，正文箭头不再被移除。"),
+    item("确认「流式输出跳过分句」为设计行为",
+      "流式边生成边发，分句会破坏体验，故代码中明确跳过。未作修改，与分句功能互斥。"),
+    item("发现并修复「交互元素不可见」的问题",
+      "加减按钮默认 opacity: 0，依赖 hover 触发，移动端无悬停行为。修复后改为常显，尺寸 18→32（触屏 40）。"),
+  ]);
+
+  const FEATURES = [
+    {
+      name: "主体合并",
+      path: "记忆 → 主体合并",
+      intro: "把同一个人被拆出来的多个称呼合并成一条。",
+      how: "点「扫描重复主体」，系统按已确认的别名匹配出候选，每行显示「旧称呼 → 目标 → 匹配依据 → 关联记忆数」。勾选后点「合并选中」，需要再点一次确认。",
+      note: "合并会同时迁移记忆、合并好感度、把旧称呼写进别名。操作不可逆，但有撤销通道。",
+    },
+    {
+      name: "合并撤销",
+      path: "合并成功后原地出现",
+      intro: "每次合并生成一个批次号，可整批退回。",
+      how: "合并完成后原按钮位置会出现「撤销这次合并」，旁边带批次号。点击即回滚该批次涉及的全部记忆与主体。",
+      note: "若合并之后目标主体上已产生新记忆，撤销会被拒绝并给出原因 —— 避免把新数据一起带回旧主体。",
+    },
+    {
+      name: "跨会话检索分档",
+      path: "记忆 → 记忆库 → 记忆设置",
+      intro: "控制「除了当前会话，还能去哪些会话里找记忆」。",
+      how: "在「记忆库」页拉到底，展开「记忆设置」，共四项：允许跨会话检索（总开关）、普通用户档、管理员档、白名单。三档含义：off 只查当前会话；same_user / self 只查这个人自己说过的话；all 查全库。",
+      note: "默认收在最保守一档：管理员也看不到别人的私聊。选 all 时面板会提示模型可能复述他人私密内容。",
+    },
+    {
+      name: "诊断轨迹",
+      path: "GET /diagnostics",
+      intro: "统一记录各阶段的执行结果，用于回答「为什么这个功能没生效」。",
+      how: "环形缓冲保留最近 60 条，每条记录阶段名与若干关键字段（会话、模式、命中与否）。只记结构不记正文，异常只记类型。",
+      note: "排查顺序建议：先看轨迹确认走的是哪个分支，再对照问题列表定位。",
+    },
+    {
+      name: "好感度手动编辑",
+      path: "记忆 → 好感度",
+      intro: "排行榜每一行都带加减按钮，可直接调整分数。",
+      how: "按钮常显，尺寸较上一版放大一倍（触屏再放大）。点击后立即生效，行内数字同步更新。",
+      note: "手动修改不等于冻结：默认仍参与每日结算，只有开启 manual_override 才会停用自动加减。行内文案会写明当前处于哪种状态。",
+    },
+    {
+      name: "日维护幂等",
+      path: "自动生效",
+      intro: "同一天内重复触发的维护只执行一次。",
+      how: "以「人格 + 业务日」作为标记，维护成功后才写入。插件重启、定时器抖动、多实例并存都不会导致重复衰减。",
+      note: "无需配置。中途异常不会写入标记，下次仍会重试。",
+    },
+    {
+      name: "全局提示层",
+      path: "全站生效",
+      intro: "所有说明气泡改为固定定位，不再被容器裁切。",
+      how: "鼠标悬停或键盘聚焦时显示，位置自动避让视口边缘；上方空间不足时翻到下方。",
+      note: "此前采用 CSS 伪元素实现，在带 overflow: hidden 的折叠面板内会被裁掉，靠近屏幕边缘时也会溢出。",
+    },
+  ];
+
+  const news = `<ul class="cl-paths">${FEATURES.map(
+    (f) => `<li>
+      <b>${f.name}</b><code>${f.path}</code>
+      <span style="display:block;margin-top:6px">${f.intro}</span>
+      <span style="display:block;margin-top:5px">${f.how}</span>
+      <span style="display:block;margin-top:5px;font-size:calc(12.5px * var(--cl-fs, 1));opacity:.58">${f.note}</span>
+    </li>`
+  ).join("")}</ul>`;
+
+  // 按块返回：侧边栏「更新日志」下面挂三个二级页
+  if (key === "fixes") {
+    return `
+      <div class="cl-eyebrow">APOLOGY · 0.7.3</div>
+      <div class="cl-appeal">
+        <h2>致歉声明</h2>
+        <p>0.7.3 版本在发布时并不成熟。</p>
+        <p>该版本功能数量较多，且各模块之间耦合程度较高。记忆、夜间作息、人格注入、主动调度、
+           消息归档与输出处理共享同一套运行状态、同一批全局变量、同一个时间基准，
+           彼此之间缺乏明确的边界与责任划分。</p>
+        <p>这种结构在单模块、单会话的理想条件下尚可维持；一旦进入并发场景 ——
+           多会话同时活跃、插件重载、状态机跨时段推进、事务中途失败 ——
+           即产生大量并发问题：状态机停滞在中间态、记忆归属错乱、
+           消息被错误拦截、进度与数据不同步、部分功能静默失效。</p>
+        <p>上述问题直接影响了实际使用体验。我们也注意到，不少持续关注本插件的用户
+           在使用过程中反复遇到这些问题，并花费时间整理现象、提交反馈。
+           这些反馈是本次重构的起点。</p>
+        <p>对此，我们向全体用户致以诚挚歉意。1.0.0 版本针对上述结构性问题进行了重构，
+           逐条复现、定位并修复，具体内容见下页。</p>
+        <p class="sig">插件维护者 · 2026 年 10 月</p>
+      </div>
+      <div class="cl-eyebrow">WHAT WENT WRONG</div>
+      <p class="cl-lead">经过各位用户耐心反馈，和我熬夜通宵奋战，发现在实际体验中，插件功能会出现如下问题：</p>
+      ${merged}`;
+  }
+  if (key === "news") {
+    return `
+      <div class="cl-eyebrow">WHERE TO FIND</div>
+      <p class="cl-lead">这一版新加的东西不多，但都在面板上有明确入口。下面每条都标了路径。</p>
+      ${news}`;
+  }
+  return `<details class="adv" id="changelog" style="margin:20px 0 8px">
+      <summary style="font-size:15px">更新日志 · 0.7.3 → 1.0.0（大更新）</summary>
+      <div class="pad" style="font-size:13px">
+        <p class="hint" style="margin:0 0 6px">这一版没有加多少新功能，主要是把 0.7.3 里那些「看着正常、实际不工作」的地方挖出来修掉。</p>
+        ${sec("一、问题与修复", merged)}
+        ${sec("二、新功能", news)}
+      </div>
+    </details>`;
+}
+
+async function renderChangelog() {
+  const key = currentSub || "fixes";
+  let scale = 1;
+  try {
+    const saved = Number(localStorage.getItem("cg-changelog-fs"));
+    if (saved >= 0.8 && saved <= 1.6) scale = saved;
+  } catch (_) {}
+  view.style.setProperty("--cl-fs", String(scale));
+  view.innerHTML = `
+    <div class="cl-zoom">
+      <button type="button" data-cl-fs="-1" title="调小">A−</button>
+      <output>${Math.round(scale * 100)}%</output>
+      <button type="button" data-cl-fs="1" title="调大">A+</button>
+    </div>` + changelogHtml(key);
+
+  view.querySelectorAll("[data-cl-fs]").forEach((btn) => {
+    btn.onclick = () => {
+      const step = Number(btn.dataset.clFs) > 0 ? 0.08 : -0.08;
+      const next = Math.max(0.8, Math.min(1.6, Math.round((scale + step) * 100) / 100));
+      scale = next;
+      view.style.setProperty("--cl-fs", String(next));
+      const out = view.querySelector(".cl-zoom output");
+      if (out) out.textContent = `${Math.round(next * 100)}%`;
+      try {
+        localStorage.setItem("cg-changelog-fs", String(next));
+      } catch (_) {}
+    };
+  });
+}
+
 async function renderOverview() {
   if (isNightUI() && typeof njOverview === "function") return njOverview();
   const data = await get("page/overview");
@@ -1590,7 +1788,10 @@ function memCard(row) {
 async function renderMemory(keyword, sessionId, kind) {
   if (isNightUI() && typeof njMemory === "function") return njMemory(keyword, sessionId, kind);
   const settings = await loadSettings();
-  const params = { limit: 500, status: "active" };
+  // 一次拉 500 条会让「记忆库」铺 500 张卡，滑动必卡。
+  // 先取 150，底部给「再看一些」按需追加。
+  const shown = Number(window.__memShown || 150);
+  const params = { limit: shown, status: "active" };
   if (keyword) params.keyword = keyword;
   if (sessionId) params.session = sessionId;
   if (kind) params.kind = kind;
@@ -1635,6 +1836,11 @@ async function renderMemory(keyword, sessionId, kind) {
       </aside>
       <section class="mem-list mem-scroll">
         ${items.length ? items.map(memCard).join("") : '<div class="empty">这里还没有记忆，聊几句、等两分钟再看</div>'}
+        ${
+          items.length >= shown && Number(data.total || 0) > items.length
+            ? `<div style="padding:14px 0;text-align:center"><button class="ghost" id="mem-more">再看一些（已显示 ${items.length} / ${esc(data.total || 0)}）</button></div>`
+            : ""
+        }
       </section>
     </div>
 
@@ -1660,7 +1866,17 @@ async function renderMemory(keyword, sessionId, kind) {
 
   const current = () => document.getElementById("m-key").value.trim();
   const currentKind = () => document.getElementById("m-kind").value;
-  document.getElementById("m-go").onclick = () => renderMemory(current(), sessionId, currentKind());
+  document.getElementById("m-go").onclick = () => {
+    window.__memShown = 150;
+    renderMemory(current(), sessionId, currentKind());
+  };
+  const moreBtn = document.getElementById("mem-more");
+  if (moreBtn) {
+    moreBtn.onclick = () => {
+      window.__memShown = Number(window.__memShown || 150) + 150;
+      renderMemory(current(), sessionId, currentKind());
+    };
+  }
   document.getElementById("m-key").onkeydown = (event) => {
     if (event.key === "Enter") renderMemory(current(), sessionId, currentKind());
   };
@@ -1787,7 +2003,22 @@ async function renderQQ() {
     })}
     ${pageActions()}
 
-    <h2 class="sec">空间状态</h2>
+    <h2 class="sec">三项能力，各管各的</h2>
+    <div class="compat-grid">
+      <div class="compat-cell"><div class="k">头像 / 昵称</div><div class="v"><span class="badge on">可用</span></div></div>
+      <div class="compat-cell"><div class="k">靠什么</div><div class="v dim">协议端的 get_stranger_info，不吃 cookie</div></div>
+      <div class="compat-cell"><div class="k">签名 / 状态</div><div class="v">${
+        ((settings.qq_extra || {}).avatar_auto_change) ? '<span class="badge on">已开</span>' : '<span class="badge warn">关闭</span>'
+      }</div></div>
+      <div class="compat-cell"><div class="k">靠什么</div><div class="v dim">协议端的 set_self_longnick，也不吃 cookie</div></div>
+      <div class="compat-cell"><div class="k">空间说说</div><div class="v">${
+        auth.ok ? '<span class="badge on">已就绪</span>' : '<span class="badge warn">需要登录态</span>'
+      }</div></div>
+      <div class="compat-cell"><div class="k">靠什么</div><div class="v dim">唯一的例外：必须拿到空间 cookie</div></div>
+    </div>
+    <p class="hint" style="margin:10px 0 0">上面三项互不影响。头像和签名不要 cookie，只有空间说说才需要；登录态丢了不影响前两项。</p>
+
+    <h2 class="sec">空间登录态</h2>
     <div class="compat-grid">
       <div class="compat-cell"><div class="k">模式</div><div class="v">${esc(
         modeText[qzone.mode] || qzone.mode
@@ -2218,7 +2449,7 @@ async function renderMemorySummary() {
 /* ------------------------------------------------ 用户识别库 */
 async function renderMemoryPeople() {
   if (subjectKey) return renderSubjectDetail(subjectKey);
-  const data = await get("page/memory/subjects", { limit: 100 });
+  const data = await get("memory/subjects", { limit: 100 });
   const items = data.items || [];
   const rows = items
     .map((item) => {
@@ -2284,7 +2515,7 @@ async function renderMemoryPeople() {
     search.onkeydown = async (ev) => {
       if (ev.key !== "Enter") return;
       const keyword = search.value.trim();
-      const found = await get("page/memory/subjects", { keyword, limit: 100 });
+      const found = await get("memory/subjects", { keyword, limit: 100 });
       const list = document.querySelector(".person-list");
       if (list) {
         list.innerHTML = (found.items || [])
@@ -2363,7 +2594,7 @@ async function renderSubjectDetail(key) {
           <span class="mono" id="aff-num">${Math.round(Number(aff.score) || 0)}</span>
           <button class="primary" id="aff-save">保存分数</button>
         </div>
-        <p class="hint" style="margin:8px 0 0">手动改过之后，这一位不再被自动加减${data.blocked ? "；当前在不再构建名单里" : ""}</p>
+        <p class="hint" style="margin:8px 0 0">${affFrozenHint(data)}${data.blocked ? "；当前在不再构建名单里" : ""}</p>
       </div>
     </section>
     <section class="cfg-group">
@@ -2411,7 +2642,7 @@ async function renderSubjectDetail(key) {
     build.onclick = async () => {
       build.textContent = "生成中…";
       try {
-        await post("page/memory/profile/build", { key });
+        await post("memory/profile/build", { key });
       } catch (err) {
         build.textContent = err.message;
         return;
@@ -2521,6 +2752,153 @@ async function renderMemoryLevels() {
 }
 
 /* ------------------------------------------------ 好感度 */
+// 小工具：把任意值安全地转义成 HTML 文本（主体合并那边在用）
+function pfEsc(s) {
+  return esc(String(s == null ? "" : s));
+}
+
+/* ------------------------------------------------------------------ 主体合并
+   同一个人的不同叫法（QQ 号 / 群名片 / 模型抽出来的称呼）会各算一个主体，
+   好感度也因此重复结算。这里让人自己确认哪几个是同一个。 */
+let mergeCache = null;
+let lastMergeRunId = "";
+
+async function renderSubjectMerge() {
+  const host = view;
+  const head = `
+    <section class="cfg-group">
+      <div class="cfg-head">
+        <h3>主体合并</h3>
+        <p>把同一个人的不同叫法合到一起。合并会迁移相关记忆、合并好感度，且不可撤销（执行前后台自动备份）。</p>
+      </div>
+      <div class="pad">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="primary" id="merge-scan">扫描重复主体</button>
+          <span id="merge-tip" class="hint" style="margin:0"></span>
+        </div>
+        <div id="merge-list" style="margin-top:12px"></div>
+        <div id="merge-actions" style="margin-top:12px;display:none">
+          <button class="primary" id="merge-apply">合并选中</button>
+        </div>
+      </div>
+    </section>`;
+  if (host) host.innerHTML = head; else return;
+
+  const listEl = document.getElementById("merge-list");
+  const tipEl = document.getElementById("merge-tip");
+  const actions = document.getElementById("merge-actions");
+
+  const paint = () => {
+    if (!mergeCache) return;
+    if (mergeCache.error) {
+      listEl.innerHTML = `<p class="hint">扫描失败：${esc(mergeCache.error)}</p>`;
+      actions.style.display = "none";
+      return;
+    }
+    const items = mergeCache.items || [];
+    if (!items.length) {
+      listEl.innerHTML = `<p class="hint">没有发现可合并的主体</p>`;
+      actions.style.display = "none";
+      return;
+    }
+    listEl.innerHTML = items
+      .map((x, i) => `<label data-merge-row style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer">
+        <input type="checkbox" data-merge-idx="${i}" ${x.atoms > 0 ? "checked" : ""} style="flex:none">
+        <span style="flex:0 0 26%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.from)}">${esc(x.from)}</span>
+        <span style="flex:none;opacity:.4">→</span>
+        <span style="flex:0 0 26%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.to_name)}">${esc(x.to_name)}</span>
+        <span class="hint" style="flex:1;min-width:0;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.why)}</span>
+        <span class="mono" style="flex:none;opacity:.6">${x.atoms}</span>
+      </label>`)
+      .join("");
+    actions.style.display = "block";
+  };
+
+  document.getElementById("merge-scan").onclick = async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "扫描中…";
+    try {
+      const data = await get("subjects/merge_candidates");
+      mergeCache = { items: (data && data.items) || [] };
+    } catch (err) {
+      mergeCache = { items: [], error: String((err && err.message) || err) };
+    }
+    btn.disabled = false;
+    btn.textContent = "重新扫描";
+    tipEl.textContent = mergeCache.error ? "" : `共 ${(mergeCache.items || []).length} 组候选`;
+    paint();
+  };
+
+  let armed = false;
+  document.getElementById("merge-apply").onclick = async (ev) => {
+    const btn = ev.currentTarget;
+    const picks = [...listEl.querySelectorAll("[data-merge-idx]:checked")].map((el) => {
+      const it = (mergeCache.items || [])[Number(el.dataset.mergeIdx)] || {};
+      return { from: it.from, to: it.to };
+    }).filter((x) => x.from && x.to);
+    if (!picks.length) {
+      askToast("先勾选要合并的项", "err");
+      return;
+    }
+    // iframe 里 confirm() 常常被浏览器静默拦掉（返回 false），所以用二次点击确认
+    if (!armed) {
+      armed = true;
+      btn.textContent = `确定合并 ${picks.length} 组？再点一次`;
+      setTimeout(() => {
+        if (!armed) return;
+        armed = false;
+        btn.textContent = "合并选中";
+      }, 6000);
+      return;
+    }
+    armed = false;
+    btn.disabled = true;
+    btn.textContent = "合并中…";
+    try {
+      const r = await post("subjects/merge", { pairs: picks });
+      const rid = (r && r.run_id) || "";
+      lastMergeRunId = rid;
+      askToast(`合并完成：${(r && r.merged) || 0} 组，迁移 ${(r && r.atoms) || 0} 条记忆`, "ok");
+      mergeCache = null;
+      if (tipEl) tipEl.textContent = "";
+      if (listEl) listEl.innerHTML = "";
+      if (actions) {
+        actions.style.display = "block";
+        actions.innerHTML = rid
+          ? `<button class="danger" id="merge-undo">撤销这次合并</button>
+             <span class="hint" style="margin-left:10px">run_id ${pfEsc(rid)}　只要之后没新写入就能整批退回</span>`
+          : "";
+        const undo = document.getElementById("merge-undo");
+        if (undo) {
+          undo.onclick = async () => {
+            undo.disabled = true;
+            undo.textContent = "撤销中…";
+            try {
+              const res = await post("subjects/rollback", { run_id: rid });
+              askToast(res && res.already ? "这条已经撤销过了" : `已撤销 ${(res && res.reversed) || 0} 组`, "ok");
+              mergeCache = null;
+              renderSubjectMerge();
+            } catch (err) {
+              askToast((err && err.message) || "撤销失败", "err");
+              undo.disabled = false;
+              undo.textContent = "撤销这次合并";
+            }
+          };
+        }
+      }
+      btn.textContent = "合并选中";
+      btn.disabled = false;
+    } catch (err) {
+      askToast((err && err.message) || "合并失败", "err");
+      btn.disabled = false;
+      btn.textContent = "合并选中";
+    }
+  };
+
+  if (mergeCache) paint();
+}
+
 async function renderAffinityPage() {
   if (isNightUI() && typeof njAffinityPage === "function") return njAffinityPage();
   const data = await get("page/affinity");
@@ -2737,8 +3115,11 @@ function avatarUrl(kind, id, sessionId) {
   const parts = avatarParts(kind, id, sessionId);
   /* 只有纯数字才是 QQ 号或群号，昵称类主体直接回落首字 */
   if (!parts.key) return "";
-  if (parts.kind === "group") return `https://p.qlogo.cn/gh/${parts.key}/${parts.key}/640`;
-  return `https://q1.qlogo.cn/g?b=qq&nk=${parts.key}&s=640`;
+  // 尺寸从 640 降到 140：列表里显示的就这么点大，拉 640 的图等于把流量放大 20 倍，
+  // 「按会话分」一屏十几张图全靠它，卡顿主要来自这里。
+  // 140 的图会被浏览器缓存，第二次进来就不发请求了。
+  if (parts.kind === "group") return `https://p.qlogo.cn/gh/${parts.key}/${parts.key}/140`;
+  return `https://q1.qlogo.cn/g?b=qq&nk=${parts.key}&s=140`;
 }
 
 function avatarHtml(kind, id, name, cls, sessionId) {
@@ -2747,7 +3128,7 @@ function avatarHtml(kind, id, name, cls, sessionId) {
   const initial = esc(String(name || id || "?").slice(0, 1));
   const klass = `v6-av${parts.kind === "group" ? " sq" : ""}${cls ? " " + cls : ""}`;
   if (!url) return `<span class="${klass}"><span class="fb">${initial}</span></span>`;
-  return `<span class="${klass}"><img src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-fb="${initial}" onerror="var p=this.parentNode;this.remove();p.textContent=this.dataset.fb"></span>`;
+  return `<span class="${klass}"><img src="${esc(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" data-fb="${initial}" onerror="var p=this.parentNode;this.remove();p.textContent=this.dataset.fb"></span>`;
 }
 
 function m3Day(ts) {
@@ -2867,7 +3248,7 @@ let m3UserId = "";
 /* @deprecated 0.7.0 起不再挂 tab（「按用户分」取消）。函数留着，回溯用。 */
 async function renderM3Users() {
   if (isNightUI() && typeof njM3Users === "function") return njM3Users();
-  const list = await get("page/memory/subjects", { limit: 200 });
+  const list = await get("memory/subjects", { limit: 200 });
   const items = (list.items || []).map((x) => ({ ...x, key: x.user_id || x.subject_id || "" }));
   if (!items.length) {
     view.innerHTML = '<div class="empty">还没有记住任何人</div>';
@@ -3050,3 +3431,59 @@ async function renderM3Sessions() {
 function isNightUI() {
   return document.documentElement.dataset.ui === "night";
 }
+
+
+/* ------------------------------------------------------------------ tooltip
+   全局面板里每个 data-tip 都走这一个 fixed 层。
+   为什么不用 CSS ::after：父容器一旦有 overflow:hidden 就会被裁掉（设置卡片
+   里那张"高级"折叠面板就是），而且贴近屏幕边缘时会直接溢出屏幕。 */
+(function initTooltip() {
+  let layer = null;
+
+  function ensure() {
+    if (layer && layer.isConnected) return layer;
+    layer = document.createElement("div");
+    layer.id = "cg-tip";
+    document.body.appendChild(layer);
+    return layer;
+  }
+
+  function show(target) {
+    const text = target.getAttribute("data-tip");
+    if (!text || !text.trim()) return;
+    const tip = ensure();
+    tip.textContent = text;
+    tip.style.display = "block";
+    tip.style.opacity = "0";
+
+    const box = target.getBoundingClientRect();
+    const size = tip.getBoundingClientRect();
+    let left = box.left + box.width / 2 - size.width / 2;
+    left = Math.max(8, Math.min(window.innerWidth - size.width - 8, left));
+    let top = box.top - size.height - 9;
+    if (top < 8) top = box.bottom + 9;      // 上方放不下就翻到下方
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+    requestAnimationFrame(() => { tip.style.opacity = "1"; });
+  }
+
+  function hide() {
+    if (layer) layer.style.opacity = "0";
+  }
+
+  const pick = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+  document.addEventListener("mouseover", (e) => {
+    const target = pick(e.target);
+    if (target) show(target);
+  });
+  document.addEventListener("mouseout", (e) => {
+    if (pick(e.target)) hide();
+  });
+  document.addEventListener("focusin", (e) => {
+    const target = pick(e.target);
+    if (target) show(target);
+  });
+  document.addEventListener("focusout", hide);
+  window.addEventListener("scroll", hide, true);
+  window.addEventListener("resize", hide);
+})();

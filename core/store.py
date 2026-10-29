@@ -280,6 +280,9 @@ class Store:
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.RLock()
         self.ready = False
+        # 显式事务期间由调用方控制提交，execute 不再自己 commit。
+        # 主体合并这类"多表必须一起成功"的操作要靠它，否则中途失败会写一半。
+        self._in_tx = False
 
     # ------------------------------------------------------------ 生命周期
     def _open_sync(self) -> None:
@@ -400,11 +403,44 @@ class Store:
         def _run() -> int:
             with self._lock:
                 cursor = self._execute_sync(sql, params)
-                if self._conn is not None:
+                if self._conn is not None and not self._in_tx:
                     self._conn.commit()
                 return int(cursor.lastrowid or 0)
 
         return await asyncio.to_thread(_run)
+
+    async def begin(self) -> None:
+        """开一个显式事务。这之后的 execute 不再自动提交，直到 commit/rollback。"""
+
+        def _run() -> None:
+            with self._lock:
+                if self._conn is None:
+                    raise RuntimeError("数据库未就绪")
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._in_tx = True
+
+        await asyncio.to_thread(_run)
+
+    async def commit(self) -> None:
+        def _run() -> None:
+            with self._lock:
+                if self._conn is not None:
+                    self._conn.commit()
+                self._in_tx = False
+
+        await asyncio.to_thread(_run)
+
+    async def rollback(self) -> None:
+        def _run() -> None:
+            with self._lock:
+                if self._conn is not None:
+                    try:
+                        self._conn.rollback()
+                    except Exception:
+                        pass
+                self._in_tx = False
+
+        await asyncio.to_thread(_run)
 
     async def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> None:
         data = [tuple(row) for row in rows]
