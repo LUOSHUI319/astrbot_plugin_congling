@@ -1455,7 +1455,7 @@ async function renderOverview() {
     <div class="group-banner">
       <div class="group-banner-main">
         <span class="group-banner-label">官方交流群</span>
-        <span class="group-banner-num">577084969</span>
+        <span class="group-banner-num">577084969 / 951213204</span>
         <span class="group-banner-desc">用着有问题、想提需求、想看更新，都来群里说</span>
       </div>
       <button class="group-banner-btn" id="group-copy" type="button">复制群号</button>
@@ -2315,16 +2315,20 @@ try {
 
 /* 官方群：点一下把群号复制走 */
 const GROUP_NO = "577084969";
+const GROUP_NO_2 = "951213204";
+/* 复制时两个号一起给，用空格分隔，粘到 QQ 里能直接搜 */
+const GROUP_COPY = `${GROUP_NO} ${GROUP_NO_2}`;
+const GROUP_SHOW = `${GROUP_NO} / ${GROUP_NO_2}`;
 
 async function copyGroupNo(btn) {
   let ok = false;
   try {
-    await navigator.clipboard.writeText(GROUP_NO);
+    await navigator.clipboard.writeText(GROUP_COPY);
     ok = true;
   } catch (err) {
     try {
       const ta = document.createElement("textarea");
-      ta.value = GROUP_NO;
+      ta.value = GROUP_COPY;
       ta.style.position = "fixed";
       ta.style.opacity = "0";
       document.body.appendChild(ta);
@@ -2337,7 +2341,7 @@ async function copyGroupNo(btn) {
   }
   if (btn) {
     const old = btn.textContent;
-    btn.textContent = ok ? "已复制" : GROUP_NO;
+    btn.textContent = ok ? "已复制" : GROUP_SHOW;
     setTimeout(() => { btn.textContent = old; }, 2000);
   }
   return ok;
@@ -2349,13 +2353,13 @@ function bindGroupCard() {
     const hint = card.querySelector(".group-card-hint");
     let ok = false;
     try {
-      await navigator.clipboard.writeText(GROUP_NO);
+      await navigator.clipboard.writeText(GROUP_COPY);
       ok = true;
     } catch (err) {
       // 没权限（比如不在 https / 被 iframe 策略拦了）就退到老办法
       try {
         const ta = document.createElement("textarea");
-        ta.value = GROUP_NO;
+        ta.value = GROUP_COPY;
         ta.style.position = "fixed";
         ta.style.opacity = "0";
         document.body.appendChild(ta);
@@ -2367,7 +2371,7 @@ function bindGroupCard() {
       }
     }
     if (hint) {
-      hint.textContent = ok ? `已复制 ${GROUP_NO}` : `群号 ${GROUP_NO}`;
+      hint.textContent = ok ? `已复制 ${GROUP_COPY}` : `群号 ${GROUP_SHOW}`;
     }
     card.classList.toggle("is-copied", ok);
     setTimeout(() => {

@@ -3358,3 +3358,89 @@ html[data-theme="dark"] .lv-4 { background: #2f2820; }
 }
 .cl-zoom button:hover { opacity: 1; background: rgba(255,255,255,.06); }
 .cl-zoom output { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+
+
+/* 加群获取模板：导入页的主视觉，群号要大到不用找 */
+.join-card {
+  margin: 0 0 18px;
+  padding: 22px 24px;
+  border: 1px solid rgba(200, 168, 106, .32);
+  border-radius: 14px;
+  background: linear-gradient(140deg, rgba(200, 168, 106, .09), rgba(200, 168, 106, .015) 62%);
+}
+.join-eyebrow {
+  font-size: 11px;
+  letter-spacing: .24em;
+  text-transform: uppercase;
+  color: var(--accent, #c8a86a);
+  opacity: .78;
+}
+.join-card h2 {
+  margin: 10px 0 12px;
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: .02em;
+}
+.join-card p {
+  margin: 0 0 14px;
+  font-size: 13.5px;
+  line-height: 1.8;
+  opacity: .78;
+}
+.join-nos {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 4px 0 6px;
+}
+.join-nos span {
+  font-family: ui-monospace, monospace;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--accent, #c8a86a);
+  font-variant-numeric: tabular-nums;
+}
+.join-nos span.join-sep {
+  font-size: 20px;
+  opacity: .35;
+  font-weight: 400;
+}
+.join-nos button { margin-left: 6px; }
+.join-card p.join-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  opacity: .55;
+}
+@media (max-width: 560px) {
+  .join-nos span { font-size: 22px; }
+  .join-card h2 { font-size: 20px; }
+}
+
+
+/* 导入页的拖放区：拖文件进来时整块变色，给明确反馈 */
+.imp-drop {
+  position: relative;
+  border: 1.5px dashed var(--line, rgba(255, 255, 255, .16));
+  border-radius: 12px;
+  padding: 4px;
+  background: rgba(255, 255, 255, .015);
+  transition: border-color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+.imp-drop.is-drop {
+  border-color: var(--accent, #c8a86a);
+  background: rgba(200, 168, 106, .09);
+  box-shadow: 0 0 0 3px rgba(200, 168, 106, .12) inset;
+}
+.imp-drop.is-drop .imp-drop-hint {
+  color: var(--accent, #c8a86a);
+  opacity: 1;
+}
+.imp-drop-hint {
+  padding: 6px 8px 4px;
+  font-size: 11.5px;
+  letter-spacing: .04em;
+  opacity: .5;
+  transition: color .18s ease, opacity .18s ease;
+}

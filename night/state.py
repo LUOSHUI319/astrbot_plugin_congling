@@ -191,6 +191,13 @@ class NightService:
         self.state.last_tick = int(now)
 
         if self.state.is_asleep():
+            # 开关中途被关掉（allow_sleep=false），这一觉就不该再睡下去了，
+            # 立刻醒过来。reason == "manual" 是人明确点的「睡」，那种睡满不打扰。
+            # 不加这段的话，半夜关掉开关也得等 wake_at 到点才肯睁眼。
+            if not self.config.bool("night.allow_sleep", True) and self.state.reason != "manual":
+                await self._do_wake(reason="allow_sleep_off")
+                events.append("wake_by_switch")
+                return events
             # 睡着的时候按睡眠阶段回精力：深睡那一小时补得多，REM 补得少。
             # 以前是直接冻结，面板上看着像一条直线，也解释不了「睡得浅等于没睡」
             # 分段累加：跨睡眠阶段/跨疲劳窗口都不能按终点那一刻一票算完
@@ -293,6 +300,14 @@ class NightService:
                     per_message=self.config.float("night.energy_per_message", 4.0),
                 )
                 if self._can_sleep_by_energy():
+                    # 开关关着就别报 sleep_triggered：报了上层会挂 pending_sleep，
+                    # 回复完 after_reply 再走一次入睡，等于白道别一场还照样躺下。
+                    if not self.config.bool("night.allow_sleep", True):
+                        await self.save()
+                        return {
+                            "block": False,
+                            "hint": "精力耗尽，但真睡开关关着",
+                        }
                     kind = energy_mod.fatigue_kind(self.config)
                     await self._do_sleep(reason="energy", kind=kind)
                     return {
@@ -459,18 +474,28 @@ class NightService:
         except Exception as exc:
             logger.debug(f"[congling] 记录睡眠区间失败: {exc!r}")
 
-    async def sleep_now(self, *, reason: str = "manual", kind: str | None = None) -> None:
-        """外部调用（面板/指令）强制入睡。
+    async def sleep_now(
+        self,
+        *,
+        reason: str = "manual",
+        kind: str | None = None,
+        by_user: bool = False,
+    ) -> None:
+        """外部调用入睡。
 
         kind 不传时按当前时段自动判断：在午间疲劳窗口里就是午睡，
         否则算夜里睡。免得下午手点一下「睡」，一路睡到第二天早上。
+
+        by_user=True 只给「人明确点了睡」的入口（面板 / 指令），那种无视
+        night.allow_sleep；自动收线（after_reply）走默认 False，老老实实认开关。
+        以前这里写死 force=True，结果关掉开关照样被一句「晚安」放倒。
         """
         if not kind:
             try:
                 kind = energy_mod.fatigue_kind(self.config) or "night"
             except Exception:
                 kind = "night"
-        await self._do_sleep(reason=reason, kind=kind, force=True)
+        await self._do_sleep(reason=reason, kind=kind, force=by_user)
 
     async def wake_now(self, *, reason: str = "manual") -> None:
         """外部调用强制唤醒。醒来照样要爬楼（有未读就进 waking）。"""

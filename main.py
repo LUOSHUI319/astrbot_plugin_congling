@@ -32,7 +32,7 @@ from .core.rhythm import RhythmController
 from .core.store import Store
 from .humanize.delay import ReplyDelayer
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）

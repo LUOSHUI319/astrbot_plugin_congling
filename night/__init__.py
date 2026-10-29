@@ -74,18 +74,26 @@ class NightModule:
             closing, strength, word = is_closing(msg.text, self.config)
             if closing and strength in ("strong", "medium"):
                 kind = "noon" if ("午" in word or "眯" in word or "盹" in word) else "night"
-                self.pending_sleep = {
-                    "kind": kind,
-                    "reason": "talk",
-                    "word": word,
-                    "strength": strength,
-                    "session_id": msg.session_id,
-                }
-                result["closing"] = True
-                result["hint"] = f"对方收线（{word}），回完这句就睡"
+                # 真睡开关关着：静默照旧（对方就是要下线了），但不挂入睡、
+                # 也不让 prompt 去写「说完这句就睡」的道别。
+                if self.config.bool("night.allow_sleep", True):
+                    self.pending_sleep = {
+                        "kind": kind,
+                        "reason": "talk",
+                        "word": word,
+                        "strength": strength,
+                        "session_id": msg.session_id,
+                    }
+                    result["closing"] = True
+                    result["hint"] = f"对方收线（{word}），回完这句就睡"
+                else:
+                    result["closing"] = True
+                    result["hint"] = f"对方收线（{word}），不睡，只是安静一会儿"
 
         # 精力耗尽触发的入睡，也要给一次道别的机会
-        if result.get("sleep_triggered"):
+        # 双保险：state.on_message 那边已经拦过一次，这里再拦一次，
+        # 免得以后谁改了一头，另一头又把「关了开关还道别」放回来。
+        if result.get("sleep_triggered") and self.config.bool("night.allow_sleep", True):
             kind = "night"
             try:
                 from . import energy as energy_mod
@@ -110,7 +118,11 @@ class NightModule:
         self.pending_sleep = None
         self.morning_dream = None
         try:
-            await self.state.sleep_now(reason=pending.get("reason", "talk"), kind=pending.get("kind") or None)
+            # 自动收线：不许走 by_user，sleep_now 内部会照 night.allow_sleep 判断
+            await self.state.sleep_now(
+                reason=pending.get("reason", "talk"),
+                kind=pending.get("kind") or None,
+            )
             logger.info(
                 f"[congling] 入睡：{pending.get('reason')} "
                 f"（{pending.get('word') or '精力耗尽'}）"

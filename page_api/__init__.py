@@ -895,7 +895,7 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
             # 不传 kind 时交给 sleep_now 按当前时段自己判断，
             # 否则下午在面板上点「睡」会按夜里那套算到第二天早上
             kind = str(body.get("kind") or "") or None
-            await night.state.sleep_now(reason="manual", kind=kind)
+            await night.state.sleep_now(reason="manual", kind=kind, by_user=True)
             return _ok(night.snapshot())
         except Exception as exc:
             return _err(repr(exc)[:200])
