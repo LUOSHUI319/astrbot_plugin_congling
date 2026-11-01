@@ -1,0 +1,251 @@
+/* P6：集中管理响应式；基础样式之后加载。保留原有查询次序。 */
+/* 原 style.css */
+@media (max-width: 720px) {:root[data-ui="night"][data-layout="mobile"] .app{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .side{
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 16px;
+    gap: 14px;
+  }:root[data-ui="night"][data-layout="mobile"] #nav{ flex-direction: row; flex-wrap: wrap; }:root[data-ui="night"][data-layout="mobile"] .nav-item{ border-left: 0; border-bottom: 2px solid transparent; }:root[data-ui="night"][data-layout="mobile"] .nav-item.is-active{ border-bottom-color: var(--accent); }:root[data-ui="night"][data-layout="mobile"] .side-foot{ display: none; }:root[data-ui="night"][data-layout="mobile"] .main{ padding: 18px; }
+}
+
+@media (max-width: 900px) {:root[data-ui="night"][data-layout="mobile"] .settings-shell{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .settings-toc{ display: none; }:root[data-ui="night"][data-layout="mobile"] .cfg-row{ grid-template-columns: 1fr; gap: 8px; }
+}
+
+@media (max-width: 720px) {:root[data-ui="night"][data-layout="mobile"] .nav-item{ padding: 6px 8px; font-size: 14.5px; }:root[data-ui="night"][data-layout="mobile"] .entry-grid{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] .cfg-foot{ flex-wrap: wrap; }
+}
+
+@media (max-width: 860px) {:root[data-ui="night"][data-layout="mobile"] .mem-stats{ grid-template-columns: repeat(2, minmax(0, 1fr)); }:root[data-ui="night"][data-layout="mobile"] .mem-body{ --mem-view: calc(100dvh - 380px); grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .mem-sessions{
+    flex-direction: row;
+    flex-wrap: wrap;
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }:root[data-ui="night"][data-layout="mobile"] .mem-list{ min-height: 180px; }
+}
+
+@media (prefers-reduced-motion: reduce) {:root[data-ui="night"][data-layout="mobile"] .view > *{ animation: none; }:root[data-ui="night"][data-layout="mobile"] *{ transition: none !important; }
+}
+
+@media (max-width: 1180px) {:root[data-ui="night"][data-layout="mobile"] .main{ padding: 0 24px 56px; }:root[data-ui="night"][data-layout="mobile"] .head{ margin: 0 -24px 20px; padding: 18px 24px 14px; }
+}
+
+@media (max-width: 980px) {:root[data-ui="night"][data-layout="mobile"] .entry-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {:root[data-ui="night"][data-layout="mobile"] .app{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .side{
+    position: static;
+    height: auto;
+    padding: 18px 14px 14px;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  }:root[data-ui="night"][data-layout="mobile"] #nav{ flex-direction: row; flex-wrap: wrap; gap: 6px; }:root[data-ui="night"][data-layout="mobile"] .nav-item{ padding: 7px 13px; }:root[data-ui="night"][data-layout="mobile"] .nav-item::before{ display: none; }:root[data-ui="night"][data-layout="mobile"] .nav-item.is-active{ padding-left: 13px; }:root[data-ui="night"][data-layout="mobile"] .side-foot{ display: none; }:root[data-ui="night"][data-layout="mobile"] .main{ padding: 0 16px 48px; }:root[data-ui="night"][data-layout="mobile"] .head{ margin: 0 -16px 18px; padding: 16px 16px 12px; }:root[data-ui="night"][data-layout="mobile"] .grid-stats{ grid-template-columns: 1fr 1fr; gap: 10px; }:root[data-ui="night"][data-layout="mobile"] .mem-stats{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] .entry-grid{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .mem-toolbar{ flex-wrap: wrap; }:root[data-ui="night"][data-layout="mobile"] .mem-toolbar .grow{ flex-basis: 100%; }:root[data-ui="night"][data-layout="mobile"] table.list{ border-spacing: 0 5px; }
+}
+
+@media (max-width: 720px) {:root[data-ui="night"][data-layout="mobile"] .notice{ font-size: 13.5px; padding: 6px 12px; margin-top: 10px; }
+}
+
+@media (max-width: 720px) {:root[data-ui="night"][data-layout="mobile"] .main{ padding-top: 12px; } }
+
+@media (max-width: 720px) {:root[data-ui="night"][data-layout="mobile"] .night-hero{
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "main"
+      "energy"
+      "acts";
+    padding: 18px;
+  }:root[data-ui="night"][data-layout="mobile"] .hero-energy{ max-width: none; }
+}
+
+@media (max-width: 560px) {:root[data-ui="night"][data-layout="mobile"] .join-nos span{ font-size: 22px; }:root[data-ui="night"][data-layout="mobile"] .join-card h2{ font-size: 20px; }
+}
+
+/* 原 night.css / night-light.1031.css（共同结构只存一次） */
+@media (max-width: 1280px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .view{ padding: 20px 24px 48px; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .head{ padding: 14px 24px; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .subtabs{ margin: 16px 24px 0; max-width: calc(100% - 48px); }:root[data-ui="night"][data-layout="mobile"] .nj-cols{ grid-template-columns: minmax(0, 1fr) 320px; }:root[data-ui="night"][data-layout="mobile"] .nj-hero{ grid-template-columns: minmax(0, 1fr) 340px; }
+}
+
+@media (max-width: 1180px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .app{ grid-template-columns: 216px minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .side{ padding: 22px 12px 16px; }:root[data-ui="night"][data-layout="mobile"] .nj-cols{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] .nj-aff{ max-width: none; }:root[data-ui="night"][data-layout="mobile"] .nj-mem-body{ grid-template-columns: 200px minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] .nj-mem-side{ grid-column: 1 / -1; flex-direction: row; }:root[data-ui="night"][data-layout="mobile"] .nj-mem-side > *{ flex: 1; }:root[data-ui="night"][data-layout="mobile"] .nj-split{ grid-template-columns: 250px minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] .nj-night-hero{ grid-template-columns: minmax(0, 1fr) 260px; }:root[data-ui="night"][data-layout="mobile"] .nj-night-bottom{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] .nj-cells{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 960px) {:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .app{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .side{
+    position: static;
+    height: auto;
+    flex-direction: column;
+    padding: 16px 18px 14px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(243, 238, 227, .09);
+  }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .brand{ flex-direction: row; align-items: center; padding: 0; gap: 12px; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .brand-en{ padding-left: 0; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] #nav{
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 14px;
+  }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] #nav::before,
+:root:where([data-skin="night"])[data-ui="night"] #nav::after{ display: none; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .nav-item{
+    grid-template-columns: 20px auto;
+    height: 36px;
+    padding: 0 12px;
+    width: auto;
+  }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .nav-item::after{ display: none; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .side-foot{ display: flex; gap: 10px; align-items: center; margin-top: 12px; padding-top: 12px; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .group-card{ margin: 0; flex: 1; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-persona{ margin: 0; flex: 1; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] #compat-line{ display: none; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="night"])[data-ui="night"] .head{ position: static; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-hero{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-quote{ margin: 0 12px 12px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-strip{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-mem-stats{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-mem-body{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-mem-side{ flex-direction: column; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-mem-card{ height: clamp(340px, 58vh, 520px); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-list-scroll{ max-height: 340px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-session-col{ max-height: 320px; overflow-y: auto; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-split{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-person-list{ max-height: 320px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-night-hero{ grid-template-columns: minmax(0, 1fr); padding: 22px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-ring-wrap{ order: -1; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-night-bottom{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-toolbar{ flex-wrap: wrap; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-search{ flex: 1 1 100%; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-modes{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="night"]) .nj-feed-row{ grid-template-columns: 48px 60px minmax(0, 1fr); }
+}
+@media (max-width: 960px) {:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .app{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .side{
+    position: static;
+    height: auto;
+    flex-direction: column;
+    padding: 16px 18px 14px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(35, 43, 38, 0.0495);
+  }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .brand{ flex-direction: row; align-items: center; padding: 0; gap: 12px; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .brand-en{ padding-left: 0; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] #nav{
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 14px;
+  }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] #nav::before,
+:root:where([data-skin="day"])[data-ui="night"] #nav::after{ display: none; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .nav-item{
+    grid-template-columns: 20px auto;
+    height: 36px;
+    padding: 0 12px;
+    width: auto;
+  }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .nav-item::after{ display: none; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .side-foot{ display: flex; gap: 10px; align-items: center; margin-top: 12px; padding-top: 12px; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .group-card{ margin: 0; flex: 1; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-persona{ margin: 0; flex: 1; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] #compat-line{ display: none; }:root[data-ui="night"][data-layout="mobile"] :root:where([data-skin="day"])[data-ui="night"] .head{ position: static; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-hero{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-quote{ margin: 0 12px 12px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-strip{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-mem-stats{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-mem-body{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-mem-side{ flex-direction: column; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-mem-card{ height: clamp(340px, 58vh, 520px); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-list-scroll{ max-height: 340px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-session-col{ max-height: 320px; overflow-y: auto; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-split{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-person-list{ max-height: 320px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-night-hero{ grid-template-columns: minmax(0, 1fr); padding: 22px; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-ring-wrap{ order: -1; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-night-bottom{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-toolbar{ flex-wrap: wrap; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-search{ flex: 1 1 100%; }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-modes{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :where(:root[data-skin="day"]) .nj-feed-row{ grid-template-columns: 48px 60px minmax(0, 1fr); }
+}
+
+@media (max-width: 640px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .view{ padding: 16px 14px 40px; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .head{ padding: 12px 14px; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] #title{ font-size: 24px; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .subtabs{ margin: 12px 14px 0; max-width: calc(100% - 28px); overflow-x: auto; }:root[data-ui="night"][data-layout="mobile"] .nj-h1{ font-size: 27px; }:root[data-ui="night"][data-layout="mobile"] .nj-hero-main{ padding: 18px 20px; }:root[data-ui="night"][data-layout="mobile"] .nj-strip, .nj-mem-stats{ grid-template-columns: 1fr 1fr; }:root[data-ui="night"][data-layout="mobile"] .nj-grid{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] .nj-stat-row b{ font-size: 24px; }:root[data-ui="night"][data-layout="mobile"] .nj-ring, .nj-ring svg{ width: 176px; height: 176px; }:root[data-ui="night"][data-layout="mobile"] .nj-night-hero{ padding: 18px 16px; }:root[data-ui="night"][data-layout="mobile"] .nj-cells{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] .nj-kv-grid{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .cfg-row{ grid-template-columns: minmax(0, 1fr); gap: 8px; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .cfg-row > div:last-child{ justify-content: flex-start; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .cfg-head{ flex-direction: column; gap: 4px; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .cfg-head p{ margin-left: 0; text-align: left; max-width: none; }:root[data-ui="night"][data-layout="mobile"] .nj-tl-date b{ font-size: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] *,
+  :root[data-ui="night"] *::before,
+  :root[data-ui="night"] *::after{
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@media (pointer: coarse) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .aff-ops button{ min-width: 40px; min-height: 40px; font-size: 17px; }
+}
+
+@media (max-width: 1080px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-mem-body,
+  :root[data-ui="night"] .nj-split{ align-items: start; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-mem-body > *,
+  :root[data-ui="night"] .nj-split > *{ max-height: none; }
+}
+
+@media (max-width: 1080px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-herobar{
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    padding: 18px 18px 16px;
+  }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-herobar-side{ align-items: flex-start; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-herobar-stats{ grid-template-columns: repeat(4, minmax(0, 1fr)); text-align: left; width: 100%; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-herobar-pattern{ width: 96px; height: 96px; opacity: .09; }
+}
+
+@media (max-height: 620px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-page-body.is-mem{ display: block; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-page-body.is-mem .nj-mem-card,
+  :root[data-ui="night"] .nj-page-body.is-mem .nj-session-col{
+    height: clamp(320px, 70vh, 520px);
+  }
+}
+
+@media (max-width: 1220px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-mem-body{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-mem-side{ flex-direction: row; flex-wrap: wrap; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-mem-side > .nj-card{ flex: 1 1 280px; }:root[data-ui="night"][data-layout="mobile"] /* 单列时别再让卡片去分剩余高度：会被压成只剩个标题壳，
+     改成各自给个高度，整页交给外层滚 */
+  :root[data-ui="night"] .nj-page-body.is-mem{ display: block; }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-page-body.is-mem .nj-mem-card,
+  :root[data-ui="night"] .nj-page-body.is-mem .nj-session-col{
+    height: clamp(320px, 56vh, 460px);
+  }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-page-body.is-mem .nj-mem-side{
+    height: auto;
+    overflow: visible;
+  }
+}
+
+@media (max-width: 1240px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-mem-stats{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-mem-stats{ grid-template-columns: minmax(0, 1fr); }:root[data-ui="night"][data-layout="mobile"] :root[data-ui="night"] .nj-page-body{ padding: 12px 10px 14px; }
+}
+
+/* 原 diarybook.css */
+@media (max-width: 899px) {:root[data-ui="night"][data-layout="mobile"] .cbk-root .diary-workspace{ max-width: 660px; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .book-stage{ padding-top: 44px; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .book{ perspective-origin: 50% 50%; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .spread{ grid-template-columns: minmax(0,1fr); }:root[data-ui="night"][data-layout="mobile"] .cbk-root .spread > .page-left{ display: none; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .spread > .page-right{ grid-column: 1; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .book::after{ display: none; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .page-right, .cbk-root .page-left{ border-radius: var(--paper-radius); box-shadow: inset 0 1px var(--paper-light), inset 1px 0 var(--paper-light), inset -5px 0 9px -7px var(--spine-dark); }:root[data-ui="night"][data-layout="mobile"] .cbk-root .flip-leaf, .cbk-root .flip-leaf.is-backward{ left: 0; width: 100%; transform-origin: center center; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .directory-tab{ top: 0; left: 0; width: 100%; height: 34px; padding: 0 2px 10px; flex-direction: row; justify-content: space-between; border: 0; border-bottom: 1px solid var(--shell-line); background: var(--clear); border-radius: 0; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .directory-tab span:first-child{ writing-mode: horizontal-tb; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .directory-drawer{ top: 34px; width: 100%; max-height: calc(100% - 34px); }:root[data-ui="night"][data-layout="mobile"] .cbk-root .entry-header{ margin-bottom: 18px; padding-bottom: 16px; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .entry-overline{ font-size: var(--size-kicker); }:root[data-ui="night"][data-layout="mobile"] .cbk-root .entry-footer{ min-height: 48px; padding-top: 13px; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .under-book{ margin-top: 22px; flex-direction: column; align-items: stretch; gap: 15px; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .reading-hint{ justify-content: center; }:root[data-ui="night"][data-layout="mobile"] .cbk-root .writing-tools{ justify-content: space-between; gap: 10px; }
+}
+
+/* ---- P6-2 补：599 档。原来 640 直接跳到 380，中间没有过渡，
+   小屏手机上导航和卡片会先挤成一团再突然变样式。 ---- */
+@media (max-width: 599px) {:root[data-ui="night"][data-layout="mobile"] .app{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .side{ padding: 12px; gap: 10px; }:root[data-ui="night"][data-layout="mobile"] .nav-item{ padding: 5px 7px; font-size: 14px; }:root[data-ui="night"][data-layout="mobile"] .main{ padding: 14px; }:root[data-ui="night"][data-layout="mobile"] .entry-grid{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .mem-stats{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .nj-night-bottom, .nj-cols, .nj-hero{ grid-template-columns: 1fr; }:root[data-ui="night"][data-layout="mobile"] .nj-head{ margin-left: 0; margin-right: 0; }:root[data-ui="night"][data-layout="mobile"] .cfg-row{ grid-template-columns: 1fr; gap: 6px; }:root[data-ui="night"][data-layout="mobile"] .nj-hero{ padding: 16px 14px; }
+}
+
+@media (max-width: 380px) {:root[data-ui="night"][data-layout="mobile"] .cbk-root .entry-mood{ font-size: var(--size-small); }
+}
+
+@media (prefers-reduced-motion: reduce) {:root[data-ui="night"][data-layout="mobile"] .cbk-root *::before, .cbk-root *::after{ animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+@media (max-width: 899px) {:root[data-ui="night"][data-layout="mobile"] .cbk-root .motion-toggle{ align-self: stretch; margin-top: 0; }
+}
+
+@media (max-width: 899px) {:root[data-ui="night"][data-layout="mobile"] .cbk-root .book{ height: clamp(280px, 58vh, 520px); aspect-ratio: .66; width: min(100%, 520px); }:root[data-ui="night"][data-layout="mobile"] .cbk-root .cbk-count{ width: 100%; margin-right: 0; }
+}
+
+@media (max-width: 899px) {:root[data-ui="night"][data-layout="mobile"] html.is-book-only .cbk-root .book{ height: min(calc(100dvh - 165px), calc(100vw / .66)); aspect-ratio: .66; width: auto; max-width: 100%; }:root[data-ui="night"][data-layout="mobile"] html.is-book-only .main{ padding: 10px !important; }
+}
+
+/* ---- P6-3 补：刘海屏安全区。底部按钮/内容贴边会被 Home 指示条压住 ---- */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .main { padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+  .side { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .nj-actions, .cfg-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  @media (max-width: 599px) {:root[data-ui="night"][data-layout="mobile"] .main{ padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  }
+}
+
+/* ---- P6-4 手机底部 tab：侧栏变成固定在底部的横条 ----
+   原来的做法是把 .side 排成一行留在顶部（border-bottom），但那样会一直占着
+   首屏高度，而且是"侧栏变横条"不是"底部 tab"。
+   这里改成：.side 固定在视口底部，只留导航；brand 和 side-foot 隐藏；
+   .app 底部留出空间，避免内容被导航压住。 ---- */
+@media (max-width: 899px) {
+  :root[data-ui="night"][data-layout="mobile"] .app {
+    grid-template-columns: 1fr;
+    padding-bottom: calc(62px + env(safe-area-inset-bottom));
+  }
+  :root[data-ui="night"][data-layout="mobile"] .side {
+    position: fixed;
+    left: 0; right: 0; bottom: 0; top: auto;
+    z-index: 900;
+    display: block;
+    margin: 0;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    border: 0;
+    border-top: 1px solid var(--line, #2a3a33);
+    background: var(--bg, #0d1310);
+    backdrop-filter: blur(8px);
+  }
+  :root[data-ui="night"][data-layout="mobile"] .side .brand,
+  :root[data-ui="night"][data-layout="mobile"] .side .side-foot { display: none; }
+  :root[data-ui="night"][data-layout="mobile"] #nav {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 2px;
+    margin: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  :root[data-ui="night"][data-layout="mobile"] #nav::-webkit-scrollbar { display: none; }
+  :root[data-ui="night"][data-layout="mobile"] .nav-item {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 9px 4px;
+    border: 0;
+    border-radius: 8px;
+    /* 10 个导航项在 390 宽的屏上，全称放不下会挤成一坨或被省略号截断。
+       index.html 上每个按钮都带 data-short，这里改成只显示短标签。 */
+    font-size: 0;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  :root[data-ui="night"][data-layout="mobile"] .nav-item::after {
+    content: attr(data-short);
+    font-size: 11.5px;
+    line-height: 1.2;
+  }
+  :root[data-ui="night"][data-layout="mobile"] .nav-item.is-active {
+    background: color-mix(in srgb, var(--accent, #9bc4b1) 16%, transparent);
+    color: var(--accent, #9bc4b1);
+  }
+  :root[data-ui="night"][data-layout="mobile"] .main {
+    min-height: 0;
+    padding-bottom: 8px;
+  }
+}

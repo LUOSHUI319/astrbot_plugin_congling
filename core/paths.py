@@ -48,6 +48,18 @@ def backup_dir() -> Path:
     return _sub("backups")
 
 
+def memory_backup_dir() -> Path:
+    """P5 的固定备份位置：plugin_data/congling/backups。
+
+    框架通常把本插件数据放在 plugin_data/astrbot_plugin_congling。
+    不改变现有数据库/头像路径，仅为全量清除使用约定的备份目录。
+    """
+    root = data_dir()
+    if root.name == PLUGIN_NAME:
+        root = root.parent / "congling"
+    return root / "backups"
+
+
 def forward_cache_dir() -> Path:
     return _sub("cache/forward")
 

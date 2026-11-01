@@ -40,7 +40,8 @@ CREATE TABLE proactive_log(
 CREATE TABLE mem_atom(
   id INTEGER PRIMARY KEY AUTOINCREMENT, persona_id TEXT DEFAULT 'ling', kind TEXT DEFAULT 'event',
   text TEXT DEFAULT '', importance REAL DEFAULT 0.5, status TEXT DEFAULT 'active',
-  unread INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0
+  unread INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0,
+  scope TEXT DEFAULT 'user', session_id TEXT DEFAULT ''
 );
 """
 

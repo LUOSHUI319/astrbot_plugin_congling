@@ -265,9 +265,15 @@ async def qzone_publish(plugin: Any, content: str) -> dict[str, Any]:
 
 # --------------------------------------------------------------------- 记忆
 async def memory_search(
-    plugin: Any, query: str, k: int = 8, cross_session: bool = True
+    plugin: Any, query: str, k: int = 8, cross_session: bool = True, _event: Any = None
 ) -> dict[str, Any]:
-    """让模型主动翻自己的长期记忆。"""
+    """让模型主动翻自己的长期记忆。
+
+    以前这里传 scope="user", subject=""，而空主体在候选层等于「只查 global」，
+    于是模型用工具搜什么都搜不到——而聊天时的注入却是有记忆的。
+    现在拿得到事件就用当前会话 + 发言人，拿不到就按「群聊 + 公共」全库搜，
+    两种情况都不碰别人的私聊。
+    """
     if plugin.memory is None:
         return {"text": "记忆模块没开"}
     query = (query or "").strip()
@@ -277,9 +283,24 @@ async def memory_search(
         limit = max(1, min(int(k or 8), 20))
     except (TypeError, ValueError):
         limit = 8
+    session_r = actor_r = ""
+    scope, subject = "user", ""
+    try:
+        if _event is not None:
+            from ..memory.refs import platform_key, session_ref as mk_session, subject_ref as mk_subject
+
+            platform = platform_key(getattr(_event, "get_platform_name", lambda: "qq")() or "qq")
+            gid = str(_event.get_group_id() or "")
+            uid = str(_event.get_sender_id() or "")
+            session_r = mk_session(platform, "group" if gid else "private", gid or uid)
+            actor_r = mk_subject(platform, uid)
+            scope, subject = ("group", gid) if gid else ("user", uid)
+    except Exception:
+        session_r = actor_r = ""
     try:
         body = await plugin.memory.recall(
-            query, scope="user", subject="", k=limit, cross_session=bool(cross_session)
+            query, scope=scope, subject=subject, k=limit, cross_session=bool(cross_session),
+            session_ref=session_r, actor_ref=actor_r, mode="all",
         )
     except TypeError:
         # 老签名没有 cross_session，退回按会话查
@@ -289,6 +310,53 @@ async def memory_search(
     if not body:
         return {"text": "记忆里没找到相关的"}
     return {"text": body}
+
+
+def dream_recall_intent(text: str) -> bool:
+    """可选防误调用兜底，绝不主动触发工具；黑名单先于白名单。"""
+    denied = ("梦想", "白日梦", "中国梦", "好梦", "美梦成真", "梦寐以求",
+              "做梦去吧", "别做梦", "春秋大梦")
+    allowed = ("做梦", "梦见", "梦到", "梦里", "梦境", "噩梦", "做过梦")
+    if any(word in text for word in denied):
+        return False
+    # 要求梦短语紧接第二人称，不能被「你知道他做梦吗」穿过主语门禁。
+    return any(re.search(r"(?:你|您)(?:自己|昨晚|昨天晚上|今晚|有没有|有|曾经|之前|还|的|在|最近|"
+                         r"睡觉时|睡觉的时候|都|会|以前|到底|\s){0,12}" + word, text)
+               for word in allowed)
+
+
+async def dream_recall(plugin: Any, query: str = "", _event: Any = None) -> dict[str, Any]:
+    """只查已发放梦库，保留 P3 的私人正文受众边界。"""
+    night = getattr(plugin, "night", None)
+    dreamer = getattr(night, "dreamer", None)
+    if dreamer is None:
+        return {"text": "没有可查询的梦境记录。", "data": []}
+    if plugin.cfg.bool("night.dream_recall_guard", False):
+        msg = getattr(_event, "_congling_msg", None)
+        text = str(getattr(msg, "text", "") or getattr(_event, "message_str", "") or "")
+        if not dream_recall_intent(text):
+            return {"text": "这句话没有明确问我自己的梦，不查询梦境。", "data": []}
+    private = False
+    if _event is not None:
+        try:
+            private = not bool(_event.get_group_id()) and bool(plugin.is_admin(_event))
+        except Exception:
+            pass
+    if not dreamer._loaded:
+        await dreamer.load()
+    entries = dreamer.recall(str(query or ""), max(1, min(20, plugin.cfg.int("night.dream_recall_k", 5))))
+    items, lines = [], []
+    for entry in entries:
+        if entry.level <= 3 or entry.expired:
+            text = "好像做过，记不清了。不要据此编造梦的细节。"
+        elif private:
+            text = entry.text
+        else:
+            text = "我做过一段梦；正文是私人内容，只能在管理员私聊里回忆。"
+        items.append({"dream_id": entry.dream_id, "level": entry.level, "created_at": entry.created_at,
+                      "text": text})
+        lines.append(f"[{time.strftime('%m-%d %H:%M', time.localtime(entry.created_at))} / {entry.level}级] {text}")
+    return {"text": "\n".join(lines) or "没有找到相关的梦，不要编造。", "data": items}
 
 
 def build_builtin(plugin: Any) -> list[Capability]:
@@ -373,9 +441,26 @@ def build_builtin(plugin: Any) -> list[Capability]:
                 },
                 "required": ["query"],
             },
-            handler=lambda query="", k=8, cross_session=True: memory_search(
-                plugin, query, k, cross_session
+            handler=lambda query="", k=8, cross_session=True, _event=None: memory_search(
+                plugin, query, k, cross_session, _event=_event
             ),
+            timeout=6.0,
+            takes_event=True,
+        ),
+        Capability(
+            name="dream.recall",
+            description=(
+                "只在对方明确问起你自己的梦时使用，例如「你梦见什么了」「昨晚做梦了吗」「做过噩梦吗」。"
+                "对方说「梦想」「白日梦」「别做梦了」「中国梦」时不要调用。"
+                "只查梦境，不查普通记忆。query 留空按等级由高到低、同级按时间由近到远取最近记录；"
+                "有值则在梦文本中匹配。低等级或已淡忘只能回答记不清，不能编造。私人正文只向管理员私聊返回。"
+            ),
+            group="self",
+            parameters={"type": "object", "properties": {
+                "query": {"type": "string", "description": "可选，梦的内容关键词；问有没有梦时留空", "default": ""},
+            }},
+            handler=lambda query="", _event=None: dream_recall(plugin, query, _event),
+            takes_event=True,
             timeout=6.0,
         ),
         Capability(

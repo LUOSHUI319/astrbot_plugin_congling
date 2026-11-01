@@ -16,6 +16,8 @@ from astrbot.api import logger
 
 from ..core.contracts import MemoryDraft, MemoryHit
 from .grade import STRENGTH, next_review_at
+from .refs import platform_key, resolved_refs
+from ..core.exc import exc_brief
 
 DUP_THRESHOLD = 0.86
 
@@ -80,7 +82,7 @@ class AtomStore:
             try:
                 atom_id = await self.add(draft, scope=scope, subject=subject, persona_id=persona_id)
             except Exception as exc:
-                logger.debug(f"[congling] 写入记忆失败: {exc!r}")
+                logger.warning(f"[congling] 写入记忆失败: {exc_brief(exc)}")
                 continue
             if atom_id:
                 written.append(atom_id)
@@ -101,30 +103,33 @@ class AtomStore:
         # 模型给的 subject 只是自然语言文本，拿它当主键会把同一个人拆成
         # 「望山」「望山（定制插件/远程部署）」好几份 —— 现实里已经发生了。
         # subject_key 才是 _prepare_drafts 认出来的主体（QQ 号或已确认主体），
-        # draft.subject 只是模型写的自然语言称呼，只能兜底。
-        subject = getattr(draft, "subject_key", "") or subject or draft.subject
+        # draft.subject 只是模型写的自然语言称呼，不能用来兜底主键。
+        subject = getattr(draft, "subject_key", "") or subject
+        refs = await self._draft_refs(draft, subject, persona_id, scope)
         digest = norm_hash(text)
 
         # 1) 精确重复
         existing = await self.store.fetch_one(
             "SELECT id, importance, hit_count FROM mem_atom "
-            "WHERE persona_id=? AND scope=? AND subject_id=? AND norm_hash=? AND status='active'",
-            (persona_id, scope, subject, digest),
+            "WHERE persona_id=? AND scope=? AND subject_id=? AND session_id=? AND norm_hash=? AND status='active' "
+            "AND COALESCE(session_ref,'')=?",
+            (persona_id, scope, subject, draft.session_id or "", digest, refs[1]),
         )
-        if existing:
+        if existing and scope != "self":
             await self._reinforce(int(existing["id"]), draft.importance)
             return int(existing["id"])
 
         # 2) 近似重复 / 冲突
         candidates = await self.store.fetch_all(
             "SELECT id, text, importance FROM mem_atom "
-            "WHERE persona_id=? AND scope=? AND subject_id=? AND status='active' "
+            "WHERE persona_id=? AND scope=? AND subject_id=? AND session_id=? AND status='active' "
+            "AND COALESCE(session_ref,'')=? "
             "ORDER BY id DESC LIMIT 200",
-            (persona_id, scope, subject),
+            (persona_id, scope, subject, draft.session_id or "", refs[1]),
         )
         similar_id = 0
         best_ratio = 0.0
-        for row in candidates:
+        for row in candidates if scope != "self" else []:
             ratio = similarity(text, str(row.get("text") or ""))
             if ratio > best_ratio:
                 best_ratio = ratio
@@ -171,12 +176,16 @@ class AtomStore:
             if covered_at > 0:
                 unread, unread_since = 1, covered_at
 
+        if draft.experienced:
+            unread, unread_since = 0, 0
+
         atom_id = await self.store.execute(
             "INSERT INTO mem_atom(persona_id, scope, subject_id, kind, text, norm_hash, keywords, "
             "importance, confidence, source_msg_ids, created_at, last_hit_at, hit_count, decay, status, protect, supersedes, "
             "session_id, session_kind, session_label, unread, unread_since, "
-            "mem_level, level_reason, level_tags, level_source, strength, next_review_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "mem_level, level_reason, level_tags, level_source, strength, next_review_at, "
+            "subject_ref, session_ref, actor_ref, ref_status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 persona_id,
                 scope,
@@ -206,6 +215,7 @@ class AtomStore:
                 draft.level_source or "llm",
                 strength,
                 next_review,
+                *refs,
             ),
         )
         if supersedes:
@@ -213,6 +223,32 @@ class AtomStore:
                 "UPDATE mem_atom SET status='archived' WHERE id=?", (supersedes,)
             )
         return int(atom_id or 0)
+
+    async def _draft_refs(self, draft: MemoryDraft, subject: str, persona_id: str, scope: str) -> tuple[str, str, str, str]:
+        platforms = {platform_key(draft.platform)} if draft.platform else set()
+        senders = {draft.actor_id} if draft.actor_id else set()
+        if draft.evidence_msg_ids:
+            marks = ",".join("?" for _ in draft.evidence_msg_ids)
+            evidence = await self.store.fetch_all(
+                f"SELECT msg_id, platform, sender_id FROM msg_archive WHERE msg_id IN ({marks}) "
+                "AND session_id=? AND session_kind=?",
+                (*draft.evidence_msg_ids, draft.session_id, draft.session_kind),
+            )
+            platforms.update(platform_key(r["platform"]) for r in evidence)
+            senders.update(str(r["sender_id"] or "") for r in evidence)
+            if {str(r["msg_id"]) for r in evidence} != set(draft.evidence_msg_ids):
+                senders.add("")
+        if not platforms and draft.session_id and draft.session_kind:
+            rows = await self.store.fetch_all(
+                "SELECT DISTINCT platform FROM msg_archive WHERE session_id=? AND session_kind=?",
+                (draft.session_id, draft.session_kind),
+            )
+            platforms = {platform_key(r["platform"]) for r in rows}
+        if draft.experienced:
+            senders = {"bot"}
+        return resolved_refs({"subject_id": subject, "persona_id": persona_id, "scope": scope,
+                              "session_id": draft.session_id, "session_kind": draft.session_kind},
+                             platforms, senders)
 
     @staticmethod
     def _looks_conflicting(new_text: str, old_text: str) -> bool:
@@ -331,6 +367,9 @@ class AtomStore:
         params.extend([max(1, min(500, limit)), max(0, offset)])
         rows = await self.store.fetch_all(sql, params)
         for row in rows:
+            # 向量是 float32 二进制 BLOB：面板把它当文本序列化时会炸 utf-8 解码，
+            # 页面根本用不到它，出去之前直接摘掉。
+            row.pop("embedding", None)
             row["keywords"] = self._loads(row.get("keywords"), [])
             row["evidence"] = self._loads(row.get("source_msg_ids"), [])
             row["level_tags"] = self._loads(row.get("level_tags"), [])
@@ -408,6 +447,8 @@ class AtomStore:
         if "text" in fields and isinstance(fields.get("text"), str):
             sets.append("norm_hash=?")
             params.append(norm_hash(fields["text"]))
+        if "subject_id" in fields:
+            sets.extend(["subject_ref=''", "ref_status='legacy'"])
         if not sets:
             return
         params.append(int(atom_id))
@@ -442,7 +483,7 @@ class AtomStore:
             score=score,
             created_at=int(row.get("created_at") or 0),
             decay=float(row.get("decay") or 1.0),
-            level=int(row.get("mem_level") or 3),
+            level=level_of(row.get("mem_level")),
             strength=float(row.get("strength") or 0.65),
             evidence=[str(item) for item in evidence][:5],
             subject_id=str(row.get("subject_id") or ""),
@@ -450,6 +491,9 @@ class AtomStore:
             session_id=str(row.get("session_id") or ""),
             session_kind=str(row.get("session_kind") or ""),
             session_label=str(row.get("session_label") or ""),
+            subject_ref=str(row.get("subject_ref") or ""),
+            session_ref=str(row.get("session_ref") or ""),
+            actor_ref=str(row.get("actor_ref") or ""),
         )
 
     @staticmethod

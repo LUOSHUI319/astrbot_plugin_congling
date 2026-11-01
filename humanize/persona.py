@@ -1,7 +1,4 @@
-"""人格档案。
-
-人格不写死在代码里：存在 KV 里，UI 可改、可回滚、可多角色。
-这里负责三件事——默认人设、读写版本、注入 prompt。
+"""单一人格：跟随 AstrBot，保留旧标识和 KV 以兼容历史数据。
 
 注入策略（很重要）：
 - 检测到 private_companion 在跑 → 不注入人格（避免双人格打架），只做表达层；
@@ -18,16 +15,9 @@ from astrbot.api import logger
 from ..core.prompt_parts import add_temp_part
 
 from ..core.contracts import Persona
+from ..core.exc import exc_brief
 
-DEFAULT_IDENTITY = (
-    "你叫绫，二十几岁，住在城市边缘的老小区，房间朝北，窗台上有一盆总也养不好的薄荷。\n"
-    "你话不多，句子短，习惯把情绪落在具体的事情上，而不是形容词上。\n"
-    "别人讲事情的时候，你更关心他当时的感觉，而不是急着给方案。\n"
-    "你有自己的作息，夜里精神最好，白天有点慢。你不催人睡觉，也不喜欢被催。\n"
-    "你不知道的事就说不知道，不编，不硬答。\n"
-    "你会记得别人随口提过的小事，在合适的时候提一句，但不像翻档案一样列出来。\n"
-    "你不用「作为一个AI」「我建议」「总结一下」这种说法，也不解释自己在做什么。"
-)
+DEFAULT_IDENTITY = ""
 
 DEFAULT_STYLE = {
     "max_chars": 25,
@@ -47,6 +37,8 @@ STYLE_TEMPLATE = """说话方式：
 MODE_BUILTIN = "builtin"
 MODE_ASTRBOT = "astrbot"
 MODE_NONE = "none"
+SELF_ACTION_RULE = "标为主体是我的日记、梦、说说和主动消息，这些是你自己的行为；他人的经历不可认领，私密正文不可向未授权受众透露。"
+DREAM_RECALL_RULE = "你有梦境记录，但不要主动提梦，只有对方问起才查。1~3 级的梦只记得好像做过，记不清了，不要编造细节。"
 
 
 class PersonaService:
@@ -76,7 +68,7 @@ class PersonaService:
             data = None
         if isinstance(data, dict):
             self._persona = Persona(
-                persona_id=str(data.get("persona_id") or self.config.persona_id),
+                persona_id=self.config.persona_id,
                 name=str(data.get("name") or self.config.persona_name),
                 identity=str(data.get("identity") or DEFAULT_IDENTITY),
                 style=data.get("style") if isinstance(data.get("style"), dict) else dict(DEFAULT_STYLE),
@@ -85,6 +77,7 @@ class PersonaService:
                 state=data.get("state") if isinstance(data.get("state"), dict) else {},
             )
         self._loaded = True
+        self._persona.name = await self.display_name()
         logger.debug(f"[congling] 人格已加载: {self._persona.name}")
 
     def get(self) -> Persona:
@@ -92,8 +85,11 @@ class PersonaService:
 
     async def save(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = self._persona
+        if "persona_id" in payload and payload["persona_id"] != current.persona_id:
+            logger.warning("[congling] 拒绝修改 persona_id：当前人格的兼容标识不可修改")
+            raise ValueError("persona_id 不可修改；本次人格编辑未保存")
         updated = Persona(
-            persona_id=str(payload.get("persona_id") or current.persona_id),
+            persona_id=current.persona_id,
             name=str(payload.get("name") or current.name),
             identity=str(payload.get("identity") or current.identity),
             style=payload.get("style") if isinstance(payload.get("style"), dict) else current.style,
@@ -125,6 +121,8 @@ class PersonaService:
             {
                 "ts": int(time.time()),
                 "persona": {
+                    # 少存这一行，改错身份时就不知道当初是哪个人格
+                    "persona_id": persona.persona_id,
                     "name": persona.name,
                     "identity": persona.identity,
                     "style": persona.style,
@@ -164,7 +162,7 @@ class PersonaService:
         persona = self._persona
         return {
             "mode": self.mode,
-            "astrbot_persona_id": self.config.str("persona.astrbot_persona_id", ""),
+            "astrbot_persona_id": "",
             "persona_id": persona.persona_id,
             "name": persona.name,
             "identity": persona.identity,
@@ -180,41 +178,33 @@ class PersonaService:
 
     @property
     def mode(self) -> str:
-        mode = self.config.str("persona.mode", MODE_BUILTIN)
-        if mode not in {MODE_BUILTIN, MODE_ASTRBOT, MODE_NONE}:
-            return MODE_BUILTIN
-        return mode
+        # 旧配置 builtin/none 仍可读取，但不再启用另一套人设。
+        return MODE_ASTRBOT
+
+    async def current_astrbot_persona(self) -> dict[str, Any]:
+        """只解析框架当前默认人格，不枚举档案、不采用插件旧选择器。"""
+        manager = getattr(getattr(self.plugin, "context", None), "persona_manager", None)
+        if manager is None:
+            return {"name": "AstrBot 当前人格", "prompt": ""}
+        try:
+            getter = getattr(manager, "get_default_persona_v3", None)
+            if callable(getter):
+                current = await getter()
+                if isinstance(current, dict):
+                    return {"name": str(current.get("name") or "AstrBot 当前人格"),
+                            "prompt": str(current.get("prompt") or "")}
+            wanted = str(getattr(manager, "default_persona", "default") or "default")
+            current = await manager.get_persona(wanted)
+            return {"name": str(getattr(current, "name", "") or wanted),
+                    "prompt": str(getattr(current, "system_prompt", "") or "")}
+        except Exception as exc:
+            logger.warning(f"[congling] 读取 AstrBot 当前人格失败: {exc_brief(exc)}")
+            return {"name": "AstrBot 当前人格", "prompt": ""}
 
     async def available_personas(self) -> dict[str, Any]:
-        """列出 AstrBot 里已有的人格，供设置页下拉选择。"""
-        result: dict[str, Any] = {"items": [], "default": "default"}
-        manager = getattr(self.plugin.context, "persona_manager", None)
-        if manager is None:
-            return result
-        try:
-            personas = await manager.get_all_personas()
-        except Exception as exc:
-            logger.debug(f"[congling] 读取 AstrBot 人格失败: {exc!r}")
-            return result
-        items: list[dict[str, Any]] = []
-        for item in personas or []:
-            pid = str(getattr(item, "persona_id", "") or getattr(item, "id", "") or "").strip()
-            if not pid:
-                continue
-            name = str(getattr(item, "name", "") or pid)
-            prompt = str(getattr(item, "system_prompt", "") or "")
-            items.append(
-                {
-                    "id": pid,
-                    "name": name,
-                    "preview": prompt[:180],
-                    "prompt": prompt[:6000],
-                    "length": len(prompt),
-                }
-            )
-        result["items"] = items
-        result["default"] = str(getattr(manager, "default_persona", "default") or "default")
-        return result
+        """旧接口兼容壳：只返回当前人格，不提供可切换目录。"""
+        current = await self.current_astrbot_persona()
+        return {"items": [{"id": "", **current}], "default": ""}
 
     async def display_name(self) -> str:
         """写作类模块（日记 / 说说）要用的「我是谁」。
@@ -222,19 +212,9 @@ class PersonaService:
         astrbot 模式下取 AstrBot 当前人格的名字 —— 不然插件还叫自己「绫」，
         而框架里挂的是别人，日记一开头就自我介绍了错的名字。
         """
-        if self.mode == MODE_ASTRBOT:
-            try:
-                data = await self.available_personas()
-                items = data.get("items") or []
-                wanted = self.config.str("persona.astrbot_persona_id", "") or str(data.get("default") or "")
-                for item in items:
-                    if wanted and item.get("id") == wanted:
-                        return str(item.get("name") or wanted)
-                if items:
-                    return str(items[0].get("name") or "")
-            except Exception as exc:
-                logger.debug(f"[congling] 取 AstrBot 人格名失败: {exc!r}")
-        return self._persona.name or self.config.str("persona.name", "绫") or "绫"
+        name = str((await self.current_astrbot_persona())["name"])
+        self._persona.name = name
+        return name
 
     # ================================================================ 注入
     def style_text(self) -> str:
@@ -257,21 +237,8 @@ class PersonaService:
             logger.debug("[congling] 拟人主链路已让位，跳过人格注入")
             return
 
-        mode = self.mode
-        layers: list[str] = []
-
-        if mode == MODE_BUILTIN:
-            # 插件自带人设：完整注入
-            layers.append(self._persona.identity or DEFAULT_IDENTITY)
-            layers.append(self.style_text())
-            taboos = self._persona.taboos
-            if taboos:
-                layers.append("不要碰：\n" + "\n".join(f"- {item}" for item in taboos))
-        elif mode == MODE_ASTRBOT:
-            # 用 AstrBot 的人格：人设文本交给框架，这里只补插件独有的信息层
-            logger.debug("[congling] 人设来源=AstrBot，跳过人设文本注入")
-        else:
-            logger.debug("[congling] 人设来源=none，不注入任何人设")
+        # 人设文本始终交给框架；只追加两条恒定的行为规则。
+        layers = [SELF_ACTION_RULE, DREAM_RECALL_RULE]
 
         # 静态人设（identity / style / taboos）每轮内容完全一样，留在 system_prompt
         # 不影响前缀缓存；动态层（关系、状态、场景）每轮都变，必须走临时注入，

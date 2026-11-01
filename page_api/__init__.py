@@ -17,9 +17,11 @@ from astrbot.api import logger
 from astrbot.api.web import request
 
 from ..core import paths
+from ..core.memory_guard import memory_work
 from .diary import DiaryMixin
 from .memory_m3 import MemoryM3Mixin
 from .memory_v2 import MemoryV2Mixin
+from .memory_reset import MemoryResetMixin
 from .proactive import ProactiveMixin
 
 PAGE_API_PREFIX = "/astrbot_plugin_congling/page"
@@ -225,7 +227,7 @@ def _schema_groups(config: Any) -> list[dict[str, Any]]:
     return groups
 
 
-class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
+class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self.cfg = plugin.cfg
@@ -240,6 +242,12 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
 
     async def _persist(self, nested: dict[str, Any]) -> bool:
         """把嵌套配置写进插件配置对象并落盘。"""
+        persona = nested.get("persona")
+        if isinstance(persona, dict):
+            if "persona_id" in persona and persona["persona_id"] != self.cfg.persona_id:
+                raise ValueError("当前人格标识不可修改")
+            if persona.get("mode", "astrbot") != "astrbot" or persona.get("astrbot_persona_id", ""):
+                raise ValueError("只支持跟随 AstrBot 当前人格，不支持切换")
         raw = self.plugin.raw_config
         saved = False
         if isinstance(raw, dict):
@@ -275,6 +283,7 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
             ("/memory/search", self.memory_search, ["POST"]),
             ("/memory/update", self.memory_update, ["POST"]),
             ("/memory/delete", self.memory_delete, ["POST"]),
+            ("/memory/reset", self.memory_reset, ["POST"]),
             ("/inbox", self.inbox, ["GET"]),
             ("/tools", self.tools, ["GET"]),
             ("/subjects/merge_candidates", self.subject_merge_candidates, ["GET"]),
@@ -330,6 +339,7 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
             ("/affinity/save", self.affinity_save, ["POST"]),
             ("/affinity/config", self.affinity_save_config, ["POST"]),
             ("/affinity/settle", self.affinity_settle, ["POST"]),
+            ("/affinity/remove", self.affinity_remove, ["POST"]),
             # ---- 0.5.0 头像
             ("/avatar", self.avatar_state, ["GET"]),
             ("/avatar/set", self.avatar_set, ["POST"]),
@@ -337,6 +347,9 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
         ]
         for path, handler, methods in routes:
             try:
+                if path != "/memory/reset":
+                    # 页面操作也必须参与清除闸门；不能与删除事务交叉回写。
+                    handler = memory_work(handler.__func__).__get__(self)
                 register(f"{PAGE_API_PREFIX}{path}", handler, methods, f"从绫开始 {path}")
             except Exception as exc:
                 logger.warning(f"[congling] 注册页面接口失败 {path}: {exc!r}")
@@ -382,7 +395,10 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
                 return _err("人格模块未就绪")
             data = self.plugin.persona.as_dict()
             data["versions"] = await self.plugin.persona.versions()
-            data["astrbot_personas"] = await self.plugin.persona.available_personas()
+            current = await self.plugin.persona.current_astrbot_persona()
+            data.update(name=current["name"], identity=current["prompt"], current_persona=current)
+            # 兼容旧渲染协议，只有当前人格；不枚举、不允许选择其他人格。
+            data["astrbot_personas"] = {"items": [{"id": "", **current}], "default": ""}
             return _ok(data)
         except Exception as exc:
             return _err(repr(exc)[:200])
@@ -395,6 +411,8 @@ class PageApi(ProactiveMixin, DiaryMixin, MemoryM3Mixin, MemoryV2Mixin):
             # 人设来源属于插件配置，不进人格 KV
             mode = body.pop("mode", None)
             astrbot_id = body.pop("astrbot_persona_id", None)
+            if mode not in (None, "astrbot") or astrbot_id not in (None, ""):
+                return _err("只支持跟随 AstrBot 当前人格，不支持切换")
             data = await self.plugin.persona.save(body)
 
             changes: dict[str, str] = {}

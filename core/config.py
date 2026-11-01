@@ -24,7 +24,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "mode": "astrbot",
         "astrbot_persona_id": "",
         "persona_id": "ling",
-        "name": "绫",
+        "name": "AstrBot 当前人格",
         "identity": "",
         "active_hours": "09:00-03:30",
         "version_history_limit": 20,
@@ -198,6 +198,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "crawl_enabled": True,
         "crawl_use_llm": False,
         "dream_enabled": False,
+        "dream_mode": "hybrid",
+        "dream_mention_min_level": 4,
+        "dream_hint_scope": "session",
+        "dream_recall_guard": False,
+        "dream_recall_k": 5,
         "dream_remember_by_level": True,
         "dream_start_after_minutes": 60,
         "dream_interval_minutes": 60,
@@ -207,6 +212,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "noon_nap_jitter_minutes": 15,
         "dream_tags": ["美梦", "噩梦"],
         "dream_extra_tags": [],
+        "woke_hint_max_uses": 1,
+        "woke_hint_ttl_minutes": 120,
+        "dream_hint_max_uses": 2,
+        "dream_hint_ttl_minutes": 120,
     },
     "close": {
         "enabled": True,
@@ -372,7 +381,7 @@ class Config:
 
     @property
     def persona_name(self) -> str:
-        return self.str("persona.name", "绫") or "绫"
+        return self.str("persona.name", "AstrBot 当前人格") or "AstrBot 当前人格"
 
     def platforms(self) -> list[str]:
         items = [str(item).lower() for item in self.list("basic.platforms", ["aiocqhttp"])]

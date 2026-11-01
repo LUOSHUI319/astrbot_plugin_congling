@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import defaultdict
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core.prompt_parts import add_temp_part
+from ..core.memory_guard import memory_work
 
 from ..core.budget import BudgetSlice
 from ..core.contracts import MemoryDraft, MemoryHit, PerceivedMessage
@@ -26,9 +28,13 @@ from .affinity import Affinity
 from .atom import AtomStore, norm_hash
 from .extractor import MemoryExtractor
 from .grade import LevelJudge
+from .ledger import EventLedger, PRIVATE_AUDIENCE
 from .profile import ProfileBook
 from .retrieve import Retriever
 from .subject import SubjectBook
+from .perspective import GENERIC_SUBJECTS, SELF_SUBJECT, narrator_name
+from .refs import actor_ref, session_ref, platform_key
+from ..core.exc import exc_brief
 
 MARKER = "<!--congling:memory-->"
 MAX_BUFFER_TURNS = 60
@@ -45,6 +51,7 @@ class MemoryService:
         # 0.5.0：等级判定 / 用户识别库 / 好感度 / 画像，四件套都挂在门面上
         self.grades = LevelJudge(plugin)
         self.subjects = SubjectBook(plugin)
+        self.ledger = EventLedger(plugin)
         self.affinity = Affinity(plugin)
         self.profiles = ProfileBook(plugin, self.subjects, self.affinity)
         self._buffers: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -52,50 +59,57 @@ class MemoryService:
         self._extracting: set[str] = set()
         self._task: asyncio.Task | None = None
         self._stopped = False
+        self._recall = {"last_hits": None, "at": 0, "error": None}
+        self._subject_diag = {"unresolved": None, "at": 0, "error": None}
 
     # ================================================================ 生命周期
     async def start(self) -> None:
+        self._task = self.plugin.spawn_background(self._scheduler())
         self.plugin.bus.subscribe(self.plugin.bus.ON_PERCEIVED, self._on_perceived)
         self._stopped = False
-        self._task = asyncio.get_running_loop().create_task(self._scheduler())
         try:
             await self.store.kv_set("memory:started_at", int(time.time()))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[congling] 记录记忆启动状态失败: {exc_brief(exc)}")
         logger.info("[congling] 记忆模块就绪")
+        await self._refresh_subject_diagnostics()
 
     async def flush(self) -> None:
         self._stopped = True
+        self.plugin.bus.unsubscribe(self.plugin.bus.ON_PERCEIVED, self._on_perceived)
         if self._task is not None:
             self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
         # 内存缓冲已经不作数了，卸载前把库里所有未消池的会话各抽一次
         try:
             rows = await self.store.fetch_all(
                 "SELECT DISTINCT m.session_id AS sid FROM msg_archive m "
                 "WHERE m.id > COALESCE((SELECT c.last_msg_row FROM inject_cursor c "
-                "WHERE c.session_id = m.session_id), 0) AND m.text IS NOT NULL AND m.text <> ''"
+                "WHERE c.persona_id=? AND c.session_id = m.session_id), 0) AND m.text IS NOT NULL AND m.text <> ''",
+                (self.config.persona_id,),
             )
             for row in rows:
                 session_id = str(row.get("sid") or "")
                 if session_id:
                     await self._extract_session(session_id, force=True)
         except Exception as exc:
-            logger.debug(f"[congling] 卸载前消池失败: {exc!r}")
+            logger.warning(f"[congling] 卸载前消池失败: {exc_brief(exc)}")
 
     async def _scheduler(self) -> None:
         while not self._stopped:
             try:
                 await self._sweep()
+                await self._refresh_subject_diagnostics()
                 try:
                     await self.store.kv_set("memory:tick", await self._tick_snapshot())
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(f"[congling] 记忆心跳状态保存失败: {exc_brief(exc)}")
                 await asyncio.sleep(15)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                logger.debug(f"[congling] 记忆调度异常: {exc!r}")
+                logger.warning(f"[congling] 记忆调度异常: {exc_brief(exc)}")
                 await asyncio.sleep(30)
 
     async def _sweep(self) -> None:
@@ -115,12 +129,12 @@ class MemoryService:
                 "SELECT m.session_id AS sid, COUNT(*) AS cnt, MAX(m.ts) AS last_ts "
                 "FROM msg_archive m "
                 "WHERE m.id > COALESCE((SELECT c.last_msg_row FROM inject_cursor c "
-                "WHERE c.session_id = m.session_id), 0) "
+                "WHERE c.persona_id=? AND c.session_id = m.session_id), 0) "
                 "AND m.text IS NOT NULL AND m.text <> '' "
-                "GROUP BY m.session_id"
+                "GROUP BY m.session_id", (self.config.persona_id,),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 扫描消息池失败: {exc!r}")
+            logger.warning(f"[congling] 扫描消息池失败: {exc_brief(exc)}")
             return
         now = time.time()
         for row in rows:
@@ -136,35 +150,53 @@ class MemoryService:
         rows = await self.store.fetch_all(
             "SELECT m.session_id AS sid, COUNT(*) AS cnt FROM msg_archive m "
             "WHERE m.id > COALESCE((SELECT c.last_msg_row FROM inject_cursor c "
-            "WHERE c.session_id = m.session_id), 0) "
-            "AND m.text IS NOT NULL AND m.text <> '' GROUP BY m.session_id"
+            "WHERE c.persona_id=? AND c.session_id = m.session_id), 0) "
+            "AND m.text IS NOT NULL AND m.text <> '' GROUP BY m.session_id", (self.config.persona_id,),
         )
         return {
             "at": int(time.time()),
             "pool": {str(row["sid"]): int(row["cnt"]) for row in rows},
         }
 
+    async def _refresh_subject_diagnostics(self) -> None:
+        """只读统计当前人格里尚未由 qq 来源确认的主体；不迁移历史数据。"""
+        try:
+            count = await self.store.scalar(
+                "SELECT COUNT(*) FROM mem_subject WHERE persona_id=? "
+                "AND (source IS NULL OR source<>'qq')", (self.config.persona_id,),
+            )
+            self._subject_diag = {"unresolved": int(count), "at": int(time.time()), "error": None}
+        except Exception as exc:
+            self._subject_diag = {"unresolved": None, "at": int(time.time()),
+                                  "error": type(exc).__name__}
+            logger.warning(f"[congling] 主体诊断统计失败: {exc_brief(exc)}")
+
+    def snapshot(self) -> dict[str, Any]:
+        # 最近一次实际检索合并后的命中数（预算裁剪前），不是全库条数。
+        return {"recall": dict(self._recall), "subject": dict(self._subject_diag)}
+
     # ------------------------------------------------------------ 会话水位
     async def _water(self, session_id: str) -> int:
         row = await self.store.fetch_one(
-            "SELECT last_msg_row FROM inject_cursor WHERE session_id=?", (session_id,)
+            "SELECT last_msg_row FROM inject_cursor WHERE persona_id=? AND session_id=?",
+            (self.config.persona_id, session_id),
         )
         return int(row.get("last_msg_row") or 0) if row else 0
 
     async def _set_water(self, session_id: str, row_id: int) -> None:
         await self.store.execute(
-            "INSERT INTO inject_cursor(session_id, last_msg_row, last_atom_ids, updated_at) "
-            "VALUES(?,?,'[]',?) "
-            "ON CONFLICT(session_id) DO UPDATE SET "
+            "INSERT INTO inject_cursor(persona_id, session_id, last_msg_row, last_atom_ids, updated_at) "
+            "VALUES(?,?,?,'[]',?) "
+            "ON CONFLICT(persona_id, session_id) DO UPDATE SET "
             "last_msg_row=excluded.last_msg_row, updated_at=excluded.updated_at",
-            (session_id, int(row_id), int(time.time())),
+            (self.config.persona_id, session_id, int(row_id), int(time.time())),
         )
 
     async def _pending_rows(self, session_id: str) -> list[dict[str, Any]]:
         """该会话还没消池的消息，按时间正序。"""
         water = await self._water(session_id)
         rows = await self.store.fetch_all(
-            "SELECT id, sender_id, sender_name, text, ts FROM msg_archive "
+            "SELECT id, msg_id, sender_id, sender_name, text, ts, platform FROM msg_archive "
             "WHERE session_id=? AND id>? AND text IS NOT NULL AND text<>'' "
             "ORDER BY id ASC LIMIT 120",
             (session_id, water),
@@ -174,7 +206,7 @@ class MemoryService:
     async def _scope_from_archive(self, session_id: str) -> tuple[str, str]:
         row = await self.store.fetch_one(
             "SELECT session_kind, sender_id FROM msg_archive "
-            "WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            "WHERE session_id=? AND sender_id<>'bot' ORDER BY id DESC LIMIT 1",
             (session_id,),
         )
         if not row:
@@ -206,6 +238,7 @@ class MemoryService:
             return False
 
     # ================================================================ 注入
+    @memory_work
     async def inject(self, event: Any, req: Any) -> None:
         if self.plugin.probe.should_yield("memory") and self.config.bool("compat.yield_memory", True):
             logger.debug("[congling] 记忆已让位给外部插件")
@@ -223,6 +256,7 @@ class MemoryService:
         if not query:
             return
 
+        self._recall = {"last_hits": None, "at": int(time.time()), "error": None}
         await self._buffer_user(msg)
 
         # 会话身份以事件为准，别用全局 _last_perceived
@@ -234,7 +268,16 @@ class MemoryService:
                 scope, subject = "user", ev_sender or ev_session
         else:
             scope, subject = self._scope_of(msg)
-        cursor = await self.retriever.cursor(msg.session_id)
+            ev_session, ev_kind, ev_sender = msg.session_id, msg.session_kind, msg.sender_id
+        platform = platform_key((getattr(msg, "meta", None) or {}).get("platform"))
+        try:
+            platform = platform_key(event.get_platform_name()) or platform
+        except (AttributeError, TypeError):
+            pass
+        # Missing platform uses only the legacy QQ API conversion; no stored ref is guessed.
+        where_ref = session_ref(platform or "qq", ev_kind, ev_session)
+        who_ref = actor_ref(platform or "qq", ev_sender)
+        cursor = await self.retriever.cursor(ev_session or msg.session_id)
         recent_ids = set()
         if cursor.get("last_atom_ids"):
             import json
@@ -248,17 +291,8 @@ class MemoryService:
             top_k = int(self.config.int("memory.inject_top_k", 5))
         except (TypeError, ValueError):
             top_k = 5
-        try:
-            hits = await self.retriever.search(
-                query, scope=scope, subject=subject, exclude=recent_ids, k=top_k
-            )
-        except Exception as exc:
-            logger.debug(f"[congling] 记忆召回失败: {exc!r}")
-            return
-        # 当前会话不够时跨会话补齐：混着查，但每条都带 [私聊 望山] 这种来源标签
-        # 跨会话档位：管理员和普通用户分开配。
-        # 「管理员 → 全库」这句话里藏着危险：全库包含别人的私聊。
-        # self 是推荐默认 —— 管理员能记得自己参与过的所有会话，但不碰别人的私聊。
+        # 三层召回统一执行；跨会话开关只放行当前发言人的个人层。
+        # 管理员档位同样不能绕过全局 off 或其他人的私聊边界。
         is_admin = False
         try:
             checker = getattr(self.plugin, "is_admin", None)
@@ -273,27 +307,35 @@ class MemoryService:
         cs_mode = cs_mode.strip().lower()
         if cs_mode == "self":
             cs_mode = "same_user"
+        cross_enabled = (cs_mode != "off" and self.config.bool("memory.cross_session_recall", True)
+                         and self.config.str("memory.cross_session_scope", "same_user").strip().lower() != "off")
+        try:
+            hits = await self.retriever.search(
+                query, scope=scope, subject=subject, session_ref=where_ref, actor_ref=who_ref,
+                exclude=recent_ids, k=top_k, mode=cs_mode, cross_session=cross_enabled,
+            )
+        except Exception as exc:
+            self._recall = {"last_hits": None, "at": int(time.time()), "error": type(exc).__name__}
+            logger.warning(f"[congling] 记忆召回失败: {exc_brief(exc)}")
+            return
         if getattr(self.plugin, "diag", None) is not None:
             await self.plugin.diag.trace("cross_session", admin=is_admin, mode=cs_mode)
 
-        if len(hits) < top_k and cs_mode != "off" and self.config.bool("memory.cross_session_recall", True):
-            try:
-                seen = {hit.atom_id for hit in hits}
-                extra = await self.retriever.search(
-                    query,
-                    scope=scope,
-                    subject=subject,
-                    exclude=recent_ids | seen,
-                    k=top_k - len(hits),
-                    cross_session=True,
-                    mode=cs_mode,
-                )
-                hits = hits + [hit for hit in extra if hit.atom_id not in seen]
-            except Exception as exc:
-                logger.debug(f"[congling] 跨会话召回失败: {exc!r}")
+        self._recall = {"last_hits": len(hits), "at": int(time.time()), "error": None}
         # 关系远近和已有画像：没有记忆命中时也要注入，这两块属于「我怎么看 TA」
         speaker_key = str(ev_sender or (subject if scope == "user" else "") or "")
         extras: list[str] = []
+        try:
+            checker = getattr(self.plugin, "is_admin", None)
+            owner_private = bool(ev_kind == "private" and callable(checker) and checker(event))
+            actions = await self.self_events(ev_session or msg.session_id, ev_kind,
+                                             include_private=owner_private, query=query,
+                                             platform=platform or "qq", include_dream_summary=False)
+            if actions:
+                extras.append("我亲自完成的行为（摘要不代表可以透露私密正文；梦境不是现实）：\n" +
+                              "\n".join(str(row["text"])[:1200] for row in actions))
+        except Exception as exc:
+            logger.warning(f"[congling] 自述行为召回失败: {exc!r}")
         if speaker_key:
             try:
                 aff = await self.affinity.prompt_hint(speaker_key)
@@ -306,10 +348,10 @@ class MemoryService:
             # 甚至是别处攒下的私密认识 —— 你库里群聊记忆占 98%，这个口子必须堵。
             inject_profile = True
             try:
-                session_kind = str(getattr(msg, "session_kind", "") or "")
+                session_kind = ev_kind
                 if session_kind == "group":
                     inject_profile = bool(self.config.bool("memory.profile_inject_in_group", False))
-                elif str(getattr(msg, "sender_id", "") or "") != str(speaker_key or ""):
+                elif str(ev_sender or "") != str(speaker_key or ""):
                     # 私聊但主体对不上说话人（比如在群里聊第三人），不注入
                     inject_profile = False
             except Exception:
@@ -362,6 +404,7 @@ class MemoryService:
             pass
 
     # ================================================================ 观察
+    @memory_work
     async def observe_response(self, event: Any, resp: Any) -> None:
         try:
             text = str(getattr(resp, "completion_text", "") or "").strip()
@@ -386,6 +429,7 @@ class MemoryService:
         )
         self._last_activity[session_id] = time.time()
 
+    @memory_work
     async def after_sent(self, event: Any) -> None:
         session_id, kind, sender = self._session_of(event)
         msg: PerceivedMessage | None = getattr(self.plugin, "_last_perceived", None)
@@ -441,23 +485,29 @@ class MemoryService:
             buffer.pop(0)
         self._last_activity[msg.session_id] = time.time()
 
+    @memory_work
     async def _on_perceived(self, msg: PerceivedMessage) -> None:
         # 群聊里非触发消息也留一份，便于「刚才那个」这类追问
         if not msg.text:
             return
+        try:
+            await self.subjects.observe_names(msg.sender_id, msg.sender_name, msg.text)
+        except Exception as exc:
+            logger.warning(f"[congling] 自称索引写入失败: {exc_brief(exc)}")
         # 所有被感知到的消息都进缓冲（按 session 分开），
         # 不能只在 LLM 请求里缓冲，否则群聊闲聊永远抽不出记忆。
         await self._buffer_user(msg)
         try:
             await self.store.execute(
-                "INSERT INTO inject_cursor(session_id, last_msg_row, last_atom_ids, updated_at) "
-                "VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET updated_at=excluded.updated_at",
-                (msg.session_id, 0, "[]", int(time.time())),
+                "INSERT INTO inject_cursor(persona_id, session_id, last_msg_row, last_atom_ids, updated_at) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(persona_id, session_id) DO UPDATE SET updated_at=excluded.updated_at",
+                (self.config.persona_id, msg.session_id, 0, "[]", int(time.time())),
             )
         except Exception:
             pass
 
     # ================================================================ 抽取
+    @memory_work
     async def _extract_session(self, session_id: str, force: bool = False) -> None:
         """消池：把该会话未消费的消息整批交给模型压成事实。
 
@@ -468,7 +518,7 @@ class MemoryService:
         try:
             rows = await self._pending_rows(session_id)
         except Exception as exc:
-            logger.debug(f"[congling] 读取消息池失败: {exc!r}")
+            logger.warning(f"[congling] 读取消息池失败: {exc_brief(exc)}")
             return
         if not rows:
             return
@@ -482,17 +532,23 @@ class MemoryService:
         self._extracting.add(session_id)
         turns = [
             {
-                "role": "user",
+                "role": "assistant" if (str(row.get("sender_id") or "") in {"bot", "__self__"}
+                                            or str(row.get("sender_id") or "").startswith("bot:")) else "user",
                 "text": str(row.get("text") or ""),
                 "ts": int(row.get("ts") or 0),
                 "idx": index,
                 "sender_id": str(row.get("sender_id") or ""),
                 "sender_name": str(row.get("sender_name") or ""),
+                "platform": str(row.get("platform") or ""),
             }
             for index, row in enumerate(rows)
         ]
         max_row = max(int(row["id"]) for row in rows)
         try:
+            # 不依赖模型是否抽出事实；短短一句「叫我大猫」也要进入索引。
+            for row in rows:
+                await self.subjects.observe_names(str(row.get("sender_id") or ""),
+                                                 str(row.get("sender_name") or ""), str(row.get("text") or ""))
             drafts = await self.extractor.extract(turns)
             # 默认 False：拿不到明确成功信号就不推水位，宁可下一轮重试
             ok = bool(getattr(self.extractor, "last_ok", False))
@@ -517,7 +573,12 @@ class MemoryService:
                     draft.session_id = str(session_id or "")
                     draft.session_kind = kind
                     draft.session_label = label
+                proposed = len(drafts)
                 await self._prepare_drafts(drafts, rows)
+                await self.store.kv_set("memory:last_extract_filter", {
+                    "at": int(time.time()), "proposed": proposed, "accepted": len(drafts),
+                    "dropped": proposed - len(drafts),
+                })
                 ids = await self.atoms.add_many(
                     drafts, scope=scope, subject=subject, persona_id=self.config.persona_id
                 )
@@ -538,7 +599,7 @@ class MemoryService:
                 if target > 0:
                     await self._set_water(session_id, target)
         except Exception as exc:
-            logger.debug(f"[congling] 记忆抽取失败: {exc!r}")
+            logger.warning(f"[congling] 记忆抽取失败: {exc_brief(exc)}")
             try:
                 await self.store.kv_set(
                     "memory:last_error",
@@ -554,48 +615,90 @@ class MemoryService:
         """给每条草稿定主体、定等级。
 
         顺序不能反：先认出「这条说的是谁」，才知道该按谁的好感度去调等级。
-        群里一句话可能是别人说的，所以只在草稿主体对得上最后一位发言人时才用他的 QQ 号。
+        主体必须对应有效证据中的唯一发言者，不能用最后一位发言人兜底。
         """
         # 逐条证据反查说话人。以前是"整批都用最后一个发言人"，于是群里
         # A 说「B 昨天吵架了」也会记到 A 头上，主体就这么分裂出去的。
-        by_idx = {
-            str(i): (str(r.get("sender_id") or ""), str(r.get("sender_name") or ""))
-            for i, r in enumerate(rows)
-        }
-        tail_id, tail_name = "", ""
-        for row in reversed(rows):
-            if str(row.get("sender_id") or ""):
-                tail_id = str(row.get("sender_id"))
-                tail_name = str(row.get("sender_name") or "")
-                break
-
+        by_idx = {str(i): r for i, r in enumerate(rows)}
+        accepted = []
+        bot_name = await narrator_name(self.plugin)
         for draft in drafts:
             try:
                 hint = str(draft.subject or "").strip()
-                ev_id, ev_name = "", ""
-                for token in (getattr(draft, "evidence_msg_ids", []) or []):
-                    idx = str(token).lstrip("#").strip()
-                    if idx in by_idx and by_idx[idx][0]:
-                        ev_id, ev_name = by_idx[idx]
-                        break
-                speaker_id = ev_id or tail_id
-                speaker_name = ev_name or tail_name
-                same_person = bool(
-                    hint and speaker_name and (hint == speaker_name or hint in speaker_name or speaker_name in hint)
-                )
-                key = await self.subjects.identify(
-                    sender_id=speaker_id if (same_person or not hint) else "",
-                    sender_name=speaker_name if same_person else "",
-                    subject_text=hint,
-                )
+                evidence = [by_idx.get(str(token).lstrip("#").strip())
+                            for token in draft.evidence_msg_ids]
+                if not evidence or any(r is None or not r.get("sender_id") or
+                                       str(r.get("sender_id")) in {"bot", "__self__"} or
+                                       str(r.get("sender_id")).startswith("bot:") or
+                                       not str(r.get("text") or "").strip() or
+                                       re.search(r"[？?]|[吗么呢][。！!]*$|^(如果|假如|听说|据说|要是)", str(r.get("text") or ""))
+                                       for r in evidence):
+                    continue
+                speakers = {str(r["sender_id"]): str(r.get("sender_name") or r["sender_id"])
+                            for r in evidence}
+                if hint == SELF_SUBJECT:
+                    # 人类的「我」不能成为 bot 的经历；须有明确点名的陈述。
+                    if not all(bot_name in str(r.get("text") or "") for r in evidence):
+                        continue
+                    key = SELF_SUBJECT
+                    if draft.text.startswith(bot_name):
+                        draft.text = "我" + draft.text[len(bot_name):]
+                else:
+                    matches = [sid for sid, name in speakers.items() if hint in (sid, name)]
+                    alias_key = await self.subjects.identify(subject_text=hint) if hint not in GENERIC_SUBJECTS else ""
+                    if alias_key in speakers and alias_key not in matches:
+                        matches.append(alias_key)
+                    if hint in GENERIC_SUBJECTS and len(speakers) == 1:
+                        matches = list(speakers)
+                    if len(matches) != 1:
+                        continue
+                    sid = matches[0]
+                    name = speakers[sid]
+                    if name == sid:
+                        name = await self.subjects.display_name(sid)
+                    key = await self.subjects.identify(sender_id=sid, sender_name=name)
+                    if not key:
+                        continue
+                    # 别名仅定位主体；新正文优先采用本次发言的昵称。
+                    aliases = await self.subjects.aliases_of(key)
+                    for generic in sorted({"聊天对象", "用户", "对方", "我", hint, *aliases}, key=len, reverse=True):
+                        if not generic:
+                            continue
+                        if draft.text.startswith(generic):
+                            draft.text = name + draft.text[len(generic):]
+                            break
+                # 硬门槛过滤明显无依据/肯否颠倒的草稿。语义细节仍由严格抽取提示约束。
+                claim = draft.text
+                supports = [sentence.strip() for r in evidence
+                            for sentence in re.split(r"[。！!；;\n]", str(r["text"])) if sentence.strip()]
+                if key == SELF_SUBJECT:
+                    supports = [s for s in supports if s.startswith(bot_name)
+                                and not re.match(re.escape(bot_name) + r"[，,:：\s]+我", s)]
+                for person in {bot_name, hint, *speakers.values(), *speakers,
+                               name if key != SELF_SUBJECT else bot_name,
+                               *(aliases if key != SELF_SUBJECT else [])}:
+                    if person:
+                        claim = claim.replace(person, "")
+                        supports = [s.replace(person, "") for s in supports]
+                ignored = set("我你他她它的是了在和与说今天昨明很还就也啊呢吗年月日时分")
+                content = {c for c in claim if c.isalnum() and c not in ignored}
+                if not content or not any(
+                    len(content & set(s)) >= max(1, (len(content) * 3 + 3) // 4)
+                    and any(c in claim for c in "不没未无") == any(c in s for c in "不没未无")
+                    for s in supports
+                ):
+                    continue
                 draft.subject_key = key
-                stage = await self.affinity.stage(key) if key else None
+                draft.evidence_msg_ids = [str(r.get("msg_id") or "") for r in evidence if r.get("msg_id")]
+                stage = await self.affinity.stage(key) if key != SELF_SUBJECT else None
                 level, reason, tags = self.grades.judge_one(draft, stage=stage)
                 draft.level = level
                 draft.level_reason = reason
                 draft.level_tags = tags
+                accepted.append(draft)
             except Exception as exc:
-                logger.debug(f"[congling] 等级判定失败: {exc!r}")
+                logger.warning(f"[congling] 等级判定失败: {exc_brief(exc)}")
+        drafts[:] = accepted
 
     async def _link_subjects(self, drafts: list[MemoryDraft], ids: list[int]) -> None:
         """把人挂到记忆上。
@@ -605,13 +708,14 @@ class MemoryService:
         """
         for draft in drafts:
             key = str(getattr(draft, "subject_key", "") or "")
-            if not key:
+            if not key or key == SELF_SUBJECT:
                 continue
             atom_id = 0
             try:
                 row = await self.store.fetch_one(
-                    "SELECT id FROM mem_atom WHERE persona_id=? AND norm_hash=? AND status='active'",
-                    (self.config.persona_id, norm_hash(draft.text)),
+                    "SELECT id FROM mem_atom WHERE persona_id=? AND norm_hash=? AND subject_id=? "
+                    "AND session_id=? AND status='active'",
+                    (self.config.persona_id, norm_hash(draft.text), key, draft.session_id),
                 )
                 atom_id = int((row or {}).get("id") or 0)
             except Exception:
@@ -620,6 +724,60 @@ class MemoryService:
                 await self.subjects.link_atom(atom_id, key)
 
     # ================================================================ 对外 API
+    @memory_work
+    async def record_self_event(self, event_type: str, event_id: str, text: str,
+                                *, session_id: str = "", session_kind: str = "",
+                                private_text: str = "", platform: str = "qq",
+                                occurred_at: int | None = None, result: dict | None = None) -> int:
+        return await self.ledger.record(event_type, event_id, text, session_id=session_id,
+                                        session_kind=session_kind, private_text=private_text,
+                                        platform=platform, occurred_at=occurred_at, result=result)
+
+    async def self_events(self, session_id: str, session_kind: str,
+                          *, include_private: bool = False, query: str = "",
+                          platform: str = "qq", include_dream_summary: bool = True) -> list[dict[str, Any]]:
+        import json
+
+        kinds = [kind for kind, words in (("diary", ("日记",)),
+                                         ("proactive", ("找过", "找我", "主动")),
+                                         ("qzone", ("说说", "空间"))) if any(w in query for w in words)]
+        keyword = json.dumps(kinds, ensure_ascii=False) if len(kinds) == 1 else ""
+        owner = bool(include_private and session_kind == "private")
+        where = session_ref(platform, session_kind, session_id)
+        rows = await self.store.fetch_all(
+            "SELECT id, CASE WHEN audience=? AND NOT ? THEN public_text ELSE text END AS text "
+            ",event_type,event_key,keywords,public_text "
+            "FROM mem_atom WHERE persona_id=? AND scope='self' "
+            "AND (audience IN ('public',?) OR (audience=? AND (? OR public_text<>'')) "
+            "OR (audience='legacy' AND (subject_id IN ('',?) OR (? AND subject_id=?)))) "
+            "AND status='active' AND decay>=0.15 AND (?='' OR keywords=?) "
+            "ORDER BY id DESC LIMIT 40",
+            (PRIVATE_AUDIENCE, int(owner), self.config.persona_id, where or "!", PRIVATE_AUDIENCE, int(owner),
+             f"{session_kind}:{session_id}", int(owner), PRIVATE_AUDIENCE, keyword, keyword),
+        )
+        # 梦的等级来自梦库，不用自述 mem_atom 固定的三级冒充梦等级。
+        # 正文只能走专用工具；此处最多留下合格梦的行为摘要。
+        night = getattr(self.plugin, "night", None)
+        dreamer = getattr(night, "dreamer", None)
+        eligible = {}
+        if dreamer is not None:
+            from .refs import event_key
+            eligible = {event_key("dream", d.dream_id): d for d in dreamer.living()
+                        if d.level >= dreamer.mention_min_level}
+        output = []
+        for row in rows:
+            is_dream = row["event_type"] == "dream" or row["keywords"] == '["dream"]'
+            if is_dream:
+                if not include_dream_summary or row["event_key"] not in eligible:
+                    continue
+                # 即使是管理员，普通自述入口也只给摘要；正文走专用工具。
+                row["text"] = row["public_text"] or "我做过一段梦；梦境不是现实经历。"
+            output.append({"id": row["id"], "text": row["text"]})
+            if len(output) >= 8:
+                break
+        return output
+
+    @memory_work
     async def write_text(
         self,
         text: str,
@@ -642,9 +800,13 @@ class MemoryService:
         subject: str = "",
         k: int = 5,
         cross_session: bool = False,
+        session_ref: str = "",
+        actor_ref: str = "",
+        mode: str = "",
     ) -> list[MemoryHit]:
         return await self.retriever.search(
-            query, scope=scope, subject=subject, k=k, cross_session=cross_session
+            query, scope=scope, subject=subject, k=k, cross_session=cross_session,
+            session_ref=session_ref, actor_ref=actor_ref, mode=mode,
         )
 
     async def forget(self, keyword: str, *, scope: str | None = None, subject: str | None = None) -> int:
@@ -682,6 +844,7 @@ class MemoryService:
             logger.debug(f"[congling] 关系值更新失败: {exc!r}")
 
     # ================================================================ 维护
+    @memory_work
     async def daily_tick(self) -> None:
         from .maintenance import Maintenance
 
@@ -690,11 +853,11 @@ class MemoryService:
             settled = await self.affinity.settle_daily()
             logger.debug(f"[congling] 好感度结算：{settled}")
         except Exception as exc:
-            logger.debug(f"[congling] 好感度结算失败: {exc!r}")
+            logger.warning(f"[congling] 好感度结算失败: {exc_brief(exc)}")
         try:
             await self.build_profiles()
         except Exception as exc:
-            logger.debug(f"[congling] 画像轮询失败: {exc!r}")
+            logger.warning(f"[congling] 画像轮询失败: {exc_brief(exc)}")
         pending = await self.retriever.embed_pending(30)
         if pending:
             logger.debug(f"[congling] 补齐 {pending} 条记忆向量")
@@ -715,7 +878,7 @@ class MemoryService:
             except Exception:
                 pass
         rows = await self.store.fetch_all(
-            "SELECT user_id FROM mem_subject WHERE persona_id=? ORDER BY last_seen_at DESC LIMIT ?",
+            "SELECT user_id FROM mem_subject WHERE persona_id=? AND source='qq' ORDER BY last_seen_at DESC LIMIT ?",
             (self.config.persona_id, max(1, min(200, limit))),
         )
         built = 0
@@ -728,7 +891,7 @@ class MemoryService:
                 if result.get("ok"):
                     built += 1
             except Exception as exc:
-                logger.debug(f"[congling] 画像生成失败 {key}: {exc!r}")
+                logger.warning(f"[congling] 画像生成失败: {exc_brief(exc)}")
         if not force:
             try:
                 await self.store.kv_set("profile:last_day", today)
@@ -749,7 +912,7 @@ class MemoryService:
         """
         row = await self.store.fetch_one(
             "SELECT session_kind, sender_name FROM msg_archive "
-            "WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            "WHERE session_id=? AND sender_id<>'bot' ORDER BY id DESC LIMIT 1",
             (session_id,),
         )
         if not row:

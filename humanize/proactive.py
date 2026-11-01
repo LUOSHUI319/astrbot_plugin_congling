@@ -18,9 +18,13 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+import uuid
 from typing import Any
 
 from astrbot.api import logger
+from ..memory.perspective import remember_action
+from ..core.memory_guard import memory_work
+from ..core.exc import exc_brief
 
 KV_SESSIONS = "proactive.sessions"
 KV_GLOBAL = "proactive.global"
@@ -82,12 +86,14 @@ class Proactive:
         try:
             raw = await self.store.kv_get(KV_SESSIONS, {}) or {}
             self._sessions = {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"[congling] 读取主动会话状态失败: {exc_brief(exc)}")
             self._sessions = {}
         try:
             raw = await self.store.kv_get(KV_GLOBAL, {}) or {}
             self._global = dict(raw) if isinstance(raw, dict) else {}
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"[congling] 读取主动全局状态失败: {exc_brief(exc)}")
             self._global = {}
         self._loaded = True
 
@@ -96,7 +102,7 @@ class Proactive:
             await self.store.kv_set(KV_SESSIONS, self._sessions)
             await self.store.kv_set(KV_GLOBAL, self._global)
         except Exception as exc:
-            logger.debug(f"[congling] 主动状态保存失败: {exc!r}")
+            logger.warning(f"[congling] 主动状态保存失败: {exc_brief(exc)}")
 
     def enabled(self) -> bool:
         return self.config.bool("proactive.enabled", False)
@@ -137,7 +143,7 @@ class Proactive:
                 (int(now - idle_max),),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 取主动候选失败: {exc!r}")
+            logger.warning(f"[congling] 取主动候选失败: {exc!r}")
             return []
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -161,7 +167,12 @@ class Proactive:
         out = []
         for row in rows:
             state = self._sess(str(row["session_id"]))
+            eligible, reason, score = await self.should(row, now)
             out.append({
+                "eligible": eligible,
+                "reason": reason,
+                "score": score,
+                "score_threshold": 60.0,
                 "session_id": str(row["session_id"]),
                 "session_kind": str(row.get("session_kind") or "group"),
                 "label": str(row.get("who") or row["session_id"]),
@@ -293,20 +304,21 @@ class Proactive:
             row = await self.store.fetch_one(
                 "SELECT COUNT(*) AS c FROM mem_atom WHERE status='active' AND kind='event' "
                 "AND (unread IS NULL OR unread=0) AND (text LIKE '%答应%' OR text LIKE '%说好%' "
-                "OR text LIKE '%下次%' OR text LIKE '%回头%') AND created_at >= ?",
-                (int(time.time() - 7 * 86400),),
+                "OR text LIKE '%下次%' OR text LIKE '%回头%') AND persona_id=? AND session_id=? AND created_at >= ?",
+                (self.config.persona_id, session_id, int(time.time() - 7 * 86400)),
             )
             if row and int(row["c"] or 0) > 0:
                 return True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[congling] 读取主动承诺素材失败: {exc_brief(exc)}")
         try:
             last = await self.store.fetch_one(
                 "SELECT text FROM msg_archive WHERE session_id=? AND ts >= ? "
                 "ORDER BY ts DESC LIMIT 1",
                 (session_id, int(time.time() - 6 * 3600)),
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"[congling] 读取主动末条消息失败: {exc_brief(exc)}")
             return False
         text = str((last or {}).get("text") or "")
         return text.rstrip().endswith(("?", "？", "吗", "呢"))
@@ -337,17 +349,19 @@ class Proactive:
                 what = str(item.get("text") or "").strip()
                 if what:
                     materials.append(f"- {who}：{what[:120]}")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[congling] 读取主动聊天素材失败: {exc_brief(exc)}")
         try:
             atoms = await self.store.fetch_all(
                 "SELECT text FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) "
-                "AND importance >= 0.6 ORDER BY importance DESC, id DESC LIMIT 3"
+                "AND persona_id=? AND scope<>'self' AND (scope='global' OR session_id=?) "
+                "AND importance >= 0.6 ORDER BY importance DESC, id DESC LIMIT 3",
+                (self.config.persona_id, session_id),
             )
             for atom in atoms:
                 materials.append(f"- 记得：{str(atom.get('text') or '')[:120]}")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[congling] 读取主动记忆素材失败: {exc_brief(exc)}")
         if not materials:
             return ""
 
@@ -367,7 +381,7 @@ class Proactive:
                 max_tokens=200,
             )
         except Exception as exc:
-            logger.debug(f"[congling] 主动消息生成失败: {exc!r}")
+            logger.warning(f"[congling] 主动消息生成失败: {exc_brief(exc)}")
             return ""
         text = (raw or "").strip().strip('"“”')
         text = text.split("\n")[0].strip() if text else ""
@@ -383,7 +397,8 @@ class Proactive:
                 (session_id,),
             )
             prev = str((last or {}).get("text") or "")
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"[congling] 主动消息去重查询失败: {exc_brief(exc)}")
             prev = ""
         if prev and prev.strip() == text:
             logger.debug("[congling] 主动消息与上次重复，放弃")
@@ -399,6 +414,7 @@ class Proactive:
         kind = "GroupMessage" if str(row.get("session_kind") or "") == "group" else "FriendMessage"
         return f"{platform}:{kind}:{row.get('session_id')}"
 
+    @memory_work
     async def send_one(self, row: dict[str, Any], *, reason: str = "manual") -> dict[str, Any]:
         """真发一条。成功返回 {ok, text}；失败不抛。"""
         session_id = str(row.get("session_id") or "")
@@ -419,6 +435,9 @@ class Proactive:
             except Exception:
                 parts = [text]
             parts = [p for p in parts if p.strip()][:3]
+            if not parts:
+                return {"ok": False, "error": "没有可发送的内容"}
+            action_id = uuid.uuid4().hex
 
             from astrbot.api.event import MessageChain
             from astrbot.api.message_components import Plain
@@ -430,13 +449,21 @@ class Proactive:
                 ok = False
                 for attempt in range(2):
                     try:
-                        await context.send_message(umo, MessageChain([Plain(text=part)]))
+                        response = await context.send_message(umo, MessageChain([Plain(text=part)]))
+                        # 框架的正常 void 返回仍兼容；明确 False/失败响应不能当成功。
+                        if response is False or (isinstance(response, dict) and (
+                            response.get("ok") is False or response.get("success") is False
+                            or response.get("status") == "failed"
+                            or response.get("retcode", 0) not in (0, "0"))):
+                            raise RuntimeError("发送通道报告失败")
                         ok = True
                         break
                     except Exception as exc:
-                        logger.debug(f"[congling] 主动发送失败({attempt + 1}/2): {exc!r}")
+                        logger.warning(f"[congling] 主动发送失败({attempt + 1}/2): {exc_brief(exc)}")
                         await asyncio.sleep(1.5)
                 if not ok:
+                    if sent:
+                        await self._remember_sent(row, action_id, sent)
                     state = self._sess(session_id)
                     state["next_ok_at"] = int(time.time() + 3600)
                     await self.save()
@@ -444,6 +471,8 @@ class Proactive:
                 sent.append(part)
 
             now = int(time.time())
+            # 发送已完成，先留成功证据；后面的配额/归档失败不抹掉已发生的动作。
+            await self._remember_sent(row, action_id, sent)
             state = self._sess(session_id)
             state["last_at"] = now
             state["sent_today"] = int(state.get("sent_today") or 0) + 1
@@ -453,9 +482,22 @@ class Proactive:
 
             await self._archive(session_id, umo, " ".join(sent), str(row.get("session_kind") or "private"))
             await self._log(session_id, umo, reason, " ".join(sent))
-            await self._bump_affinity(session_id)
+            if str(row.get("session_kind") or "private") == "private":
+                await self._bump_affinity(session_id)
             logger.info(f"[congling] 主动说了一句（{reason}）：{session_id} / {len(sent)} 段")
             return {"ok": True, "text": " ".join(sent), "umo": umo}
+
+    async def _remember_sent(self, row: dict[str, Any], action_id: str, sent: list[str]) -> None:
+        session_id = str(row.get("session_id") or "")
+        kind = str(row.get("session_kind") or "private")
+        await remember_action(
+            self.plugin, "proactive", action_id,
+            f"我在{time.strftime('%Y-%m-%d %H:%M')}主动向{'群' if kind == 'group' else '联系人'}"
+            f"{session_id}发了消息：{' '.join(sent)}",
+            session_id=session_id, session_kind=kind,
+            platform=self._umo_of(row).split(":", 1)[0] or "qq",
+            result={"sent_parts": len(sent)},
+        )
 
     async def _archive(self, session_id: str, umo: str, text: str, kind: str) -> None:
         """主动消息也要进归档，否则下一轮上下文里她不知道自己刚说过话。"""
@@ -478,7 +520,7 @@ class Proactive:
                 ),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 主动消息归档失败: {exc!r}")
+            logger.warning(f"[congling] 主动消息归档失败: {exc_brief(exc)}")
 
     async def _log(self, session_id: str, umo: str, reason: str, text: str, kind: str = "text") -> None:
         try:
@@ -496,7 +538,7 @@ class Proactive:
                 ),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 主动记录写入失败: {exc!r}")
+            logger.warning(f"[congling] 主动记录写入失败: {exc_brief(exc)}")
 
     async def _bump_affinity(self, session_id: str) -> None:
         memory = getattr(self.plugin, "memory", None)
@@ -506,9 +548,10 @@ class Proactive:
         try:
             await affinity.add(session_id, 2.0)
         except Exception as exc:
-            logger.debug(f"[congling] 主动消息加好感失败: {exc!r}")
+            logger.warning(f"[congling] 主动消息加好感失败: {exc_brief(exc)}")
 
     # ================================================================ 结算
+    @memory_work
     async def settle_replies(self, now: float | None = None) -> int:
         """被回复了就把 unanswered 清零、好感 +3。
 
@@ -522,7 +565,8 @@ class Proactive:
                 "WHERE replied_at=0 AND at >= ? ORDER BY at DESC LIMIT 40",
                 (int(now - 12 * 3600),),
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"[congling] 查询主动回复结算失败: {exc_brief(exc)}")
             return 0
         settled = 0
         for row in rows:
@@ -534,7 +578,8 @@ class Proactive:
                     "ORDER BY ts ASC LIMIT 1",
                     (session_id, at),
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning(f"[congling] 查询主动回复失败: {exc_brief(exc)}")
                 continue
             if not hit:
                 continue
@@ -544,7 +589,8 @@ class Proactive:
                     "UPDATE proactive_log SET replied_at=?, replied_delta=? WHERE id=?",
                     (int(hit["ts"]), float(delta), int(row.get("id") or 0)),
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning(f"[congling] 写入主动回复结算失败: {exc_brief(exc)}")
                 continue
             state = self._sess(session_id)
             state["unanswered"] = 0
@@ -554,8 +600,8 @@ class Proactive:
             if affinity is not None:
                 try:
                     await affinity.add(session_id, 3.0)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(f"[congling] 主动回复加好感失败: {exc_brief(exc)}")
         if settled:
             await self.save()
         return settled
@@ -566,13 +612,14 @@ class Proactive:
                 "SELECT COUNT(*) AS c FROM proactive_log WHERE session_id=? AND replied_at=0 AND at >= ?",
                 (session_id, int(now - 24 * 3600)),
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"[congling] 统计主动未回复失败: {exc_brief(exc)}")
             return 0
         return int((row or {}).get("c") or 0)
 
     # ================================================================ 调度
     async def tick(self, now: float | None = None) -> None:
-        if not self.enabled():
+        if getattr(self.plugin, "_stopping", False) or not self.enabled():
             return
         now = now or time.time()
         # 重启就冒一堆消息是最吓人的失败形态，前 3 分钟什么都不做
@@ -599,7 +646,7 @@ class Proactive:
                 # 先占位再发，防止同一分钟重复进两条
                 state["next_ok_at"] = int(now + 60)
                 await self.save()
-                asyncio.get_running_loop().create_task(
+                self.plugin.spawn_background(
                     self._send_guarded(row, reason=("after_wake" if self._just_woke(now) else "idle"))
                 )
                 logger.info(f"[congling] 决定主动说一句：{row.get('session_id')} 分数 {score}")
@@ -607,7 +654,7 @@ class Proactive:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug(f"[congling] 主动 tick 失败: {exc!r}")
+            logger.warning(f"[congling] 主动 tick 失败: {exc!r}")
 
     def _just_woke(self, now: float) -> bool:
         night = getattr(self.plugin, "night", None)
@@ -625,8 +672,15 @@ class Proactive:
         try:
             result = await self.send_one(row, reason=reason)
         except Exception as exc:
-            result = {"ok": False, "error": repr(exc)}
+            logger.warning(f"[congling] 主动发送子任务异常: {exc_brief(exc)}")
+            result = {"ok": False, "error": "发送子任务异常"}
         if not result.get("ok"):
+            # 只记录内部原因码，不能把模型正文或通道异常参数升级到常规日志。
+            error = result.get("error")
+            safe_errors = {"没有会话号", "这次没生成出来", "拿不到发送通道",
+                           "没有可发送的内容", "发送失败", "发送子任务异常"}
+            reason_code = error if isinstance(error, str) and error in safe_errors else "未知失败"
+            logger.warning(f"[congling] 主动发送未完成: {reason_code}")
             state = self._sess(session_id)
             state["unanswered"] = int(state.get("unanswered") or 0) + 1
             state["next_ok_at"] = int(time.time() + 1800)

@@ -30,6 +30,7 @@ from astrbot_plugin_congling.night.state import NightService  # noqa: E402
 
 
 class FakeCfg:
+    persona_id = "ling"
     def __init__(self, data: dict | None = None) -> None:
         self.data = {
             "night.enabled": True,
@@ -192,7 +193,10 @@ class DreamFragmentsTest(unittest.TestCase):
         async def run():
             return await dreamer._pick_fragments()
 
-        self.assertEqual(asyncio.run(run()), ["那家便利店", "三点钟的路灯"])
+        self.assertEqual(asyncio.run(run()), [
+            "[主体未确认；不能直接认领为我的经历] 那家便利店",
+            "[主体未确认；不能直接认领为我的经历] 三点钟的路灯",
+        ])
 
     def test_make_saves_dream(self) -> None:
         store = DictRowStore(texts=["那家便利店"])

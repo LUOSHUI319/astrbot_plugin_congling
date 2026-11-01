@@ -15,19 +15,27 @@ system prompt 每轮都不一样，厂商的 prefix cache 全废，等于每轮�
 from __future__ import annotations
 
 import asyncio
-import importlib.util
+import importlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT.parent))
+
+# 显式离线模式只装载测试替身，不导入真实框架或访问插件数据目录。
+if "--offline" in sys.argv:
+    importlib.import_module("astrbot_plugin_congling.tests.run_diagnosis_regressions")
 
 FAILS: list[str] = []
+CHECKS: list[str] = []
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
+    CHECKS.append(name)
     print(("  ok   " if ok else "  FAIL ") + name + (f" — {detail}" if detail and not ok else ""))
     if not ok:
         FAILS.append(name)
@@ -46,7 +54,8 @@ def _part_texts(req: Any) -> list[str]:
 
 def _is_temp(req: Any) -> bool:
     for part in getattr(req, "extra_user_content_parts", []) or []:
-        if getattr(part, "_no_save", False) or getattr(part, "_congling_temp", False):
+        if (getattr(part, "_no_save", False) or getattr(part, "no_save", False)
+                or getattr(part, "_congling_temp", False)):
             return True
     return False
 
@@ -77,23 +86,24 @@ def test_unit() -> None:
 async def test_perception() -> None:
     """消息解析补充：原来按 msg_id 往 system_prompt 追加。"""
     print("[2] perception.inject")
-    spec = importlib.util.spec_from_file_location(
-        "congling_perception_service", ROOT / "perception" / "service.py"
-    )
-    if spec is None or spec.loader is None:
-        check("perception 模块可导入", False, "spec 拿不到")
-        return
-    try:
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  skip  perception.inject（环境缺依赖：{type(exc).__name__}）")
-        return
-    service_cls = getattr(module, "PerceptionService", None)
-    if service_cls is None:
-        print("  skip  PerceptionService 不在这个模块里")
-        return
-    check("PerceptionService 存在", True)
+    from astrbot_plugin_congling.core.contracts import PerceivedMessage, Block
+    from astrbot_plugin_congling.perception.service import PerceptionService
+
+    service = PerceptionService.__new__(PerceptionService)
+    message = PerceivedMessage(msg_id="offline", blocks=[
+        Block(kind="image", text="离线图片描述", meta={"described": True})])
+    service.perceive = AsyncMock(return_value=message)
+    service.archive = AsyncMock()
+    service._recent_context = AsyncMock(return_value="")
+    req = _req()
+    event = SimpleNamespace()
+    await service.inject(event, req)
+    await service.inject(event, req)
+    check("perception 注入保留 system_prompt", req.system_prompt == "STATIC PERSONA PROMPT")
+    check("perception 动态内容已注入", "离线图片描述" in "".join(_part_texts(req)))
+    check("perception 重入不叠加", len(req.extra_user_content_parts) == 1)
+    check("perception 内容为 temp", _is_temp(req))
+    check("perception 不追加历史", req.contexts == [])
 
 
 def test_source_guard() -> None:
@@ -128,17 +138,19 @@ def test_logger_guard() -> None:
     print("[4] 日志规范（禁用内置 logging）")
     bad = []
     for path in ROOT.rglob("*.py"):
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or "tests" in path.relative_to(ROOT).parts:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         for line in text.splitlines():
             stripped = line.strip()
             if stripped.startswith(("import logging", "from logging import")):
                 bad.append(path.relative_to(ROOT).as_posix())
-    check("全插件未 import logging", not bad, f"{bad}")
+    check("生产代码未 import logging（测试替身除外）", not bad, f"{bad}")
 
 
 def main() -> int:
+    FAILS.clear()
+    CHECKS.clear()
     print(f"插件根目录：{ROOT}\n")
     test_unit()
     asyncio.run(test_perception())
@@ -148,7 +160,7 @@ def main() -> int:
     if FAILS:
         print(f"FAILED {len(FAILS)} 项：" + "、".join(FAILS))
         return 1
-    print("全部通过：system_prompt 保持稳定，动态内容走 temp 内容块")
+    print(f"全部 {len(CHECKS)} 项通过：system_prompt 保持稳定，动态内容走 temp 内容块")
     return 0
 
 

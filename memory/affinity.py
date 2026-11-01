@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core.exc import exc_brief
 
 LEVEL_WEIGHT = {0: 2.0, 1: 0.2, 2: 0.5, 3: 1.0, 4: 2.0, 5: 3.0}
 DEFAULT_NAMES = ["陌生", "眼熟", "熟人", "朋友", "亲近", "交心"]
@@ -103,16 +104,7 @@ class Affinity:
             (self.config.persona_id, key),
         )
         if row is None:
-            now = int(time.time())
-            await self.store.execute(
-                "INSERT INTO affinity(persona_id, subject_key, score, stage, floor, updated_at) "
-                "VALUES(?,?,?,?,?,?) ON CONFLICT(persona_id, subject_key) DO NOTHING",
-                (self.config.persona_id, key, 0.0, 0, 0.0, now),
-            )
-            row = await self.store.fetch_one(
-                "SELECT * FROM affinity WHERE persona_id=? AND subject_key=?",
-                (self.config.persona_id, key),
-            ) or {}
+            row = {}
         score = float(row.get("score") or 0.0)
         stage = self.stage_of(score)
         return {
@@ -133,6 +125,15 @@ class Affinity:
             return int((await self.get(subject_key)).get("stage") or 0)
         except Exception:
             return 0
+
+    async def _ensure(self, key: str) -> None:
+        if not key or key in {"bot", "__self__"}:
+            raise ValueError("机器人或空主体不能建立好感度")
+        await self.store.execute(
+            "INSERT INTO affinity(persona_id, subject_key, score, stage, floor, updated_at) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(persona_id, subject_key) DO NOTHING",
+            (self.config.persona_id, key, 0.0, 0, 0.0, int(time.time())),
+        )
 
     async def add(
         self,
@@ -165,6 +166,7 @@ class Affinity:
         if score < floor:
             score = floor
         ev = [int(x) for x in (evidence or [])][:12]
+        await self._ensure(key)
         try:
             await self.store.execute(
                 "UPDATE affinity SET score=?, stage=?, delta_today=delta_today+?, floor=?, "
@@ -182,7 +184,7 @@ class Affinity:
                 ),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 好感度写入失败: {exc!r}")
+            logger.warning(f"[congling] 好感度写入失败: {exc_brief(exc)}")
         return await self.get(key)
 
     def _frozen(self) -> bool:
@@ -221,6 +223,7 @@ class Affinity:
             idx = max(0, min(5, int(stage)))
             target = float(th[idx])
         new_stage = self.stage_of(target)
+        await self._ensure(key)
         await self.store.execute(
             "UPDATE affinity SET score=?, stage=?, floor=?, manual=1, updated_at=? "
             "WHERE persona_id=? AND subject_key=?",
@@ -237,6 +240,29 @@ class Affinity:
 
     async def reset_today(self) -> None:
         await self.store.execute("UPDATE affinity SET delta_today=0")
+
+    async def remove(self, subject_key: str) -> int:
+        """从好感榜上删掉一个人。
+
+        只删 affinity 这一行——记忆、主体、画像都不动。
+        删完之后如果被自动结算重新加回来，那是正常行为（对方确实说过话），
+        但当天内不会再自己冒出来。
+        """
+        key = str(subject_key or "").strip()
+        if not key:
+            return 0
+        before = await self.store.scalar(
+            "SELECT COUNT(*) FROM affinity WHERE persona_id=? AND subject_key=?",
+            (self.config.persona_id, key),
+            0,
+        )
+        if not before:
+            return 0
+        await self.store.execute(
+            "DELETE FROM affinity WHERE persona_id=? AND subject_key=?",
+            (self.config.persona_id, key),
+        )
+        return int(before)
 
     # ------------------------------------------------------------ 每日结算
     async def settle_daily(self, force: bool = False) -> dict[str, Any]:
@@ -274,10 +300,16 @@ class Affinity:
 
         for key in subjects:
             try:
+                confirmed = await self.store.fetch_one(
+                    "SELECT user_id FROM mem_subject WHERE persona_id=? AND user_id=? AND source='qq'",
+                    (self.config.persona_id, key),
+                )
+                if not confirmed:
+                    continue
                 await self._settle_one(key, now, day_start)
                 changed += 1
             except Exception as exc:
-                logger.debug(f"[congling] 好感度结算失败 {key}: {exc!r}")
+                logger.warning(f"[congling] 好感度结算失败: {exc_brief(exc)}")
         try:
             await self.store.kv_set("affinity:last_settle_day", today)
         except Exception:
@@ -343,8 +375,13 @@ class Affinity:
 
     # ------------------------------------------------------------ 展示
     async def leaderboard(self, limit: int = 10) -> list[dict[str, Any]]:
+        from .subject import confirmed_subject_sql
+
         rows = await self.store.fetch_all(
-            "SELECT subject_key, score, stage FROM affinity WHERE persona_id=? ORDER BY score DESC LIMIT ?",
+            "SELECT a.subject_key, a.score, a.stage FROM affinity a "
+            "JOIN mem_subject s ON s.persona_id=a.persona_id AND s.user_id=a.subject_key "
+            "WHERE a.persona_id=? AND " + confirmed_subject_sql() + " "
+            "ORDER BY a.score DESC LIMIT ?",
             (self.config.persona_id, max(1, min(50, limit))),
         )
         out: list[dict[str, Any]] = []

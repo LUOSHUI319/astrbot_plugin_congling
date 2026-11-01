@@ -443,6 +443,29 @@ class MemoryV2Mixin:
         except Exception as exc:
             return _err(repr(exc)[:200])
 
+    async def affinity_remove(self) -> dict[str, Any]:
+        """把一个人从好感榜上删掉。
+
+        只删 affinity 这一行——记忆、主体、画像都不动，所以删完她照样记得这个人，
+        只是"关系远近"这条归零。下次真的聊起来会被自动结算重新加回来，这是正常的。
+        """
+        try:
+            mem = self._mem()
+            if mem is None:
+                return _err("记忆模块未就绪")
+            if not self.cfg.bool("memory.affinity.ui_editable", True):
+                return _err("面板手动调整已关闭")
+            body = await _body()
+            key = str(body.get("key") or body.get("user_id") or "").strip()
+            if not key:
+                return _err("缺 key")
+            removed = await mem.affinity.remove(key)
+            return _ok({"removed": int(removed or 0), "key": key})
+        except PermissionError as exc:
+            return _err(str(exc))
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
     async def affinity_save_config(self) -> dict[str, Any]:
         try:
             body = await _body()

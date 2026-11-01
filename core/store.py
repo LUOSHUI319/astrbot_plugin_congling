@@ -3,7 +3,7 @@
 设计取舍：
 - 用标准库 sqlite3（零依赖），所有阻塞操作丢进 asyncio.to_thread；
 - 单连接 + 线程锁（WAL 模式下单写多读足够，插件流量很小）；
-- schema 版本走 PRAGMA user_version，升级只往后加，不删列。
+- 迁移以表/列实际结构为准，user_version 仅保留历史元数据；升级只往后加。
 """
 
 from __future__ import annotations
@@ -13,13 +13,15 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
+from .exc import exc_brief
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = [
     """
@@ -275,14 +277,42 @@ _SCHEMA = [
 class Store:
     """线程安全的极简异步 SQLite 封装。"""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, persona_id: str = "ling") -> None:
         self.path = Path(path)
+        self.persona_id = persona_id
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.RLock()
         self.ready = False
         # 显式事务期间由调用方控制提交，execute 不再自己 commit。
         # 主体合并这类"多表必须一起成功"的操作要靠它，否则中途失败会写一半。
         self._in_tx = False
+        self._memory_workers: dict[asyncio.Task, int] = {}
+        self._memory_open = asyncio.Event()
+        self._memory_open.set()
+
+    @asynccontextmanager
+    async def memory_work(self):
+        task = asyncio.current_task()
+        if task not in self._memory_workers:
+            await self._memory_open.wait()
+        self._memory_workers[task] = self._memory_workers.get(task, 0) + 1
+        try:
+            yield
+        finally:
+            self._memory_workers[task] -= 1
+            if not self._memory_workers[task]:
+                del self._memory_workers[task]
+
+    @asynccontextmanager
+    async def memory_reset_guard(self):
+        # 不取消业务、不等待模型：有进行中的读写则拒绝本次清除，避免死锁或旧内容复活。
+        if self._memory_workers or not self._memory_open.is_set():
+            raise ValueError("记忆相关任务正在运行，未删除数据；请待任务结束后重新确认")
+        self._memory_open.clear()
+        try:
+            yield
+        finally:
+            self._memory_open.set()
 
     # ------------------------------------------------------------ 生命周期
     def _open_sync(self) -> None:
@@ -293,7 +323,17 @@ class Store:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         self._conn = conn
-        self._migrate()
+        # 老版本这里就是 open 完直接 _migrate()，各步自己 commit。P3 为了"迁移中途
+        # 失败能整体回滚"包了 BEGIN IMMEDIATE，结果连上库的瞬间就抢排他写锁，
+        # 迁移期间心跳/抽取/等级判定全部排队，等满 busy_timeout 就报 database is locked。
+        try:
+            self._migrate()
+        except Exception as exc:
+            logger.warning(f"[congling] 数据库迁移失败（继续以兼容模式运行）: {exc!r}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
     def _migrate(self) -> None:
         assert self._conn is not None
@@ -328,7 +368,7 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_atom_review ON mem_atom(next_review_at)"
             )
         except Exception as exc:
-            logger.debug(f"[congling] mem_atom 补列失败: {exc!r}")
+            raise RuntimeError("mem_atom migration failed") from exc
         # msg_archive 补 umo / platform：主动发送要按 umo 发，光有群号/QQ 号不够
         try:
             msg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(msg_archive)")}
@@ -339,21 +379,188 @@ class Store:
                 if name not in msg_cols:
                     self._conn.execute(stmt)
         except Exception as exc:
-            logger.debug(f"[congling] msg_archive 补列失败: {exc!r}")
-        if current < 4:
+            raise RuntimeError("msg_archive migration failed") from exc
+        if "mem_level" not in columns:
             self._backfill_levels()
+        self._migrate_refs(current)
+        self._migrate_events()
+        self._migrate_dream_plans()
+        self._conn.commit()
         if current < SCHEMA_VERSION:
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            self._conn.commit()
             logger.info(f"[congling] 数据库结构就绪（v{current} → v{SCHEMA_VERSION}）")
-        else:
-            self._conn.commit()
+
+    def _migrate_refs(self, current: int) -> None:
+        from ..memory.refs import platform_key, resolved_refs, subject_ref
+
+        conn = self._conn
+        assert conn is not None
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS migration_journal("
+            "version INTEGER PRIMARY KEY, applied_at INTEGER, persona_id TEXT, detail TEXT)"
+        )
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(mem_atom)")}
+        for name in ("subject_ref", "session_ref", "actor_ref", "ref_status"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE mem_atom ADD COLUMN {name} TEXT DEFAULT ''")
+        # 结构驱动的幂等检查：库里 user_version 可能比本版本高（历史遗留），
+        # 那时 current<6 不成立，v6 迁移永远不跑，而表和列其实还是旧的——
+        # 结果就是每 15 秒一条 OperationalError。所以这里不能只看版本号。
+        _cursor_cols = {r[1] for r in conn.execute("PRAGMA table_info(inject_cursor)")}
+        structure_stale = not {"subject_ref", "session_ref", "actor_ref", "ref_status"} <= columns or ("persona_id" not in _cursor_cols)
+        legacy_retry = False
+        if not structure_stale:
+            try:
+                total = conn.execute("SELECT COUNT(*) FROM mem_atom").fetchone()[0] or 0
+                legacy = conn.execute("SELECT COUNT(*) FROM mem_atom WHERE ref_status='legacy'").fetchone()[0] or 0
+                resolved = conn.execute("SELECT COUNT(*) FROM mem_atom WHERE ref_status='resolved'").fetchone()[0] or 0
+                # 只看 resolved==0 太严：一旦新写入产生了几条 resolved，
+                # 剩下的几千条老数据就永远修不回来了。改成看比例。
+                legacy_retry = (total > 0 and legacy >= total * 0.8
+                                and resolved < total * 0.1)
+            except Exception:
+                legacy_retry = False
+        if structure_stale or legacy_retry:
+            sessions: dict[tuple[str, str], set[str]] = {}
+            evidence: dict[tuple[str, str, str], list[dict]] = {}
+            for raw in conn.execute("SELECT msg_id, session_id, session_kind, sender_id, platform FROM msg_archive"):
+                item = dict(raw)
+                key = (item["session_id"], item["session_kind"])
+                platform = platform_key(item["platform"])
+                # Empty platforms make the mapping ambiguous too.
+                sessions.setdefault(key, set()).add(platform)
+                evidence.setdefault((*key, str(item["msg_id"])), []).append(item)
+            counts = {"resolved": 0, "legacy": 0}
+            confirmed_qq = {(r[0], r[1]) for r in conn.execute("SELECT persona_id,user_id FROM mem_subject WHERE source='qq'")}
+            for raw in conn.execute("SELECT * FROM mem_atom").fetchall():
+                row = dict(raw)
+                key = (row["session_id"], row["session_kind"])
+                try:
+                    ids = json.loads(row.get("source_msg_ids") or "[]")
+                except (ValueError, TypeError):
+                    ids = []
+                senders = set()
+                evidence_platforms = set()
+                for msg_id in ids if isinstance(ids, list) else []:
+                    matches = evidence.get((*key, str(msg_id)), [])
+                    if matches:
+                        senders.update(str(m["sender_id"] or "") for m in matches)
+                        evidence_platforms.update(platform_key(m["platform"]) for m in matches)
+                    else:
+                        # 老记忆的 evidence 存的是消息序号而不是真实 msg_id，
+                        # 匹配不到归档很正常。塞空值会让集合恒为 {""}，
+                        # `or sessions.get(key)` 永远不生效，整库 session_ref 全空。
+                        senders.add("")
+                platforms = evidence_platforms or sessions.get(key, set())
+                refs = resolved_refs(row, platforms, senders)
+                # A confirmed QQ subject resolves who independently of where.
+                # Unknown/mixed historical sessions still stay unresolved.
+                uid = str(row.get("subject_id") or "")
+                if (not refs[0] and (row["persona_id"], uid) in confirmed_qq and uid.isascii() and uid.isdigit()
+                        and platforms <= {"", "qq", "default"}
+                        and not (row.get("session_kind") == "group" and uid == row.get("session_id"))):
+                    refs = (subject_ref("qq", uid), *refs[1:])
+                conn.execute("UPDATE mem_atom SET subject_ref=?, session_ref=?, actor_ref=?, ref_status=? WHERE id=?",
+                             (*refs, row["id"]))
+                counts[refs[-1]] += 1
+            cursor_cols = {r[1] for r in conn.execute("PRAGMA table_info(inject_cursor)")}
+            if "persona_id" not in cursor_cols:
+                conn.execute("ALTER TABLE inject_cursor RENAME TO inject_cursor_p2_old")
+                conn.execute("CREATE TABLE inject_cursor(persona_id TEXT NOT NULL, session_id TEXT NOT NULL, "
+                             "last_msg_row INTEGER DEFAULT 0, last_atom_ids TEXT, updated_at INTEGER, "
+                             "PRIMARY KEY(persona_id, session_id))")
+                conn.execute("INSERT INTO inject_cursor SELECT ?, session_id, last_msg_row, last_atom_ids, updated_at "
+                             "FROM inject_cursor_p2_old", (self.persona_id,))
+                conn.execute("DROP TABLE inject_cursor_p2_old")
+            conn.execute("INSERT OR REPLACE INTO migration_journal VALUES(?,?,?,?)",
+                         (6, int(time.time()), self.persona_id, json.dumps(counts)))
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_atom_session_ref ON mem_atom(persona_id, session_ref, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_atom_subject_ref ON mem_atom(persona_id, subject_ref, status)")
+
+    def _migrate_events(self) -> None:
+        """P3 仅看实际结构；历史 user_version=7 也必须执行，不改历史正文。"""
+        conn = self._conn
+        assert conn is not None
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS event_ledger("
+            "event_id TEXT PRIMARY KEY, persona_id TEXT NOT NULL, event_key TEXT NOT NULL, "
+            "event_type TEXT NOT NULL, subject_ref TEXT NOT NULL, actor_ref TEXT NOT NULL, "
+            "session_ref TEXT NOT NULL DEFAULT '', audience TEXT NOT NULL, "
+            "occurred_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL, "
+            "status TEXT NOT NULL CHECK(status IN ('planned','succeeded','failed','expired')), "
+            "result_ref TEXT NOT NULL DEFAULT '', result_text TEXT NOT NULL DEFAULT '', "
+            "result_json TEXT NOT NULL DEFAULT '{}', memory_id INTEGER, "
+            "UNIQUE(persona_id,event_key))"
+        )
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(mem_atom)")}
+        for name, default in (("event_id", ""), ("event_type", ""), ("event_key", ""),
+                              ("audience", "legacy"), ("public_text", "")):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE mem_atom ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_atom_event ON mem_atom(persona_id,event_key) "
+                     "WHERE event_key<>''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_event_type ON event_ledger(persona_id,event_type,status)")
+
+        # 这四个唯一索引是代码里 ON CONFLICT(...) 的前提。早期建表用的是表级
+        # UNIQUE，但表已存在时 CREATE TABLE IF NOT EXISTS 会整段跳过，
+        # 于是老库里根本没有这些约束，所有 ON CONFLICT 都会抛
+        # "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"。
+        # 单独建索引：幂等，且不依赖建表语句有没有被执行。
+        for name, ddl in (
+            ("ux_atom_tag", "CREATE UNIQUE INDEX IF NOT EXISTS ux_atom_tag "
+                            "ON mem_atom_tag(atom_id, subject_key)"),
+            ("ux_subject_user", "CREATE UNIQUE INDEX IF NOT EXISTS ux_subject_user "
+                                "ON mem_subject(persona_id, user_id)"),
+            ("ux_event_key", "CREATE UNIQUE INDEX IF NOT EXISTS ux_event_key "
+                             "ON event_ledger(persona_id, event_key)"),
+        ):
+            try:
+                conn.execute(ddl)
+                conn.commit()
+            except Exception as exc:
+                # 真有重复行时建不起来，记警告别拖垮启动
+                logger.warning(f"[congling] 唯一索引 {name} 建立失败: {exc_brief(exc)}")
+
+    def _migrate_dream_plans(self) -> None:
+        """P4 按结构修复，绝不以 user_version 判断是否需要迁移。"""
+        conn = self._conn
+        assert conn is not None
+        conn.execute("CREATE TABLE IF NOT EXISTS night_dream_plan(id INTEGER PRIMARY KEY AUTOINCREMENT)")
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(night_dream_plan)")}
+        fields = {
+            "persona_id": "TEXT NOT NULL DEFAULT ''", "night_key": "TEXT NOT NULL DEFAULT ''",
+            "plan_key": "TEXT NOT NULL DEFAULT ''", "stage_index": "INTEGER NOT NULL DEFAULT 0",
+            "stage_key": "TEXT NOT NULL DEFAULT ''", "stage_start": "INTEGER NOT NULL DEFAULT 0",
+            "stage_end": "INTEGER NOT NULL DEFAULT 0", "scheduled_at": "INTEGER NOT NULL DEFAULT 0",
+            "context_cutoff": "INTEGER NOT NULL DEFAULT 0", "status": "TEXT NOT NULL DEFAULT 'planned'",
+            "dream_id": "TEXT DEFAULT ''", "generated_at": "INTEGER DEFAULT 0",
+            "delivered_at": "INTEGER DEFAULT 0",
+            # 调度恢复不能依赖会在醒来时清空的 NightState；正文只在发放后进入梦库。
+            "sleep_at": "INTEGER NOT NULL DEFAULT 0", "wake_at": "INTEGER NOT NULL DEFAULT 0",
+            "planned_at": "INTEGER NOT NULL DEFAULT 0", "cycle": "INTEGER NOT NULL DEFAULT 0",
+            "precompute": "INTEGER NOT NULL DEFAULT 0", "attempts": "INTEGER NOT NULL DEFAULT 0",
+            "dream_json": "TEXT NOT NULL DEFAULT '{}'", "last_error": "TEXT NOT NULL DEFAULT ''",
+            "backfilled": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in fields.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE night_dream_plan ADD COLUMN {name} {definition}")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dream_plan_unique "
+                     "ON night_dream_plan(persona_id,plan_key,stage_index)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dream_plan_due "
+                     "ON night_dream_plan(persona_id,status,scheduled_at)")
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_dream_plan "
+                         "ON night_dream_plan(persona_id, plan_key, stage_index)")
+            conn.commit()
+        except Exception as exc:
+            logger.warning(f"[congling] 唯一索引 ux_dream_plan 建立失败: {exc_brief(exc)}")
 
     def _backfill_levels(self) -> None:
         """0.4.x → 0.5.0 一次性回填：老记忆没有等级，按 importance 粗分。
 
         保护过的（protect=1）直接进 0 级不可忘；其余按重要度切四段。
-        只跑一次，靠 PRAGMA user_version 记录。
+        只在原表缺 mem_level 时回填，不依赖 PRAGMA user_version。
         """
         assert self._conn is not None
         try:
@@ -421,6 +628,29 @@ class Store:
 
         await asyncio.to_thread(_run)
 
+    async def transaction(self, operation: Callable[[sqlite3.Connection], Any]) -> Any:
+        """同步回调持锁跑完整事务，不能在多次 await 间混入其他协程的提交。
+
+        回调不得 await 或调用 Store API。取消等待不打断工作线程里的原子提交/回滚；
+        调用方重试必须使用同一幂等键。已有旧式显式事务时拒绝嵌套，不替它提交。
+        """
+        def _run() -> Any:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    raise RuntimeError("数据库未就绪")
+                if self._in_tx or conn.in_transaction:
+                    raise RuntimeError("不能嵌套事务")
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    result = operation(conn)
+                    conn.commit()
+                    return result
+                except BaseException:
+                    conn.rollback()
+                    raise
+        return await asyncio.to_thread(_run)
+
     async def commit(self) -> None:
         def _run() -> None:
             with self._lock:
@@ -457,8 +687,13 @@ class Store:
 
     async def fetch_all(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         def _run() -> list[dict[str, Any]]:
-            cursor = self._execute_sync(sql, params)
-            return [dict(row) for row in cursor.fetchall()]
+            # 必须和 execute 用同一把锁：sqlite3 连接不是线程安全的，
+            # check_same_thread=False 只是关掉检查。一边 fetchall、一边 execute，
+            # 会抛 `another row available`，紧接着连接状态错乱，
+            # 后续写操作全变成 `database is locked`。
+            with self._lock:
+                cursor = self._execute_sync(sql, params)
+                return [dict(row) for row in cursor.fetchall()]
 
         return await asyncio.to_thread(_run)
 
@@ -491,6 +726,23 @@ class Store:
         )
 
     # ------------------------------------------------------------ 维护
+    async def vacuum(self) -> dict[str, Any]:
+        """删除已提交后收缩文件；失败显式返回，不能声称删除回滚。"""
+        def compact() -> dict[str, Any]:
+            with self._lock:
+                try:
+                    if self._conn is None or self._in_tx or self._conn.in_transaction:
+                        raise RuntimeError("数据库不可执行 VACUUM")
+                    self._conn.execute("VACUUM")
+                    checkpoint = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    if checkpoint and checkpoint[0]:
+                        raise RuntimeError("WAL 检查点繁忙，主库收缩等待其他连接释放")
+                    return {"vacuum_ok": True, "vacuum_error": ""}
+                except Exception as exc:
+                    logger.warning(f"[congling] 清除记忆已提交，但数据库收缩失败: {exc!r}")
+                    return {"vacuum_ok": False, "vacuum_error": "删除已提交，文件收缩失败，请稍后维护数据库"}
+        return await asyncio.to_thread(compact)
+
     async def purge(self, table: str, before_ts: int) -> int:
         allowed = {"msg_archive", "decision_log", "forward_cache"}
         if table not in allowed:

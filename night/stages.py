@@ -105,7 +105,7 @@ def _noon_minutes(total: float, n1: int) -> list[tuple[str, float, int]]:
     if total <= 0:
         return []
     n1m = min(float(n1), max(0.0, total * 0.2)) if n1 else 0.0
-    rem = 8.0 if total >= 25 else 0.0
+    rem = 8.0 if total >= 90 else 0.0
     rem = min(rem, max(0.0, total - n1m))
     n2 = max(0.0, total - n1m - rem)
     out: list[tuple[str, float, int]] = []

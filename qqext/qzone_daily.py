@@ -16,11 +16,14 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core.memory_guard import memory_work
+from ..memory.perspective import SELF_SUBJECT, material_label
+from ..core.exc import exc_brief
 
 PROMPT = """你是{name}{identity_line}。你要发一条 QQ 空间的说说，像随手写的一小段日常。
 
-今天的素材（方括号里「关于 X」表示这条说的是 X 的事，不是你的事；
-没有标注的才是你自己经历的）：
+今天的素材（主体「我（机器人本人）」才明确指你；主体未确认的历史记录
+不要直接认领为自己的经历）：
 {materials}
 
 要求：
@@ -108,6 +111,7 @@ class QzoneDaily:
             return {"ok": False, "reason": "空间不可用"}
         return await self.post_now(reason="manual")
 
+    @memory_work
     async def post_now(self, *, reason: str = "auto") -> dict[str, Any]:
         bridge = self._bridge()
         if bridge is None:
@@ -163,18 +167,22 @@ class QzoneDaily:
             dreamer = getattr(night, "dreamer", None)
         if dreamer is not None:
             try:
-                dreams = [d for d in dreamer.living() if int(getattr(d, "level", 0) or 0) >= 3]
+                minimum = max(4, min(5, self.config.int("night.dream_mention_min_level", 4)))
+                dreams = [d for d in dreamer.living() if int(getattr(d, "level", 0) or 0) >= minimum]
                 for dream in dreams[-2:]:
                     items.append(
-                        {"kind": "dream", "text": str(getattr(dream, "text", ""))[:300], "weight": 3.0}
+                        {"kind": "dream", "text": "我做过一段梦，正文保存在私人梦境记录里。",
+                         "subject": SELF_SUBJECT, "weight": 3.0}
                     )
             except Exception as exc:
-                logger.debug(f"[congling] 读梦失败: {exc!r}")
+                logger.warning(f"[congling] 读梦失败: {exc_brief(exc)}")
 
         # 2) 今天新记下的事
         try:
             rows = await self.store.fetch_all(
-                "SELECT text, mem_level, subject_id FROM mem_atom WHERE persona_id=? AND status='active' "
+                "SELECT text, mem_level, subject_id, subject_ref FROM mem_atom WHERE persona_id=? AND status='active' "
+                "AND scope<>'self' AND (unread IS NULL OR unread=0) "
+                "AND COALESCE(event_type,'')<>'qzone' AND audience IN ('legacy','public') "
                 "AND created_at>=? AND mem_level BETWEEN 2 AND 4 ORDER BY created_at DESC LIMIT 8",
                 (self.config.persona_id, now - 86400),
             )
@@ -184,6 +192,7 @@ class QzoneDaily:
                         "kind": "memory",
                         "text": str(row.get("text") or "")[:200],
                         "subject": str(row.get("subject_id") or ""),
+                        "subject_ref": str(row.get("subject_ref") or ""),
                         "weight": float(row.get("mem_level") or 3),
                     }
                 )
@@ -193,7 +202,9 @@ class QzoneDaily:
         # 3) 情绪浓度高的记忆（近三天）
         try:
             rows = await self.store.fetch_all(
-                "SELECT text, subject_id FROM mem_atom WHERE persona_id=? AND status='active' "
+                "SELECT text, subject_id, subject_ref FROM mem_atom WHERE persona_id=? AND status='active' "
+                "AND scope<>'self' AND (unread IS NULL OR unread=0) "
+                "AND COALESCE(event_type,'')<>'qzone' AND audience IN ('legacy','public') "
                 "AND level_tags LIKE '%emotion_high%' AND created_at>=? ORDER BY created_at DESC LIMIT 4",
                 (self.config.persona_id, now - 3 * 86400),
             )
@@ -202,6 +213,7 @@ class QzoneDaily:
                     "kind": "emotion",
                     "text": str(row.get("text") or "")[:200],
                     "subject": str(row.get("subject_id") or ""),
+                    "subject_ref": str(row.get("subject_ref") or ""),
                     "weight": 2.5,
                 })
         except Exception:
@@ -210,9 +222,9 @@ class QzoneDaily:
         # 4) 兜底：当前状态
         try:
             if night is not None and hasattr(night, "prompt_hint"):
-                hint = str(night.prompt_hint() or "")
+                hint = str(night.prompt_hint(consume=False) or "")
                 if hint:
-                    items.append({"kind": "state", "text": hint[:160], "weight": 1.0})
+                    items.append({"kind": "state", "text": hint[:160], "subject": SELF_SUBJECT, "weight": 1.0})
         except Exception:
             pass
 
@@ -273,21 +285,25 @@ class QzoneDaily:
         # 说说又是公开的，视角一错就变成替别人立人设。
         lines = []
         for item in materials:
+            if item.get("event_type") == "qzone" or item.get("audience") == "owner:__private__":
+                continue
             subject = str(item.get("subject") or "").strip()
-            head = f"[关于 {subject}] " if subject else ""
+            head = material_label(subject, subject_ref=str(item.get("subject_ref") or "")) + " "
             lines.append(f"- {head}{item['text']}")
         body = "\n".join(lines)
         if provider is None:
             return ""
         # 名字写进去，模型才知道这条说说署的是谁
-        name = self.config.str("persona.name", "绫") or "绫"
+        name = self.config.str("persona.name", "AstrBot 当前人格") or "AstrBot 当前人格"
         try:
             book = getattr(self.plugin, "persona", None)
             if book is not None and hasattr(book, "display_name"):
                 name = await book.display_name() or name
         except Exception:
             pass
-        identity = self.config.str("persona.identity", "").strip()
+        identity = ""
+        if book is not None and hasattr(book, "current_astrbot_persona"):
+            identity = str((await book.current_astrbot_persona()).get("prompt") or "").strip()
         prompt = (
             PROMPT.replace("{name}", name)
             .replace("{identity_line}", f"（{identity[:60]}）" if identity else "")
@@ -297,7 +313,7 @@ class QzoneDaily:
             resp = await provider.text_chat(prompt=prompt, contexts=[])
             text = str(getattr(resp, "completion_text", "") or "").strip()
         except Exception as exc:
-            logger.debug(f"[congling] 说说生成失败: {exc!r}")
+            logger.warning(f"[congling] 说说生成失败: {exc_brief(exc)}")
             return ""
         text = text.strip().strip("“”\"'")
         text = re.sub(r"^```.*?\n|```$", "", text).strip()

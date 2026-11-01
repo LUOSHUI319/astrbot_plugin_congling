@@ -3,23 +3,56 @@
 记忆里写着「小张说…」，可小张是谁？换个群名片、改个昵称，人还是那个人。
 这张表就是拿来回答「这句话说的是谁」的。
 
-判定优先级：QQ 号 > 别名精确命中 > 字符相似度唯一候选 > 新建。
-QQ 号是最硬的证据，其余都是猜，所以猜出来的都带低 confidence。
+判定优先级：真实发言者 ID > 已确认用户的唯一精确别名。
+只有真实发言者才可以新建用户，无法确认的文本提及保持未识别。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any
 
 from astrbot.api import logger
+from ..core.exc import exc_brief
 
-from .atom import similarity
-
-ALIAS_RATIO = 0.82
 MAX_ALIASES = 12
+
+
+def self_names(text: str) -> list[str]:
+    """只接受本人独立的称呼声明，不把职业、问句、引用或假设当别名。"""
+    out = []
+    for sentence in re.split(r"[。！!\n]", str(text or "")):
+        sentence = sentence.strip()
+        if not sentence or any(x in sentence for x in ("?", "？", "如果", "假如", "要是", "不是")):
+            continue
+        match = re.match(r"^(?:(?:大家|你们|你)\s*)?(可以叫我|我叫|叫我|我是)\s*[「『“\"]?([\w\u4e00-\u9fff·-]{1,20})[」』”\"]?(?:[，,、;；\s]|$)", sentence)
+        if not match:
+            continue
+        name = match[2].strip()
+        if name in GENERIC_NAMES or any(x in name for x in ("的", "了", "吗", "呢", "一个", "一名")):
+            continue
+        if match[1] == "我是" and (name in NON_NAMES or name.endswith(("老师", "医生", "工程师", "程序员"))):
+            continue
+        if name not in out:
+            out.append(name)
+    return out
+
+GENERIC_NAMES = {"我", "用户", "机器人", "bot", "__self__", "他", "她"}
+NON_NAMES = {"学生", "老师", "医生", "程序员", "管理员", "群主", "男生", "女生", "中国人",
+             "新人", "好人", "坏人", "真的", "假的", "认真的", "累", "困", "开心", "不开心"}
+
+
+def confirmed_subject_sql(alias: str = "s") -> str:
+    return (
+        f"{alias}.source='qq' AND {alias}.user_id NOT IN ('bot','__self__','') "
+        f"AND {alias}.user_id NOT LIKE 'bot:%' "
+        f"AND NOT EXISTS(SELECT 1 FROM msg_archive g WHERE g.session_kind='group' AND g.session_id={alias}.user_id) "
+        f"AND NOT EXISTS(SELECT 1 FROM mem_atom g WHERE g.persona_id={alias}.persona_id "
+        f"AND g.session_kind='group' AND g.session_id={alias}.user_id)"
+    )
 
 
 class SubjectBook:
@@ -29,6 +62,17 @@ class SubjectBook:
         self.store = plugin.store
 
     # ------------------------------------------------------------ 识别
+    async def observe_names(self, sender_id: str, sender_name: str, text: str) -> None:
+        if not str(sender_id or "").strip():
+            return
+        names = self_names(text)
+        if not names:
+            return
+        key = await self.identify(sender_id=sender_id, sender_name=sender_name)
+        if key:
+            for name in names:
+                await self.add_alias(key, name)
+
     async def identify(
         self,
         *,
@@ -41,8 +85,12 @@ class SubjectBook:
         name = str(sender_name or "").strip()
         text = str(subject_text or "").strip()
 
+        if sid in {"bot", "__self__"} or sid.startswith("bot:"):
+            return ""
+
         if sid:
-            await self.ensure(sid, name or text or sid, source="qq")
+            if not await self.ensure(sid, name or text or sid, source="qq"):
+                return ""
             if name:
                 await self.add_alias(sid, name)
             return sid
@@ -56,11 +104,8 @@ class SubjectBook:
                 if key:
                     return key
 
-        # 实在认不出来：用文本本身当 key，等以后有 QQ 号了再合并
-        key = text or name
-        if key:
-            await self.ensure(key, key, source="inferred", confidence=0.3)
-        return key
+        # 自然语言提及不是一个真实发言者，不能据此新建用户。
+        return ""
 
     async def ensure(
         self,
@@ -71,7 +116,16 @@ class SubjectBook:
         confidence: float = 0.9,
     ) -> dict[str, Any]:
         key = str(user_id or "").strip()
-        if not key:
+        if not key or key in {"bot", "__self__"} or key.startswith("bot:"):
+            return {}
+        if not (key.isascii() and key.isdigit()) and confidence < 0.8:
+            return {}
+        group = await self.store.fetch_one(
+            "SELECT 1 FROM msg_archive WHERE session_kind='group' AND session_id=? "
+            "UNION ALL SELECT 1 FROM mem_atom WHERE persona_id=? AND session_kind='group' AND session_id=? LIMIT 1",
+            (key, self.config.persona_id, key),
+        )
+        if group:
             return {}
         persona = self.config.persona_id
         now = int(time.time())
@@ -79,6 +133,11 @@ class SubjectBook:
             "SELECT * FROM mem_subject WHERE persona_id=? AND user_id=?", (persona, key)
         )
         if row:
+            if source == "qq":
+                await self.store.execute(
+                    "UPDATE mem_subject SET source='qq', confidence=? WHERE persona_id=? AND user_id=?",
+                    (confidence, persona, key),
+                )
             if display_name and display_name != row.get("display_name"):
                 try:
                     await self.store.execute(
@@ -116,7 +175,7 @@ class SubjectBook:
                 ),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 建主体失败: {exc!r}")
+            logger.warning(f"[congling] 建主体失败: {exc_brief(exc)}")
         return await self.store.fetch_one(
             "SELECT * FROM mem_subject WHERE persona_id=? AND user_id=?", (persona, key)
         ) or {}
@@ -126,53 +185,66 @@ class SubjectBook:
         name = str(alias or "").strip()[:40]
         if not key or not name:
             return
-        row = await self.store.fetch_one(
-            "SELECT aliases FROM mem_subject WHERE persona_id=? AND user_id=?",
-            (self.config.persona_id, key),
-        )
-        if not row:
-            return
-        try:
-            aliases = json.loads(row.get("aliases") or "[]")
-        except (ValueError, TypeError):
-            aliases = []
-        if name in aliases:
-            return
-        aliases.append(name)
-        aliases = aliases[-MAX_ALIASES:]
-        await self.store.execute(
-            "UPDATE mem_subject SET aliases=? WHERE persona_id=? AND user_id=?",
-            (json.dumps(aliases, ensure_ascii=False), self.config.persona_id, key),
-        )
+        persona = self.config.persona_id
+        def update(conn):
+            row = conn.execute("SELECT aliases FROM mem_subject WHERE persona_id=? AND user_id=?",
+                               (persona, key)).fetchone()
+            if not row:
+                return
+            aliases = self._loads(row["aliases"], [])
+            if not isinstance(aliases, list):
+                aliases = []
+            if name in aliases:
+                return
+            aliases = (aliases + [name])[-MAX_ALIASES:]
+            conn.execute("UPDATE mem_subject SET aliases=? WHERE persona_id=? AND user_id=?",
+                         (json.dumps(aliases, ensure_ascii=False), persona, key))
+        # 多会话同时补昵称/自称时，不让读-改-写丢掉另一个别名。
+        await self.store.transaction(update)
 
     async def find_by_name(self, name: str) -> dict[str, Any] | None:
         text = str(name or "").strip()
         if not text:
             return None
         rows = await self.store.fetch_all(
-            "SELECT * FROM mem_subject WHERE persona_id=?", (self.config.persona_id,)
+            "SELECT s.* FROM mem_subject s WHERE s.persona_id=? AND " + confirmed_subject_sql(), (self.config.persona_id,)
         )
-        best: dict[str, Any] | None = None
-        best_ratio = 0.0
+        matches: list[dict[str, Any]] = []
         for row in rows:
-            if str(row.get("display_name") or "") == text:
-                return row
             try:
                 aliases = json.loads(row.get("aliases") or "[]")
             except (ValueError, TypeError):
                 aliases = []
-            if text in [str(x) for x in aliases]:
-                return row
-            for candidate in [str(row.get("display_name") or "")] + [str(x) for x in aliases]:
-                if not candidate:
+            if text in [str(row.get("display_name") or "")] + [str(x) for x in aliases]:
+                matches.append(row)
+        return matches[0] if len(matches) == 1 else None
+
+    async def query_aliases(self, query: str, persona_id: str) -> dict[str, list[str]]:
+        """查询里的唯一精确别名仅用作索引，不替换任何历史正文。"""
+        rows = await self.store.fetch_all(
+            "SELECT s.* FROM mem_subject s WHERE s.persona_id=? AND " + confirmed_subject_sql(), (persona_id,))
+        owners: dict[str, set[str]] = {}
+        for row in rows:
+            aliases = self._loads(row.get("aliases"), [])
+            names = [str(row.get("display_name") or "")] + (aliases if isinstance(aliases, list) else [])
+            for name in names:
+                name = str(name).strip()
+                if len(name) < 2 or name not in query:
                     continue
-                ratio = similarity(text, candidate)
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best = row
-        if best is not None and best_ratio >= ALIAS_RATIO:
-            return best
-        return None
+                if name.isascii() and not re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", query):
+                    continue
+                owners.setdefault(name, set()).add(str(row["user_id"]))
+        matches: dict[str, list[str]] = {}
+        for name, ids in owners.items():
+            if len(ids) == 1:
+                matches.setdefault(next(iter(ids)), []).append(name)
+        return matches
+
+    async def aliases_of(self, user_id: str) -> list[str]:
+        row = await self.store.fetch_one("SELECT aliases FROM mem_subject WHERE persona_id=? AND user_id=?",
+                                         (self.config.persona_id, user_id))
+        aliases = self._loads((row or {}).get("aliases"), [])
+        return [str(a) for a in aliases] if isinstance(aliases, list) else []
 
     # ------------------------------------------------------------ 关联
     async def link_atom(self, atom_id: int, subject_key: str, role: str = "subject") -> None:
@@ -185,7 +257,7 @@ class SubjectBook:
                 (int(atom_id), str(subject_key), role, int(time.time())),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 记忆打标签失败: {exc!r}")
+            logger.warning(f"[congling] 记忆打标签失败: {exc_brief(exc)}")
 
     async def atoms_of(
         self,
@@ -213,13 +285,13 @@ class SubjectBook:
         persona = self.config.persona_id
         if keyword:
             rows = await self.store.fetch_all(
-                "SELECT * FROM mem_subject WHERE persona_id=? AND (display_name LIKE ? OR user_id LIKE ? OR aliases LIKE ?) "
+                "SELECT s.* FROM mem_subject s WHERE s.persona_id=? AND " + confirmed_subject_sql() + " AND (display_name LIKE ? OR user_id LIKE ? OR aliases LIKE ?) "
                 "ORDER BY last_seen_at DESC LIMIT ?",
                 (persona, f"%{keyword}%", f"%{keyword}%", f"%{keyword}%", max(1, min(300, limit))),
             )
         else:
             rows = await self.store.fetch_all(
-                "SELECT * FROM mem_subject WHERE persona_id=? ORDER BY last_seen_at DESC LIMIT ?",
+                "SELECT s.* FROM mem_subject s WHERE s.persona_id=? AND " + confirmed_subject_sql() + " ORDER BY last_seen_at DESC LIMIT ?",
                 (persona, max(1, min(300, limit))),
             )
         out: list[dict[str, Any]] = []
@@ -303,7 +375,7 @@ class SubjectBook:
                     continue
                 marks = ",".join("?" * len(atoms))
                 await self.store.execute(
-                    f"UPDATE mem_atom SET subject_id=? WHERE persona_id=? AND id IN ({marks})",
+                    f"UPDATE mem_atom SET subject_id=?, subject_ref='', ref_status='legacy' WHERE persona_id=? AND id IN ({marks})",
                     (src, persona_id, *atoms),
                 )
                 # 主体行还原（当初被删掉的那条 inferred 记录）
@@ -441,7 +513,7 @@ class SubjectBook:
             (persona_id, src),
         )
         cur = await self.store.execute(
-            "UPDATE mem_atom SET subject_id=? WHERE persona_id=? AND subject_id=?", (dst, persona_id, src)
+            "UPDATE mem_atom SET subject_id=?, subject_ref='', ref_status='legacy' WHERE persona_id=? AND subject_id=?", (dst, persona_id, src)
         )
         moved = int(cur or 0)
         await self.store.execute(

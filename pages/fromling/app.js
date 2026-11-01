@@ -676,7 +676,7 @@ function nightDreamPage(dreamData) {
   const stats = (dreamData && dreamData.stats) || {};
   const alive = Number(stats.living || 0);
   return `
-    <div class="settings-intro">睡着满一小时开始做梦，之后每小时一段。梦会按等级一天天淡掉，拽住了就不会散。</div>
+    <div class="settings-intro">睡着以后会做梦，梦会按等级一天天淡掉，拽住了就不会散。</div>
     <div class="night-block">
       <div class="block-head">
         <span class="block-title">做过的梦</span>
@@ -976,6 +976,7 @@ const SUBTABS = {
   changelog: [
     { key: "fixes", title: "问题与修复", render: () => renderChangelog("fixes") },
     { key: "news", title: "新功能", render: () => renderChangelog("news") },
+    { key: "next", title: "下次更新", render: () => renderChangelog("next") },
   ],
   memory: [
     { key: "summary", title: "记忆总览", render: renderM3Overview },
@@ -1082,16 +1083,90 @@ function parseHash() {
   return { view: VIEWS[name] ? name : "overview", sub: sub || "" };
 }
 
+/* 渲染串行化。
+ *
+ * 以前 render() 直接 await 渲染函数，而渲染函数自己在结尾写 view.innerHTML。
+ * 连点两个板块时会有两个请求并发，谁后返回谁覆盖——表现就是「点日记，弹出来的是记忆」。
+ *
+ * 现在同一时刻只跑一个渲染任务，后到的只记下「目标变了」，等当前这个跑完再看要不要重画。
+ * 过时的目标直接丢弃，不会覆盖。
+ */
+/* 渲染抢占式执行。
+ *
+ * 以前 render() 直接 await 渲染函数，而渲染函数自己在结尾写 view.innerHTML。
+ * 连点两个板块时会有两个请求并发，谁后返回谁覆盖——表现就是「点日记，弹出来的是记忆」。
+ *
+ * 更麻烦的是日记页：它写完骨架之后还要 await 挂载书页组件，
+ * 子组件的写入比队列还晚，照样能盖掉新页面。
+ *
+ * 所以两层：① 每次切换立刻认领视图（ownerView），不等上一个跑完；
+ * ② innerHTML 守卫只放行「当前视图」的写入，迟到的旧写入直接丢掉。
+ */
+(async function guardViewHtml() {
+  const desc = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML");
+  if (!desc || !desc.set) return;
+  Object.defineProperty(view, "innerHTML", {
+    configurable: true,
+    get() {
+      return desc.get.call(this);
+    },
+    set(html) {
+      const owner = this.dataset ? this.dataset.ownerView : "";
+      if (owner && owner !== currentView) return;   // 迟到的旧视图写入，丢掉
+      desc.set.call(this, html);
+    },
+  });
+})();
+
+const viewCache = new Map();
+
 async function render() {
-  const subs = subsOf(currentView);
-  const active = subs.length ? subs.find((sub) => sub.key === currentSub) || subs[0] : null;
+  const jobView = currentView;
+  const jobSub = currentSub;
+  const subs = subsOf(jobView);
+  const active = subs.length ? subs.find((sub) => sub.key === jobSub) || subs[0] : null;
   if (active) currentSub = active.key;
-  view.innerHTML = '<div class="empty">读取中…</div>';
+
+  /* 立刻认领：不等上一个渲染任务结束，旧任务的后续写入会被守卫丢弃 */
+  try {
+    view.dataset.ownerView = jobView;
+  } catch (err) {}
+
+  /* 页面缓存：切回已经看过的板块时先放上次的内容，再在后台刷新。
+     接口一趟几百毫秒，每次都从「读取中…」开始等，来回切几次很烦。
+     缓存只在同一个会话里、30 秒内有效，过期就不用了。 */
+  const cacheKey = `${jobView}/${currentSub}`;
+  const hit = viewCache.get(cacheKey);
+  const fresh = hit && Date.now() - hit.at < 30000;
+  if (fresh) {
+    view.innerHTML = hit.html;
+  } else {
+    view.innerHTML = '<div class="empty">读取中…</div>';
+  }
+
   try {
     if (active) await active.render();
-    else await VIEWS[currentView].render();
+    else await VIEWS[jobView].render();
+    /* 渲染完成后把这版内容记下来，下次切回来先显示它 */
+    if (jobView === currentView && view.dataset.ownerView === jobView) {
+      try {
+        viewCache.set(cacheKey, { html: view.innerHTML, at: Date.now() });
+      } catch (err) {}
+    }
   } catch (err) {
-    view.innerHTML = `<div class="empty">出错了：${esc(err.message)}</div>`;
+    /* 视图已经切走的话，这里也别把错误糊到新页面上 */
+    if (view.dataset.ownerView === currentView) {
+      view.innerHTML = `<div class="empty">出错了：${esc(err.message)}</div>`;
+    }
+  } finally {
+    /* 自检：如果这个任务跑完时用户已经切到别的视图，说明它的写入最多只能算「迟到」，
+       而 innerHTML 守卫分不清是谁在写（dataset 是共享的），所以这里直接重画一次当前视图。
+       代价是一次闪烁，换的是「点哪个看到哪个」。 */
+    if (jobView !== currentView) {
+      setTimeout(() => {
+        if (currentView !== jobView) render();
+      }, 0);
+    }
   }
 }
 
@@ -1362,6 +1437,76 @@ function changelogHtml(key) {
     },
   ];
 
+  /* 版本块：版本号大字，副标题小字，日期靠右 */
+  const ver = (num, tag, date, lead, inner, latest) => `
+    <section class="cl-ver${latest ? " latest" : " older"}">
+      <div class="cl-ver-head">
+        <span class="cl-ver-num">${num}</span>
+        <span class="cl-ver-tag">${tag}</span>
+        <span class="cl-ver-date">${date}</span>
+      </div>
+      ${lead ? `<p class="cl-ver-lead">${lead}</p>` : ""}
+      ${inner}
+    </section>`;
+
+  /* ---------------- 1.1.0 · 2026-11-02 ---------------- */
+  const v110 = ul([
+    item("发现并修复「插件重载后有一半任务不再运行」的问题",
+      "所有后台任务都是裸 create_task，没有持有引用。重载或退出时既不会取消也不会等待，旧任务和新任务并存或直接消失。修复后统一走 spawn_background 托管，加 _stopping 闸门，退出时按 cancel → gather → flush → close 固定顺序回收。"),
+    item("发现并修复「精力值一直停着不动」的问题",
+      "作息心跳挂在每小时一次的清理循环里，一天只跑 24 次，白天没人说话时精力冻住，也不会自然醒。修复后拆出独立心跳（默认 60 秒），内部按 last_tick 补算，漏拍和重启都能补齐。"),
+    item("发现并修复「状态只在内存里，重启就回退」的问题",
+      "night.state 只在有事件时才落盘。修复后每拍保存，疲劳轮次和起点一并持久化；醒来那一刻的睡眠阶段也从内存变量改成写 kv，重启后语气不会丢。"),
+    item("发现并修复「在别的群问起同一个人，她说记不得」的问题",
+      "召回只有「当前会话」和「公共」两层，没有「关于这个人」这一层。修复后引入三套稳定标识（user / session / actor），召回改成会话层、个人层、公共层三层。"),
+    item("发现并修复「问她『你还记得我吗』答不上来」的问题",
+      "这类问句里没有可用于关键词匹配的实词。修复后加元问题特判，按 about_ref 直接取高等级记忆；三层全空时再按 importance × decay 兜底，标记为弱相关。"),
+    item("发现并修复「记忆搜索工具永远返回没找到」的问题",
+      "工具走的是空主体检索，在候选层里等于「只查公共记忆」，而全库只有一条。修复后工具接 takes_event，用当前会话加发言人构造标识；拿不到事件时退成全库，私聊一律不碰。"),
+    item("发现并修复「跨会话开了 all 档也不生效」的问题",
+      "只做了三层候选，all 没有对应实现。修复后补全库层，并用 LIKE 粗筛——否则几千条里按重要度取前八百会把目标挤出去。"),
+    item("发现并修复「补完候选还是排不出来」的问题",
+      "候选池同质导致词频权重被拉平，含「你 / 还 / 吗」的条目反而排前。修复后按实词命中加权，排除虚词和「记得 / 知道」这类元词。"),
+    item("发现并修复「每 15 秒两条数据库报错，记忆抽取停摆」的问题",
+      "代码查的列在真实库里不存在，而重建迁移包在版本号判断里——真实库的版本号比代码里的高，迁移永远不执行。修复后迁移改成看实际表结构：列不在就补，不再比版本号。"),
+    item("发现并修复「迁移期间心跳和抽取全部 database is locked」的问题",
+      "迁移整段包了排他事务，连上库那一瞬间就抢写锁，而迁移要扫三万多行归档。修复后回到不包大事务的做法：结构变更先提交，回填每五百条分批提交，失败只记警告不阻塞启动。"),
+    item("发现并修复「another row available 之后连接状态错乱」的问题",
+      "读取查询从来没加过锁，只有写入加了。sqlite3 的连接不是线程安全的，一边取结果一边执行就会抛这个错，紧接着所有写操作都变成 locked。修复后读写共用同一把锁。"),
+    item("发现并修复「回填六千多条记忆全部判成 legacy」的问题",
+      "归档表的平台字段里混着三种值（正式平台名、默认名、空串），而判据要求平台集合唯一，永远不成立。修复后空串当没记录、默认名当默认值，实测解析成功从 0 变成 4906。"),
+    item("发现并修复「四个 ON CONFLICT 全部抛异常」的问题",
+      "四张表缺代码假设存在的唯一索引——早期用表级约束建表，但表已存在时建表语句整段跳过。修复后单独补建唯一索引，并有兜底：真有重复时只记警告。"),
+    item("发现并修复「记忆主体记到了别人头上」的问题",
+      "整批证据都用最后一个发言人。修复后逐条证据反查说话人，主体必须唯一命中，识别不了就丢弃而不是兜底。"),
+    item("发现并修复「她说自己写过日记，其实没写」的问题",
+      "自述记忆是「先写记忆、动作另行执行」，动作失败记忆还在。修复后改成先入账本、动作成功再生成记忆，日记、梦、说说、主动找人四条链统一入口。"),
+    item("发现并修复「日记和梦的正文在群里被念出来」的问题",
+      "修复后单条记忆存正文与公开摘要两份，由受众决定投影，群聊即使是管理员也只能拿摘要。另外堵了三个旁路：醒后梦提示、人格钩子、说说素材。"),
+    item("发现并修复「同一段梦每轮都提，像卡带」的问题",
+      "修复后加一次性提示预算，梦段和醒来语气分栏、各自过期时间，并移除语气里的催梦旁路。"),
+    item("发现并修复「低等级的梦也往外说」的问题",
+      "修复后按等级准入：一到三级不提，四级约六成、五级约九成概率提。任何等级都可检索，只是不进上下文。"),
+    item("发现并修复「关机就一个梦都没有」的问题",
+      "梦只在进程活着且睡着时生成，重启后只补算状态机，没有补做梦中段的逻辑。修复后新增排产表，入睡时算出整晚 REM 段逐段预生成；启动时补发 24 小时内到期的，超期标记过期。"),
+    item("发现并修复「补发的梦显示还能留四天」的问题",
+      "衰减按补发时刻算，等于一晚上同时拥有五段新鲜梦。修复后按实际经历时刻计算。"),
+    item("发现并修复「手机上点不到日记入口和删除按钮」的问题",
+      "这些按钮默认透明，只有悬停才显示。触屏没有悬停，等于入口不存在。修复后默认可见，触屏再提一档。"),
+    item("发现并修复「触屏看不到提示气泡」的问题",
+      "只绑了鼠标移入移出。修复后按设备分流：触屏改点击切换，点自己或点别处收起，桌面仍走悬停。"),
+    item("发现并修复「做梦文案写死一小时」的问题",
+      "面板改成 15 分钟这里还显示一小时。修复后文案读配置项。"),
+    item("发现并修复「十个导航项在小屏上挤成一坨」的问题",
+      "修复后底部导航只显示短标签，并补上刘海屏安全区，底部按钮不再被 Home 指示条压住。"),
+    item("发现并修复「每启动一次就写两三份 39MB 备份」的问题",
+      "备份没有任何去重，而每日维护在启动时被多个钩子各调一次。目录里七份就是 271MB。修复后加业务日标记，一天一份。"),
+    item("发现并修复「图片缓存只进不出」的问题",
+      "三千多条缓存从没清理过，把键值表撑大。修复后每日维护清理七天前的。"),
+    item("发现并修复「连续报数据库错误但看不出是哪一列」的问题",
+      "后台失败日志只记异常类型名。但不能简单加消息——里面混着模型调用、用户消息解析、密钥读取。修复后分流：数据库和文件系统异常给类型加消息，其余仍只给类型名。"),
+  ]);
+
   const news = `<ul class="cl-paths">${FEATURES.map(
     (f) => `<li>
       <b>${f.name}</b><code>${f.path}</code>
@@ -1371,39 +1516,112 @@ function changelogHtml(key) {
     </li>`
   ).join("")}</ul>`;
 
+  /* ---------------- 1.1.0 · 新增 ---------------- */
+  const v110news = ul([
+    item("三套稳定标识",
+      "用户、会话、说话人各有一套固定键。名字永远不参与标识，缺失身份时明确标为待补，而不是猜一个。"),
+    item("三层召回与弱相关兜底",
+      "会话层、个人层、公共层分开检索，另有全库层供跨群查找。"),
+    item("自称识别与别名",
+      "从「我叫 X / 叫我 X / 我是 X」里抽出称呼写进主体库，抽取时能用别名反查。规则刻意收紧：按停顿词截断、拒绝「我是群主」这类、单字不认。"),
+    item("事件账本",
+      "新增四状态的自身行为账本（已计划、已成功、已失败、已过期），同一终态重试幂等，不同终态互转直接拒绝。与记忆写在同一事务，失败一起回滚。"),
+    item("梦境排产与补发",
+      "入睡时算出整晚 REM 段，默认预生成前三段，进程在线时后续段实时生成。启动时补发 24 小时内到期的梦，不逐条播报。"),
+    item("梦境检索工具",
+      "任何等级都能查，但只在对方明确问起时调用。工具描述里写死了「梦想 / 白日梦 / 别做梦了 / 中国梦」不触发，不靠关键词拦截。"),
+    item("素材标签与类型互斥",
+      "主体是我、主体未确认、他人三档明确；历史正文永不改写。同一段经历不会在日记、说说、梦里反复出现。"),
+    item("删除所有记忆",
+      "四重确认：条数清单、输入固定短语、勾选并确认已备份、按钮倒计时十秒。服务端强制导出备份、单事务删除、删完回收空间、写修复日志。身份只来自框架认证，不信任请求体。"),
+    item("人格简化",
+      "只保留「跟随 AstrBot」一种来源。面板上三张模式卡收成一张，保存时只提交模式，不再有插件内置人设和「只用默认」两条岔路。"),
+    item("桌面 / 手机视图切换",
+      "默认桌面视图：整页按比例缩放，保持信息密度；响应式规则全部挂在手机视图前缀下，桌面下一条都不生效。侧栏底部有切换按钮，选择记在浏览器里。"),
+    item("一次性提示预算",
+      "事件 ID、次数、过期时间三件套，过期不重置额度。梦段和醒来语气各管各的。"),
+    item("任务托管与诊断字段",
+      "后台任务统一持有引用、退出时按序回收；召回命中数、待发放梦、未解析主体、最近心跳都能在面板看到。"),
+    item("双皮肤与日记书页",
+      "纸色皮肤与原皮肤一键切换，零侵入不改原有脚本；日记改成双面书页，可翻页、可拖纸角、有目录抽屉。"),
+  ]);
+
+  /* ---------------- 下次更新计划 ---------------- */
+  const vNext = ul([
+    item("记忆人称整理（P7）",
+      "历史记忆里有三类需要分开处理：主体是她自己却写成第三人称的（例如「洛水曾表示……」）、主体是泛称的（用户、聊天机器人等）、以及别人提到她的（这类不能动）。计划做成先预览再执行、默认只处理前两类、被提及的那类必须人工勾选，每五十条一批并写修复日志，随时可回滚。"),
+    item("真实环境验收",
+      "现有三百多项断言全部跑在离线替身上。真实模型的措辞、真实 QQ 的发布链路、厂商侧的缓存命中率，都还没有验证过。"),
+    item("移动端继续打磨",
+      "底部导航的长按菜单、手势返回、横屏布局，以及小屏下的表格横向滚动。"),
+    item("配置项收敛",
+      "夜间分区已经涨到五十多项，其中有一部分是历史遗留的开关，计划合并掉一批。"),
+  ]);
+
   // 按块返回：侧边栏「更新日志」下面挂三个二级页
   if (key === "fixes") {
     return `
-      <div class="cl-eyebrow">APOLOGY · 0.7.3</div>
-      <div class="cl-appeal">
-        <h2>致歉声明</h2>
-        <p>0.7.3 版本在发布时并不成熟。</p>
-        <p>该版本功能数量较多，且各模块之间耦合程度较高。记忆、夜间作息、人格注入、主动调度、
-           消息归档与输出处理共享同一套运行状态、同一批全局变量、同一个时间基准，
-           彼此之间缺乏明确的边界与责任划分。</p>
-        <p>这种结构在单模块、单会话的理想条件下尚可维持；一旦进入并发场景 ——
-           多会话同时活跃、插件重载、状态机跨时段推进、事务中途失败 ——
-           即产生大量并发问题：状态机停滞在中间态、记忆归属错乱、
-           消息被错误拦截、进度与数据不同步、部分功能静默失效。</p>
-        <p>上述问题直接影响了实际使用体验。我们也注意到，不少持续关注本插件的用户
-           在使用过程中反复遇到这些问题，并花费时间整理现象、提交反馈。
-           这些反馈是本次重构的起点。</p>
-        <p>对此，我们向全体用户致以诚挚歉意。1.0.0 版本针对上述结构性问题进行了重构，
-           逐条复现、定位并修复，具体内容见下页。</p>
-        <p class="sig">插件维护者 · 2026 年 10 月</p>
-      </div>
-      <div class="cl-eyebrow">WHAT WENT WRONG</div>
-      <p class="cl-lead">经过各位用户耐心反馈，和我熬夜通宵奋战，发现在实际体验中，插件功能会出现如下问题：</p>
-      ${merged}`;
+      ${ver(
+        "1.0.1 → 1.1.0",
+        "稳定性",
+        "2026-11-02",
+        "这一版的重点不在加功能，而在把「能用」变成「稳」。下面这些问题都是实际跑出来、有复现路径的。",
+        v110,
+        true
+      )}
+      ${ver(
+        "0.7.3 → 1.0.0",
+        "结构性重写",
+        "2026-10-29",
+        "这一版新增功能不多，主要工作是把 0.7.3 里那些「看着正常、实际不工作」的地方挖出来修掉。",
+        `
+        <div class="cl-appeal">
+          <h2>致歉声明</h2>
+          <p>0.7.3 版本在发布时并不成熟。</p>
+          <p>该版本功能数量较多，且各模块之间耦合程度较高。记忆、夜间作息、人格注入、主动调度、
+             消息归档与输出处理共享同一套运行状态、同一批全局变量、同一个时间基准，
+             彼此之间缺乏明确的边界与责任划分。</p>
+          <p>这种结构在单模块、单会话的理想条件下尚可维持；一旦进入并发场景 ——
+             多会话同时活跃、插件重载、状态机跨时段推进、事务中途失败 ——
+             即产生大量并发问题：状态机停滞在中间态、记忆归属错乱、
+             消息被错误拦截、进度与数据不同步、部分功能静默失效。</p>
+          <p>上述问题直接影响了实际使用体验。我们也注意到，不少持续关注本插件的用户
+             在使用过程中反复遇到这些问题，并花费时间整理现象、提交反馈。
+             这些反馈是本次重构的起点。</p>
+          <p>对此，我们向全体用户致以诚挚歉意。</p>
+          <p class="sig">插件维护者 · 2026 年 10 月</p>
+        </div>
+        ${merged}`,
+        false
+      )}`;
   }
   if (key === "news") {
     return `
-      <div class="cl-eyebrow">WHERE TO FIND</div>
-      <p class="cl-lead">这一版新加的东西不多，但都在面板上有明确入口。下面每条都标了路径。</p>
-      ${news}`;
+      ${ver(
+        "1.0.1 → 1.1.0",
+        "新增",
+        "2026-11-02",
+        "这一版新增的东西集中在「她记得住谁、说得清自己做过什么」这两件事上。",
+        v110news,
+        true
+      )}
+      ${ver(
+        "0.7.3 → 1.0.0",
+        "新功能",
+        "2026-10-29",
+        "1.0.0 的功能入口在这里，每条都标了路径。",
+        news,
+        false
+      )}`;
+  }
+  if (key === "next") {
+    return `
+      <div class="cl-eyebrow">ROADMAP · 下次更新</div>
+      <p class="cl-lead">下面这些是这一版没做完、或者要等前面稳跑一段才敢动的。写在这里是为了让进度看得见。</p>
+      ${vNext}`;
   }
   return `<details class="adv" id="changelog" style="margin:20px 0 8px">
-      <summary style="font-size:15px">更新日志 · 0.7.3 → 1.0.0（大更新）</summary>
+      <summary style="font-size:15px">更新日志 · 0.7.3 → 1.1.0</summary>
       <div class="pad" style="font-size:13px">
         <p class="hint" style="margin:0 0 6px">这一版没有加多少新功能，主要是把 0.7.3 里那些「看着正常、实际不工作」的地方挖出来修掉。</p>
         ${sec("一、问题与修复", merged)}
@@ -3476,18 +3694,62 @@ function isNightUI() {
   }
 
   const pick = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
-  document.addEventListener("mouseover", (e) => {
-    const target = pick(e.target);
-    if (target) show(target);
-  });
-  document.addEventListener("mouseout", (e) => {
-    if (pick(e.target)) hide();
-  });
+
+  /* 触屏设备没有 hover：以前只绑 mouseover，手机上这些提示永远看不到。
+     触屏改成"点一下显示、再点自己或点别处收起"；桌面仍然走 hover。 */
+  const coarse = (() => {
+    try {
+      return window.matchMedia("(hover: none), (pointer: coarse)").matches;
+    } catch (err) {
+      return false;
+    }
+  })();
+  let pinned = null;
+
+  if (coarse) {
+    document.addEventListener(
+      "click",
+      (e) => {
+        const target = pick(e.target);
+        if (target) {
+          if (pinned === target) {
+            hide();
+            pinned = null;
+          } else {
+            show(target);
+            pinned = target;
+          }
+        } else {
+          hide();
+          pinned = null;
+        }
+      },
+      true
+    );
+  } else {
+    document.addEventListener("mouseover", (e) => {
+      const target = pick(e.target);
+      if (target) show(target);
+    });
+    document.addEventListener("mouseout", (e) => {
+      if (pick(e.target)) hide();
+    });
+  }
+
   document.addEventListener("focusin", (e) => {
     const target = pick(e.target);
     if (target) show(target);
   });
-  document.addEventListener("focusout", hide);
-  window.addEventListener("scroll", hide, true);
-  window.addEventListener("resize", hide);
+  document.addEventListener("focusout", () => {
+    hide();
+    pinned = null;
+  });
+  window.addEventListener("scroll", () => {
+    hide();
+    pinned = null;
+  }, true);
+  window.addEventListener("resize", () => {
+    hide();
+    pinned = null;
+  });
 })();

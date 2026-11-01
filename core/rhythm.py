@@ -24,11 +24,12 @@ PATCH_FLAG = "_congling_rhythm_patched"
 
 
 class RhythmController:
-    def __init__(self, config: Any, guard: Any, probe: Any) -> None:
+    def __init__(self, config: Any, guard: Any, probe: Any, *, spawn_background=None) -> None:
         self.config = config
         self.guard = guard
         self.probe = probe
         self._patched_events: set[int] = set()
+        self._spawn_background = spawn_background
 
     # ------------------------------------------------------------ 计划
     def build_plan(
@@ -150,12 +151,12 @@ class RhythmController:
             # 之前这里直接引用了 wrapped_send 的形参名，在外面根本不存在，必挂。
             fallback = self._make_chain([Plain(text=joined)]) if joined else None
             if fallback is not None:
+                coro = self._watchdog(state, original_send, fallback)
                 try:
-                    asyncio.get_running_loop().create_task(
-                        self._watchdog(state, original_send, fallback)
-                    )
+                    spawn = self._spawn_background or asyncio.get_running_loop().create_task
+                    spawn(coro)
                 except RuntimeError:
-                    pass
+                    coro.close()
             return True
         except Exception as exc:
             logger.warning(f"[congling] 接管发送失败: {exc!r}")

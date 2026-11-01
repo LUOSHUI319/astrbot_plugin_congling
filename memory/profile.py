@@ -14,6 +14,8 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core.memory_guard import memory_work
+from ..core.exc import exc_brief
 
 PROMPT = """你在整理对一个人（{name}）的认识。下面是从长期记忆里挑出来的条目，按重要程度排过序。
 
@@ -94,6 +96,7 @@ class ProfileBook:
         return True, ""
 
     # ------------------------------------------------------------ 生成
+    @memory_work
     async def build(self, subject_key: str, *, force: bool = False) -> dict[str, Any]:
         key = str(subject_key or "").strip()
         stage = await self.affinity.stage(key)
@@ -121,7 +124,7 @@ class ProfileBook:
             resp = await provider.text_chat(prompt=prompt, contexts=[])
             raw = str(getattr(resp, "completion_text", "") or "")
         except Exception as exc:
-            logger.debug(f"[congling] 画像生成失败: {exc!r}")
+            logger.warning(f"[congling] 画像生成失败: {exc_brief(exc)}")
             return {"ok": False, "reason": "模型调用失败"}
 
         data = self._parse(raw)

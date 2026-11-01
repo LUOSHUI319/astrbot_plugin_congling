@@ -28,6 +28,8 @@ CREATE TABLE mem_atom(
   persona_id TEXT DEFAULT 'ling',
   scope TEXT DEFAULT 'user',
   subject_id TEXT DEFAULT '',
+  subject_ref TEXT DEFAULT '',
+  event_type TEXT DEFAULT '',
   kind TEXT DEFAULT 'fact',
   text TEXT DEFAULT '',
   importance REAL DEFAULT 0.5,

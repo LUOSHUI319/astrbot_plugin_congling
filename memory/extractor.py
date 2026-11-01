@@ -16,6 +16,9 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core.contracts import MemoryDraft
+from .perspective import narrator_name
+from .refs import actor_ref
+from ..core.exc import exc_brief
 
 PROMPT = """你在帮一个聊天机器人整理长期记忆。下面是一段真实聊天记录。
 
@@ -35,6 +38,15 @@ PROMPT = """你在帮一个聊天机器人整理长期记忆。下面是一段�
 8. level 是这条该记多久：1 随口一句（今天好热、在吗）/ 2 细节小事 / 3 平常事实（工作、爱好、常去的地方）/ 4 在意的事（偏好、雷点、约定、重要日期）/ 5 关键（身份、承诺、创伤、关系里程碑）
 9. level_tags 从这几个里挑，可以多选：identity 身份信息、promise 约定承诺、user_stress 用户强调、taboo 禁区底线、emotion_high 情绪浓度高、routine 日常寒暄、transient 一次性时效、preference 明确喜好、milestone 关系里程碑
 10. level_reason 用一句话写依据，例如「用户说别忘了这件事」「只是随口一问天气」；不要写空话
+11. 只从 user 的明确陈述提取事实；assistant 只用于理解指代，不能作为事实证据。问句、假设、转述的不确定内容不当成事实。
+12. 机器人本人名为 {bot_name}。只有机器人本人可在 text 中称「我」，subject 固定为 __self__。
+    人类发言中的「我」指该发言者，不是机器人；记人类事实时 text 用其明确姓名（无姓名用 ID），subject 用该人的 ID。
+13. 不用「用户/聊天对象/对方」代替已知姓名；第三人身份无法确认时宁可不抽，不根据人名创建用户。
+14. evidence 必须是支持该事实的 user 消息序号，至少一个，不能编造。不要把提问「你困吗」记成「我困了」。
+15. 主体必须唯一命中证据中的发言者 ID 或已确认别名；同名无法区分时不抽。
+16. 句首人称必须纠正：人类说「我今天很累」应写成「当前昵称今天很累」；
+    只有明确关于 {bot_name} 的用户陈述才可写成「我…」，不得把用户自述移到 __self__。
+17. 证据必须支持 text 的具体内容、肯否与主体，不是仅仅出现相关词。尽量保留陈述原话。
 
 聊天记录：
 {conversation}
@@ -56,7 +68,8 @@ class MemoryExtractor:
         self.last_ok = False
         if not turns:
             return []
-        conversation, consumed = self._render(turns)
+        bot_name = await narrator_name(self.plugin)
+        conversation, consumed = self._render(turns, bot_name=bot_name, persona_id=self.config.persona_id)
         self.consumed_turns = consumed
         if not conversation.strip():
             return []
@@ -75,6 +88,7 @@ class MemoryExtractor:
         # 直接抛 KeyError('"kind"')，历史上记忆一条都没写进去就是这个原因。
         prompt = (
             PROMPT.replace("{today}", time.strftime("%Y-%m-%d", time.localtime()))
+            .replace("{bot_name}", bot_name)
             .replace("{max_atoms}", str(max_atoms))
             .replace("{conversation}", conversation)
         )
@@ -82,7 +96,7 @@ class MemoryExtractor:
             resp = await provider.text_chat(prompt=prompt, contexts=[])
             raw = str(getattr(resp, "completion_text", "") or "")
         except Exception as exc:
-            logger.debug(f"[congling] 记忆抽取调用失败: {exc!r}")
+            logger.warning(f"[congling] 记忆抽取调用失败: {exc_brief(exc)}")
             return []
 
         payload = self._parse(raw)
@@ -153,7 +167,8 @@ class MemoryExtractor:
             return None
 
     @staticmethod
-    def _render(turns: list[dict[str, Any]], limit: int = MAX_INPUT_CHARS) -> tuple[str, list[int]]:
+    def _render(turns: list[dict[str, Any]], limit: int = MAX_INPUT_CHARS, *,
+                bot_name: str = "", persona_id: str = "") -> tuple[str, list[int]]:
         """拼成对话文本，同时返回**真的被送进模型**的那些 turn 下标。
 
         以前是先拼全文再在 prompt 里切 [:6000]，切掉的尾巴没人知道，
@@ -172,7 +187,11 @@ class MemoryExtractor:
                 stamp = time.strftime("%m-%d %H:%M", time.localtime(int(turn["ts"])))
             # 群里要能看出是谁说的，否则事实会记到别人头上
             name = str(turn.get("sender_name") or "").strip()
-            who = name if (is_user and name) else ("用户" if is_user else "机器人")
+            sid = str(turn.get("sender_id") or "").strip()
+            actor = str(turn.get("actor_ref") or actor_ref(turn.get("platform"), sid,
+                        persona_id=persona_id if not is_user else None))
+            who = (f"user {name or sid or '身份未知'} (ID={sid}, actor_ref={actor or 'unresolved'})" if is_user
+                   else f"assistant {bot_name or actor or '身份未知'} (ID={persona_id}, actor_ref={actor or 'unresolved'}；仅上下文)")
             line = f"[{turn.get('idx', 0)}] {stamp} {who}: {text}"
             if lines and total + len(line) + 1 > limit:
                 break
@@ -197,6 +216,6 @@ class MemoryExtractor:
         try:
             data = json.loads(raw[start : end + 1])
         except ValueError:
-            logger.debug("[congling] 记忆抽取返回不是合法 JSON")
+            logger.warning("[congling] 记忆抽取返回不是合法 JSON")
             return None
         return data if isinstance(data, list) else []

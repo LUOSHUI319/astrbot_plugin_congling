@@ -26,13 +26,16 @@ from ..core.contracts import (
     PerceivedMessage,
     WakeAttempt,
 )
+from ..core.transient_hints import TransientHints
 from . import energy as energy_mod
 from . import stages as stages_mod
 from .lullaby import Lullaby
 from .wake import Waker
+from ..core.exc import exc_brief
 
 KV_KEY = "night.state"
 # 最近三次睡眠区间，给「睡着期间的记忆打未读」判定用（抽取是延后的，实时状态靠不住）
+WOKE_FROM_KEY = "night.woke_from"
 SLEEP_WINDOW_KEY = "night.last_sleep_window"
 
 # 疲劳期内的下限保护：至少还能撑这么多条消息才允许睡着
@@ -53,7 +56,11 @@ class NightService:
         self._fatigue_entered = 0    # 进入本轮疲劳期的时间戳
         self._last_sleep_kind = ""   # night / noon，决定道别语用哪套
         self._woke_from: dict | None = None  # 醒来那一刻所在的睡眠阶段
+        self.wake_hints = TransientHints()
+        self._wake_sleep_at = 0
         self._loaded = False
+        self.on_sleep = None
+        self.on_wake = None
 
     # ================================================================ 开关
     @property
@@ -62,10 +69,10 @@ class NightService:
 
     # ================================================================ 生命周期
     async def start(self) -> None:
+        await self.load()
         if not self.enabled:
             logger.info("[congling] 长夜如梦未启用")
             return
-        await self.load()
         logger.info(
             f"[congling] 长夜如梦就绪：状态={self.state.mode} "
             f"精力={self.state.energy:.0f} "
@@ -78,24 +85,38 @@ class NightService:
         try:
             raw = await self.store.kv_get(KV_KEY, None)
         except Exception as exc:
-            logger.debug(f"[congling] 读取作息状态失败: {exc!r}")
-        if isinstance(raw, dict):
-            self.state = NightState.from_dict(raw)
-        elif isinstance(raw, str):
+            logger.warning(f"[congling] 读取作息状态失败: {exc!r}")
+            raise
+        if isinstance(raw, str):
             import json
 
-            try:
-                self.state = NightState.from_dict(json.loads(raw))
-            except Exception:
-                self.state = NightState()
+            raw = json.loads(raw)
+        if isinstance(raw, dict):
+            self.state = NightState.from_dict(raw)
+            self._fatigue_turns = max(0, int(raw.get("fatigue_turns", 0)))
+            self._fatigue_entered = max(0, int(raw.get("fatigue_entered", 0)))
+        # 「从哪个阶段醒的」以前只在内存里，重启就没了，醒来那句语气也跟着丢。
+        # 写进 kv，重启后在提示 TTL 内还能接着用。
+        try:
+            woke = await self.store.kv_get(WOKE_FROM_KEY, None)
+            if isinstance(woke, str):
+                import json as _json
+
+                woke = _json.loads(woke)
+            if isinstance(woke, dict) and woke.get("key"):
+                self._woke_from = woke
+        except Exception:
+            pass
         self._loaded = True
         await self.tick()
 
     async def save(self) -> None:
         try:
-            await self.store.kv_set(KV_KEY, self.state.to_dict())
+            payload = self.state.to_dict()
+            payload.update(fatigue_turns=self._fatigue_turns, fatigue_entered=self._fatigue_entered)
+            await self.store.kv_set(KV_KEY, payload)
         except Exception as exc:
-            logger.debug(f"[congling] 保存作息状态失败: {exc!r}")
+            logger.warning(f"[congling] 保存作息状态失败: {exc!r}")
 
     # ================================================================ 时间推进
     def _recover_over(self, start: float, end: float) -> float:
@@ -157,12 +178,18 @@ class NightService:
 
     async def tick(self, now: float | None = None) -> list[str]:
         """按时间差补算状态。返回发生的事件名，方便日志和面板。"""
+        async with self._lock:
+            return await self._tick(now)
+
+    async def _tick(self, now: float | None = None) -> list[str]:
         now = now or time.time()
         if not self.enabled:
             # 只有「收线静默」在跑：不管精力，只管到点自然醒
+            self.state.last_tick = int(now)
             if self.state.is_asleep() and self.state.wake_at and now >= self.state.wake_at:
                 await self._do_wake(reason="natural")
                 return ["wake_natural"]
+            await self.save()
             return []
         events: list[str] = []
 
@@ -213,7 +240,7 @@ class NightService:
             segments = self._awake_segments(start_ts, float(now))
             if not segments:
                 segments = [(start_ts, float(now), energy_mod.fatigue_kind(self.config, now))]
-            last_kind = ""
+            last_kind = energy_mod.fatigue_kind(self.config, now)
             for seg_start, seg_end, kind in segments:
                 minutes = (seg_end - seg_start) / 60.0
                 if minutes <= 0:
@@ -232,6 +259,8 @@ class NightService:
                         per_message=0.0,
                     )
                 else:
+                    self._fatigue_entered = 0
+                    self._fatigue_turns = 0
                     self.state.energy = energy_mod.recover(
                         self.state.energy,
                         minutes=minutes,
@@ -249,8 +278,7 @@ class NightService:
                 await self._do_sleep(reason="latest", kind="night")
                 events.append("sleep_latest")
 
-        if events:
-            await self.save()
+        await self.save()
         return events
 
     def _can_sleep_by_energy(self) -> bool:
@@ -291,6 +319,9 @@ class NightService:
         if not self.state.is_asleep():
             # 醒着：只扣精力、累计疲劳期轮次
             if energy_mod.in_fatigue(self.config):
+                if not self._fatigue_entered:
+                    self._fatigue_entered = int(time.time())
+                    self._fatigue_turns = 0
                 self._fatigue_turns += 1
                 self.state.energy = energy_mod.drain(
                     self.state.energy,
@@ -354,6 +385,8 @@ class NightService:
             logger.info(f"[congling] 长夜如梦：allow_sleep 关闭，跳过入睡（本来原因={reason}）")
             return
         now = time.time()
+        self.wake_hints.clear()
+        self._woke_from = None
         self.state.mode = NIGHT_ASLEEP
         self.state.sleep_at = int(now)
         self.state.wake_at = energy_mod.next_wake_time(self.config, now, kind=kind)
@@ -371,6 +404,8 @@ class NightService:
         self._last_sleep_kind = kind or "night"
         self.waker.reset_all()
         await self.save()
+        if self.on_sleep is not None:
+            await self.on_sleep()
         logger.info(
             f"[congling] 入睡：原因={reason} "
             f"预计醒来={time.strftime('%H:%M', time.localtime(self.state.wake_at))}"
@@ -389,13 +424,26 @@ class NightService:
         if not sleep_kind or sleep_kind not in ("night", "noon"):
             sleep_kind = "night"
 
+        now = time.time()
+        # Natural wake may be processed hours late by a lazy tick.
+        woke_at = min(now, float(wake_at)) if reason == "natural" and wake_at > 0 else now
+        if sleep_at > 0 and self.on_wake is not None:
+            await self.on_wake(sleep_at, int(woke_at))
+        if sleep_at > 0:
+            self.wake_hints.begin(woke_at)
+            self._wake_sleep_at = sleep_at
+
         # 记下是从哪个阶段醒的：深睡被拽起来和 REM 醒过来，说话状态不一样
         try:
             self._woke_from = stages_mod.at(
-                self.config, sleep_at=sleep_at, wake_at=wake_at, kind=sleep_kind, now=time.time()
+                self.config, sleep_at=sleep_at, wake_at=wake_at, kind=sleep_kind, now=woke_at
             )
         except Exception:
             self._woke_from = None
+        try:
+            await self.store.kv_set(WOKE_FROM_KEY, self._woke_from or {})
+        except Exception:
+            pass
 
         pending: list[str] = []
         if sleep_at > 0:
@@ -437,7 +485,7 @@ class NightService:
                 (since,),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 查待爬会话失败: {exc!r}")
+            logger.warning(f"[congling] 查待爬会话失败: {exc_brief(exc)}")
             return []
         # store.fetch_all 给的是 dict 行，这里以前按元组取 row[0]，
         # 一进 _do_wake 就 KeyError，于是状态永远卡在「睡着」——
@@ -472,7 +520,7 @@ class NightService:
         try:
             await self.store.kv_set(SLEEP_WINDOW_KEY, items)
         except Exception as exc:
-            logger.debug(f"[congling] 记录睡眠区间失败: {exc!r}")
+            logger.warning(f"[congling] 记录睡眠区间失败: {exc_brief(exc)}")
 
     async def sleep_now(
         self,
@@ -559,6 +607,10 @@ class NightService:
             "latest_sleep_time": self.config.str("night.latest_sleep_time", "02:30"),
             "farewell_on": self.config.bool("night.farewell_before_sleep", True),
             "dream_on": self.config.bool("night.dream_enabled", False),
+            "dream_start_after_minutes": max(1, self.config.int("night.dream_start_after_minutes", 60)),
+            "dream_interval_minutes": max(5, self.config.int("night.dream_interval_minutes", 60)),
+            "dream_in_rem_only": self.config.bool("night.dream_in_rem_only", True),
+            "last_tick": state.last_tick,
             "crawl_on": self.config.bool("night.crawl_enabled", True),
             "allow_sleep": self.config.bool("night.allow_sleep", True),
             "noon_nap_minutes": max(10, min(180, self.config.int("night.noon_nap_minutes", 60))),

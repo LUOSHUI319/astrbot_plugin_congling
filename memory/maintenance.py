@@ -18,6 +18,7 @@ from astrbot.api import logger
 
 from ..core import paths
 from .forgetting import ForgettingCurve
+from ..core.exc import exc_brief
 
 REFLECT_PROMPT = """你在整理对一个用户的认识。下面是关于 TA 的记忆条目（已经过时间衰减筛选）。
 
@@ -44,6 +45,34 @@ class Maintenance:
         await self.decay()
         await self.reflect()
         await self.backup()
+        await self.purge_image_cache()
+
+    async def purge_image_cache(self, keep_days: int = 7) -> int:
+        """清掉过期的图片理解缓存。
+
+        这些结果存在 kv 表里（key 是 img:<sha1(url)>），每条都不大，但会一直攒：
+        十一天就攒到三千多条，把 kv 撑成三千多行。留着最近几天的足够命中重复图片，
+        更早的再留着也没人问。
+        """
+        try:
+            keep = max(1, int(keep_days))
+        except (TypeError, ValueError):
+            keep = 7
+        cutoff = int(time.time()) - keep * 86400
+        try:
+            n = await self.store.scalar(
+                "SELECT COUNT(*) FROM kv WHERE k LIKE 'img:%' AND updated_at<?", (cutoff,), 0
+            )
+            if not n:
+                return 0
+            await self.store.execute(
+                "DELETE FROM kv WHERE k LIKE 'img:%' AND updated_at<?", (cutoff,)
+            )
+            logger.info(f"[congling] 清理图片缓存 {int(n)} 条（早于 {keep} 天）")
+            return int(n)
+        except Exception as exc:
+            logger.warning(f"[congling] 清理图片缓存失败: {exc_brief(exc)}")
+            return 0
 
     async def decay(self) -> int:
         """按等级衰减。返回本次实际改动的条数（给日志和 UI 用）。
@@ -152,7 +181,7 @@ class Maintenance:
                 )
                 summary = str(getattr(resp, "completion_text", "") or "").strip()
             except Exception as exc:
-                logger.debug(f"[congling] 反思失败: {exc!r}")
+                logger.warning(f"[congling] 反思失败: {exc_brief(exc)}")
                 continue
             if not summary:
                 continue
@@ -164,11 +193,23 @@ class Maintenance:
 
     # ================================================================ 备份
     async def backup(self) -> None:
+        # 业务日幂等：跟 decay 一样的做法。以前这里没有任何去重，
+        # 而 run_daily() 在启动时会被多个钩子各调一次，于是每次重启
+        # 就连续写出两三份 39MB 的备份——目录里 7 份就是 271MB。
+        now = int(time.time())
+        day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+        mark_key = f"maintenance:backup:{self.config.persona_id}:{day_key}"
+        try:
+            if await self.store.kv_get(mark_key, "") == "done":
+                logger.debug(f"[congling] 今天已经备份过记忆（{day_key}），跳过")
+                return
+        except Exception:
+            pass
         try:
             rows = await self.store.fetch_all("SELECT * FROM mem_atom")
             episodes = await self.store.fetch_all("SELECT * FROM mem_episode ORDER BY id DESC LIMIT 500")
         except Exception as exc:
-            logger.debug(f"[congling] 备份读取失败: {exc!r}")
+            logger.warning(f"[congling] 备份读取失败: {exc_brief(exc)}")
             return
         payload = {
             "version": 1,
@@ -182,8 +223,12 @@ class Maintenance:
         try:
             target.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
         except Exception as exc:
-            logger.debug(f"[congling] 备份写入失败: {exc!r}")
+            logger.warning(f"[congling] 备份写入失败: {exc_brief(exc)}")
             return
+        try:
+            await self.store.kv_set(mark_key, "done")
+        except Exception:
+            pass
         # 只保留最近 7 份
         files = sorted(paths.backup_dir().glob("memory-*.json"))
         for old in files[:-7]:

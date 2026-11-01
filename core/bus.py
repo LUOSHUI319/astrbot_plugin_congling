@@ -28,9 +28,10 @@ class EventBus:
     ON_REFLECT = "on_reflect"
     ON_ERROR = "on_error"
 
-    def __init__(self) -> None:
+    def __init__(self, *, spawn_background: Callable | None = None) -> None:
         self._handlers: dict[str, list[Handler]] = defaultdict(list)
         self._lock = asyncio.Lock()
+        self._spawn_background = spawn_background
 
     def subscribe(self, event: str, handler: Handler) -> Handler:
         self._handlers[event].append(handler)
@@ -76,10 +77,13 @@ class EventBus:
 
     def emit_soon(self, event: str, payload: Any = None) -> None:
         """不阻塞当前链路地派发（用于记忆回写这类后台工作）。"""
+        coro = self.emit(event, payload)
         try:
-            asyncio.get_running_loop().create_task(self.emit(event, payload))
+            spawn = self._spawn_background or asyncio.get_running_loop().create_task
+            spawn(coro)
         except RuntimeError:
-            logger.debug(f"[congling] 无事件循环，跳过事件 {event}")
+            coro.close()
+            logger.debug(f"[congling] 正在停止或无事件循环，跳过事件 {event}")
 
 
 async def _maybe_await(value: Any) -> Any:

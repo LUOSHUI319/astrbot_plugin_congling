@@ -42,41 +42,39 @@
     }
   },
   "persona": {
-    "description": "人格档案",
-    "hint": "「绫」的人格内核。UI 里改更直观，这里只是默认值。",
+    "description": "当前人格",
+    "hint": "只有一个人格，跟随 AstrBot 当前使用的人格；旧标识和设定保留以兼容已有数据。",
     "type": "object",
     "items": {
       "mode": {
         "description": "人设来源",
-        "hint": "astrbot＝用 AstrBot 里正在使用的那个（推荐，默认）；builtin＝用插件内置的「绫」；none＝完全交给 AstrBot 默认，本插件不注入任何人设",
+        "hint": "固定跟随 AstrBot 当前人格，不提供切换或内置人设。",
         "type": "string",
         "options": [
-          "builtin",
-          "astrbot",
-          "none"
+          "astrbot"
         ],
         "default": "astrbot"
       },
       "astrbot_persona_id": {
-        "description": "选择 AstrBot 人格",
-        "hint": "仅当人设来源为 astrbot 时生效。留空表示使用 AstrBot 的默认人格",
+        "description": "历史选择（兼容保留）",
+        "hint": "已停用，不影响当前人格。",
         "type": "string",
         "default": ""
       },
       "persona_id": {
-        "description": "人格 ID",
-        "hint": "所有模块用这个字段区分不同人格，默认 ling",
+        "description": "内部兼容标识（勿改）",
+        "hint": "保留历史引用，不再作为切换或分区入口。",
         "type": "string",
         "default": "ling"
       },
       "name": {
         "description": "名字",
         "type": "string",
-        "default": "绫"
+        "default": "AstrBot 当前人格"
       },
       "identity": {
         "description": "身份设定",
-        "hint": "用自然语言写清她是谁、怎么说话、在意什么。留空则使用内置默认人设。",
+        "hint": "历史设定保留；实际人设由 AstrBot 提供，本插件没有内置默认人设。",
         "type": "text",
         "default": ""
       },
@@ -1008,6 +1006,38 @@
         "type": "int",
         "default": 60
       },
+      "dream_mode": {
+        "description": "梦境生成模式",
+        "hint": "hybrid 入睡预生成前 3 段，其余 REM 在线实时生成；precomputed 预生成全部；live 仅在线生成。补发窗口固定为醒后 24 小时",
+        "type": "string",
+        "options": ["hybrid", "precomputed", "live"],
+        "default": "hybrid"
+      },
+      "dream_mention_min_level": {
+        "description": "主动提梦最低等级",
+        "hint": "默认 4，可设 5；1~3 级始终不主动提。4 级概率 0.6，5 级概率 0.9",
+        "type": "int",
+        "default": 4
+      },
+      "dream_hint_scope": {
+        "description": "醒后梦提示次数作用域",
+        "hint": "session 各会话独立计数；global 所有会话共享次数。TTL 均从实际醒来计算",
+        "type": "string",
+        "options": ["session", "global"],
+        "default": "session"
+      },
+      "dream_recall_guard": {
+        "description": "梦境工具防误调用兜底",
+        "hint": "默认关闭，由模型按工具描述判断意图。开启后对原始消息检查黑名单、组合短语及第二人称主语；不会主动触发检索",
+        "type": "bool",
+        "default": false
+      },
+      "dream_recall_k": {
+        "description": "梦境工具最多返回段数",
+        "hint": "仅查已发放的梦，范围 1~20",
+        "type": "int",
+        "default": 5
+      },
       "dream_interval_minutes": {
         "description": "每隔多久做一段（分钟）",
         "type": "int",
@@ -1053,7 +1083,7 @@
       },
       "dream_remember_by_level": {
         "description": "醒后提梦按等级给概率",
-        "hint": "1 级 20%，逐级 +20%，5 级必说",
+        "hint": "兼容旧配置；P4 始终按分档：1~3 级不主动提，4 级 60%，5 级 90%",
         "type": "bool",
         "default": true
       },
@@ -1112,6 +1142,30 @@
         "hint": "关掉就退回「按固定间隔做梦」",
         "type": "bool",
         "default": true
+      },
+      "woke_hint_max_uses": {
+        "description": "同一场醒来每个会话最多带几次醒来语气",
+        "hint": "默认 1，按注入机会计数；0 关闭。只影响醒来语气，不催促提梦",
+        "type": "int",
+        "default": 1
+      },
+      "woke_hint_ttl_minutes": {
+        "description": "醒来语气有效多久（分钟）",
+        "hint": "默认 120，从醒来起算，过期不再注入；0 关闭。与梦提示分别判定",
+        "type": "int",
+        "default": 120
+      },
+      "dream_hint_max_uses": {
+        "description": "同一场醒来每个会话最多注入几次梦提示",
+        "hint": "默认 2。计的是注入机会，不是实际说梦次数；0 关闭。群聊和私聊独立计数",
+        "type": "int",
+        "default": 2
+      },
+      "dream_hint_ttl_minutes": {
+        "description": "醒后梦提示有效多久（分钟）",
+        "hint": "默认 120，从实际醒来时间起算，与醒来语气独立；0 关闭。重启不恢复提示",
+        "type": "int",
+        "default": 120
       }
     }
   },

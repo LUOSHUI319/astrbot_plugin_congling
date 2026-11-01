@@ -26,13 +26,14 @@ from .core.config import Config
 from .core.contracts import Persona
 from .core.guard import OutputGuard
 from .core.log import DecisionLogger
-from .core.prompt_parts import add_temp_part
+from .core.prompt_parts import add_temp_part, has_temp_part
 from .core.probe import Probe
 from .core.rhythm import RhythmController
 from .core.store import Store
 from .humanize.delay import ReplyDelayer
+from .core.exc import exc_brief
 
-PLUGIN_VERSION = "1.0.1"
+PLUGIN_VERSION = "1.1.0"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -58,11 +59,14 @@ class ConglingPlugin(Star):
         super().__init__(context)
         self.raw_config = config
         self.cfg = Config(config)
-        self.bus = EventBus()
-        self.store = Store(paths.db_path())
+        self._background_tasks: set[asyncio.Task] = set()
+        self._stopping = False
+        self.bus = EventBus(spawn_background=self.spawn_background)
+        self.store = Store(paths.db_path(), persona_id=self.cfg.persona_id)
         self.probe = Probe(context, self.cfg)
         self.guard = OutputGuard(self.cfg, self.probe)
-        self.rhythm = RhythmController(self.cfg, self.guard, self.probe)
+        self.rhythm = RhythmController(self.cfg, self.guard, self.probe,
+                                       spawn_background=self.spawn_background)
         self.delayer = ReplyDelayer(self.cfg, self.probe)
         self.budget = Budget(self.cfg)
         self.decision = DecisionLogger(self.store, self.cfg)
@@ -96,6 +100,20 @@ class ConglingPlugin(Star):
         self._boot_errors: list[str] = []
         self.config_upgrade: dict[str, Any] = {}
 
+    def spawn_background(self, coro) -> asyncio.Task:
+        if self._stopping:
+            coro.close()
+            raise RuntimeError("插件正在卸载")
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_done)
+        return task
+
+    def _background_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(f"[congling] 后台任务退出: {task.exception()!r}")
+
     # ================================================================ 生命周期
     async def initialize(self) -> None:
         await self.store.open()
@@ -105,7 +123,7 @@ class ConglingPlugin(Star):
             self.config_upgrade = await config_migrate.run(self)
         except Exception as exc:
             self.config_upgrade = {"applied": False, "reason": repr(exc)}
-            logger.debug(f"[congling] 配置升级失败: {exc!r}")
+            logger.warning(f"[congling] 配置升级失败: {exc_brief(exc)}")
         await self._safe_boot("models", self._boot_models)
 
         await self._safe_boot("perception", self._boot_perception)
@@ -130,23 +148,34 @@ class ConglingPlugin(Star):
             logger.warning(f"[congling] 部分模块降级: {', '.join(self._boot_errors)}")
 
         try:
-            asyncio.get_running_loop().create_task(self._housekeeping())
-            asyncio.get_running_loop().create_task(self._beat_loop())
+            self.spawn_background(self._housekeeping())
+            self.spawn_background(self._beat_loop())
             if self.night is not None:
-                asyncio.get_running_loop().create_task(self._dream_loop())
+                self.spawn_background(self._dream_loop())
         except RuntimeError:
             pass
 
     async def terminate(self) -> None:
+        self._stopping = True
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
         try:
             if self.memory is not None and hasattr(self.memory, "flush"):
                 await self.memory.flush()
         except Exception as exc:
-            logger.debug(f"[congling] 记忆落盘失败: {exc!r}")
+            logger.warning(f"[congling] 记忆落盘失败: {exc!r}")
+        try:
+            if self.night is not None:
+                await self.night.shutdown()
+        except Exception as exc:
+            logger.warning(f"[congling] 长夜落盘失败: {exc!r}")
         try:
             await self.store.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[congling] 关闭数据库失败: {exc_brief(exc)}")
         logger.info("[congling] 已卸载")
 
     async def _safe_boot(self, name: str, boot) -> None:
@@ -198,8 +227,10 @@ class ConglingPlugin(Star):
             return
         from .night import NightModule
 
-        self.night = NightModule(self)
-        await self.night.start()
+        night = NightModule(self)
+        await night.start()
+        self.night = night
+        await night.reconcile_dream_plans()
 
     async def _boot_capability(self) -> None:
         if not self.cfg.bool("capability.enabled", True):
@@ -242,7 +273,7 @@ class ConglingPlugin(Star):
 
         self.diary = Diary(self)
         try:
-            asyncio.get_running_loop().create_task(self.diary.backfill())
+            self.spawn_background(self.diary.backfill())
         except RuntimeError:
             pass
 
@@ -268,7 +299,7 @@ class ConglingPlugin(Star):
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                logger.debug(f"[congling] 维护任务出错: {exc!r}")
+                logger.warning(f"[congling] 维护任务出错: {exc!r}")
             await asyncio.sleep(3600)
 
     async def _beat_loop(self) -> None:
@@ -287,16 +318,16 @@ class ConglingPlugin(Star):
         interval = max(15, min(300, self.cfg.int("night.beat_interval_seconds", 60)))
         await asyncio.sleep(20)  # 避开启动时的插件竞争
         while True:
-            try:
-                if self.night is not None:
-                    await self.night.state.tick()
-                if self.proactive is not None:
-                    # tick 内部自带 60 秒节流和启动 3 分钟静默，这里不用再挡
-                    await self.proactive.tick()
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.debug(f"[congling] 心跳出错: {exc!r}")
+            for name, module in (("作息", getattr(self.night, "state", None)),
+                                 ("主动", self.proactive)):
+                if module is None:
+                    continue
+                try:
+                    await module.tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(f"[congling] {name}心跳出错: {exc!r}")
             await asyncio.sleep(interval)
 
     async def _dream_loop(self) -> None:
@@ -305,19 +336,20 @@ class ConglingPlugin(Star):
         while True:
             try:
                 if self.night is not None:
+                    await self.night.deliver_dream_plans()
                     await self.night.dream_tick()
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                logger.debug(f"[congling] 做梦任务出错: {exc!r}")
+                logger.warning(f"[congling] 做梦任务出错: {exc!r}")
             await asyncio.sleep(300)
 
     async def _purge_cache(self) -> None:
         cutoff = int(time.time()) - 7 * 86400
         try:
             await self.store.execute("DELETE FROM forward_cache WHERE expires_at < ?", (cutoff,))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[congling] 清理转发缓存失败: {exc_brief(exc)}")
 
     async def _qq_daily_tick(self) -> None:
         """每小时看一次：今天的说说到点了没有，该换脸了没有。
@@ -333,7 +365,7 @@ class ConglingPlugin(Star):
             if daily is not None:
                 await daily.tick()
         except Exception as exc:
-            logger.debug(f"[congling] 每日说说任务出错: {exc!r}")
+            logger.warning(f"[congling] 每日说说任务出错: {exc_brief(exc)}")
         try:
             pool = getattr(ext, "avatar_pool", None)
             avatar = getattr(ext, "avatar", None)
@@ -341,7 +373,7 @@ class ConglingPlugin(Star):
                 if self.cfg.bool("qq_extra.avatar_auto_change", True):
                     await pool.auto_change(avatar)
         except Exception as exc:
-            logger.debug(f"[congling] 自动换头像失败: {exc!r}")
+            logger.warning(f"[congling] 自动换头像失败: {exc_brief(exc)}")
 
     # ================================================================ 工具方法
     @property
@@ -379,6 +411,32 @@ class ConglingPlugin(Star):
         if not is_group and not self.cfg.bool("basic.enable_private", True):
             return False
         return True
+
+    def session_key(self, event: AstrMessageEvent) -> str:
+        """当前会话的标识：优先 unified_msg_origin。
+
+        醒来语气是按会话算次的，umo 本身就带群号，也天然区分临时会话，
+        不会出现「群里 / 临时会话撞同一个 key」。取不到再退群号（加 group:
+        前缀防止和发送者 ID 撞），最后退发送者。
+        """
+        umo = getattr(event, "unified_msg_origin", "")
+        if callable(umo):
+            try:
+                umo = umo()
+            except Exception:
+                umo = ""
+        if isinstance(umo, str) and umo:
+            return umo
+        try:
+            group_id = str(event.get_group_id() or "")
+        except Exception:
+            group_id = ""
+        if group_id:
+            return "group:" + group_id
+        try:
+            return str(event.get_sender_id() or "")
+        except Exception:
+            return ""
 
     # ================================================================ 管理员
     def astrbot_admins(self) -> list[str]:
@@ -568,15 +626,20 @@ class ConglingPlugin(Star):
         try:
             if self.persona is not None:
                 await self.persona.inject(event, req)
-            if self.night is not None:
-                hint = self.night.prompt_hint()
+            owner_private = False
+            try:
+                owner_private = bool(not event.get_group_id() and self.is_admin(event))
+            except Exception:
+                pass  # 缺少可信受众信息只关闭正文，不跳过正常作息提示。
+            if self.night is not None and not has_temp_part(req, "<!--congling:night-->"):
+                hint = self.night.prompt_hint(session_key=self.session_key(event), include_private=owner_private)
                 if hint:
                     add_temp_part(req, hint, "<!--congling:night-->")
             if self.qqext is not None:
                 avatar_hint = self.qqext.avatar_hint()
                 if avatar_hint:
                     add_temp_part(req, avatar_hint, "<!--congling:avatar-->")
-            if self.diary is not None and self.cfg.bool("diary.feel_in_prompt", False):
+            if owner_private and self.diary is not None and self.cfg.bool("diary.feel_in_prompt", False):
                 snippet = await self.diary.latest_snippet(200)
                 if snippet:
                     add_temp_part(
@@ -713,6 +776,13 @@ class ConglingPlugin(Star):
 
     # ================================================================ 状态
     def health(self) -> dict[str, Any]:
+        night = self.night.snapshot() if self.night is not None else {
+            "state": {"last_tick": None}, "dream": {"pending": None},
+        }
+        memory = self.memory.snapshot() if self.memory is not None else {
+            "recall": {"last_hits": None, "at": 0, "error": "module_unavailable"},
+            "subject": {"unresolved": None, "at": 0, "error": "module_unavailable"},
+        }
         return {
             "plugin": PLUGIN_NAME,
             "version": PLUGIN_VERSION,
@@ -731,4 +801,8 @@ class ConglingPlugin(Star):
             "compat": self.probe.matrix(),
             "boot_errors": list(self._boot_errors),
             "config_upgrade": dict(self.config_upgrade or {}),
+            "night": night,
+            "dream": night["dream"],
+            "recall": memory["recall"],
+            "subject": memory["subject"],
         }

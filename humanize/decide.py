@@ -19,7 +19,7 @@ from typing import Any
 from ..core.contracts import PerceivedMessage, ReplyDecision
 
 QUESTION_HINTS = ("?", "？", "吗", "呢", "怎么", "为什么", "为啥", "能不能", "是不是", "有没有", "多少")
-NAME_HINTS = ("绫",)
+NAME_HINTS: tuple[str, ...] = ()
 
 
 class Decider:
@@ -136,7 +136,8 @@ class Decider:
         return ""
 
     def _contains_name(self, text: str) -> bool:
-        name = self.config.persona_name or "绫"
+        book = getattr(self.plugin, "persona", None)
+        name = book.get().name if book is not None else self.config.persona_name
         hints = set(NAME_HINTS) | {name}
         return any(hint and hint in (text or "") for hint in hints)
 

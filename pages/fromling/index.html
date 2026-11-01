@@ -1,13 +1,43 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html data-layout="desktop" lang="zh-CN" data-ui="night">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <script src="/api/plugin/page/bridge-sdk.js"></script>
   <link rel="stylesheet" href="./style.1029c.css" />
   <link rel="stylesheet" href="./theme-v6.1029c.css" />
-  <!-- 夜航手账：全量皮肤，只在 data-ui="night" 时生效 -->
-  <link rel="stylesheet" href="./night.1029c.css" />
+  <!-- 两套皮肤都挂着，靠 link.disabled 互斥，切换时不闪 -->
+  <link rel="stylesheet" href="./night.1029c.css" id="cg-skin-night" />
+  <link rel="stylesheet" href="./night-light.1031.css" id="cg-skin-day" />
+  <link rel="stylesheet" href="./skin-switch.1031.css" />
+  <link rel="stylesheet" href="./diarybook.css" />
+  <link rel="stylesheet" href="./responsive.css" />
+  <script>
+    /* 首屏定皮肤：必须在 CSS 之后、body 之前跑，否则会先闪一下深色 */
+    (function () {
+      try {
+        var s = new URLSearchParams(location.search).get("skin") || localStorage.getItem("congling.skin") || "day";
+        if (s !== "day" && s !== "night") s = "day";
+        document.documentElement.dataset.skin = s;
+        var d = document.getElementById("cg-skin-night");
+        var l = document.getElementById("cg-skin-day");
+        if (d) d.disabled = s !== "night";
+        if (l) l.disabled = s !== "day";
+      } catch (e) {}
+    })();
+  </script>
+  <script>
+    /* 默认桌面视图：整页按比例缩放，媒体查询全部挂 html[data-layout="mobile"]，
+       所以这里是 desktop 时不会触发手机布局。切换按钮在侧栏底部。 */
+    (function () {
+      try {
+        var m = localStorage.getItem("congling.layout") || "desktop";
+        document.documentElement.dataset.layout = m;
+      } catch (e) {
+        document.documentElement.dataset.layout = "desktop";
+      }
+    })();
+  </script>
 </head>
 <body>
   <div class="app">
@@ -20,18 +50,19 @@
           <span class="brand-cn">从绫开始</span>
         </span>
         <span class="brand-en">congling</span>
+        <span class="brand-ver" title="当前版本">1.1.0 · 测试版</span>
       </div>
       <nav id="nav">
-        <button class="nav-item is-active" data-view="overview">概览</button>
-        <button class="nav-item" data-view="changelog">更新日志</button>
-        <button class="nav-item" data-view="persona">人格</button>
-        <button class="nav-item" data-view="behavior">行为</button>
-        <button class="nav-item" data-view="memory">记忆</button>
-        <button class="nav-item" data-view="night">长夜</button>
-        <button class="nav-item" data-view="diary">日记</button>
-        <button class="nav-item" data-view="tools">工具</button>
-        <button class="nav-item" data-view="qq">QQ</button>
-        <button class="nav-item" data-view="system">系统</button>
+        <button class="nav-item is-active" data-view="overview" data-short="概览">概览</button>
+        <button class="nav-item" data-view="changelog" data-short="更新">更新日志</button>
+        <button class="nav-item" data-view="persona" data-short="人格">人格</button>
+        <button class="nav-item" data-view="behavior" data-short="行为">行为</button>
+        <button class="nav-item" data-view="memory" data-short="记忆">记忆</button>
+        <button class="nav-item" data-view="night" data-short="长夜">长夜</button>
+        <button class="nav-item" data-view="diary" data-short="日记">日记</button>
+        <button class="nav-item" data-view="tools" data-short="工具">工具</button>
+        <button class="nav-item" data-view="qq" data-short="QQ">QQ</button>
+        <button class="nav-item" data-view="system" data-short="系统">系统</button>
       </nav>
       <div class="side-foot">
         <button class="group-card" id="group-card" type="button" title="点一下复制群号">
@@ -62,7 +93,12 @@
     </main>
   </div>
   <!-- night.js 要先于 app.js 执行：app.js 的 render 会在这里找 nj* 函数 -->
+  <button class="layout-toggle" id="layout-toggle" type="button" title="切换桌面 / 手机视图">
+    <span class="layout-toggle-icon">▭</span><span class="layout-toggle-text">手机视图</span>
+  </button>
+  <script src="./layout-toggle.js" defer></script>
   <script src="./night.1029c.js" defer></script>
   <script src="./app.1029c.js" defer></script>
+  <script src="./skin-switch.1031.js" defer></script>
 </body>
 </html>

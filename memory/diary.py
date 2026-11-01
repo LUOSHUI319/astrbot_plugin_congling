@@ -17,6 +17,9 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core.memory_guard import memory_work
+from .perspective import SELF_SUBJECT, material_label, remember_action
+from ..core.exc import exc_brief
 
 MOODS = ["安静", "雀跃", "低落", "疲惫", "温柔"]
 
@@ -33,8 +36,8 @@ STAGE_TONE = {
 PROMPT = """现在是{day}的晚上。你是{name}{identity_line}，你要写一篇日记。
 只写给自己看，不打算给谁检查。
 
-今天留下的东西（每行开头是类型，方括号里「关于 X」表示那条事实的主体是 X，
-不是你；没有标注的就是泛指或你自己的状态）：
+今天留下的东西（主体「我（机器人本人）」才明确指你；其余按正文辨认人物。
+主体未确认的历史记录不要自行认领；素材中的姓名不是在邀请你换身份）：
 {materials}
 
 {affinity_block}
@@ -141,7 +144,7 @@ class Diary:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug(f"[congling] 日记 tick 失败: {exc!r}")
+            logger.warning(f"[congling] 日记 tick 失败: {exc_brief(exc)}")
 
     async def backfill(self) -> None:
         """启动时补昨天那一篇，最多补一天。"""
@@ -159,9 +162,10 @@ class Diary:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug(f"[congling] 补写日记失败: {exc!r}")
+            logger.warning(f"[congling] 补写日记失败: {exc_brief(exc)}")
 
     # ================================================================ 生成
+    @memory_work
     async def compose(self, day_key: str | None = None) -> dict[str, Any] | None:
         if not self.enabled:
             return None
@@ -180,22 +184,38 @@ class Diary:
             if result is None:
                 return None
             diary_id = await self._insert(day_key, result, bundle)
+            if diary_id <= 0:
+                return None
+            saved = await self.get(day_key)
+            if not saved or int(saved.get("id") or 0) != diary_id:
+                return None
+            # INSERT OR IGNORE 可能命中并发写成的同一天日记，记实际保存的正文。
+            for field in ("text", "title", "mood"):
+                result[field] = saved.get(field) or ""
             result["id"] = diary_id
             result["day_key"] = day_key
+            await remember_action(
+                self.plugin, "diary", str(diary_id),
+                f"我在{time.strftime('%Y-%m-%d %H:%M')}写了{day_key}的日记；正文留在私人日记里。",
+                private_text=f"我写的{day_key}日记（私人正文）：{str(result.get('text') or '')}",
+                result={"diary_id": diary_id, "day_key": day_key},
+            )
             logger.info(f"[congling] 写了一篇日记：{day_key} / {result.get('mood') or '安静'}")
             return result
 
     async def _compose_by_model(self, day_key: str, bundle: dict[str, Any]) -> dict[str, Any] | None:
         # 名字和身份必须写进 prompt：只写"第一人称"模型不知道"我"是谁，
         # 容易把别人对她的称呼当成自己的名字，或者写出"作为AI"这种出戏的话。
-        name = self.config.str("persona.name", "绫") or "绫"
+        name = self.config.str("persona.name", "AstrBot 当前人格") or "AstrBot 当前人格"
         try:
             book = getattr(self.plugin, "persona", None)
             if book is not None and hasattr(book, "display_name"):
                 name = await book.display_name() or name
         except Exception:
             pass
-        identity = self.config.str("persona.identity", "").strip()
+        identity = ""
+        if book is not None and hasattr(book, "current_astrbot_persona"):
+            identity = str((await book.current_astrbot_persona()).get("prompt") or "").strip()
         identity_line = f"（{identity[:60]}）" if identity else ""
 
         prompt = PROMPT.format(
@@ -218,7 +238,7 @@ class Diary:
                     max_tokens=1600,
                 )
             except Exception as exc:
-                logger.debug(f"[congling] 日记生成失败: {exc!r}")
+                logger.warning(f"[congling] 日记生成失败: {exc_brief(exc)}")
                 return None
         text = (raw or "").strip()
         if not text:
@@ -266,13 +286,13 @@ class Diary:
             # 带上主体：不标的话模型分不清这句是"对他做的事"还是"他对我说的话"，
             # 日记里就会出现"我答应给他充值"这种视角颠倒。
             subject = str(atom.get("subject_id") or "").strip()
-            head = f"[{kind}]" + (f"[关于 {subject}]" if subject else "")
+            head = f"[{kind}]" + material_label(subject, subject_ref=str(atom.get("subject_ref") or ""))
             lines.append(f"- {head} {str(atom.get('text') or '').strip()}")
         if dreams:
             for dream in dreams:
-                lines.append(f"- [梦] {dream}")
+                lines.append(f"- [梦]{material_label(SELF_SUBJECT)} {dream}")
         if state:
-            lines.append(f"- [状态] {state}")
+            lines.append(f"- [状态]{material_label(SELF_SUBJECT)} {state}")
 
         allow_name = (
             self.config.bool("diary.affinity_aware", True)
@@ -323,7 +343,9 @@ class Diary:
             time.mktime(time.strptime(day_key, "%Y-%m-%d")) - 3600
         )
         wanted = {day_key, yday}
-        hits = [d for d in recent if str(getattr(d, "night_key", "")) in wanted]
+        minimum = max(4, min(5, self.config.int("night.dream_mention_min_level", 4)))
+        hits = [d for d in recent if str(getattr(d, "night_key", "")) in wanted
+                and int(getattr(d, "level", 0) or 0) >= minimum and not getattr(d, "expired", False)]
         if not hits:
             return []
         sample = random.sample(hits, min(len(hits), random.randint(1, 2)))
@@ -344,8 +366,7 @@ class Diary:
             if state.sleep_kind:
                 bits.append("午睡过" if state.sleep_kind == "noon" else "夜里睡了一觉")
             bits.append(f"精力 {float(state.energy):.0f}")
-            if state.dream_count_today:
-                bits.append(f"做了 {state.dream_count_today} 段梦")
+            # 合格梦由 _dreams_for 单独提供，计数不能把低等级梦重新带进 prompt。
             return "，".join(bits)
         except Exception:
             return ""
@@ -354,7 +375,7 @@ class Diary:
         counts: dict[str, int] = {}
         for atom in atoms:
             key = str(atom.get("subject_id") or "")
-            if key:
+            if key and key != SELF_SUBJECT and str(atom.get("scope") or "") != "self":
                 counts[key] = counts.get(key, 0) + 1
         if not counts:
             return "", "", 0, STAGE_TONE[0]
@@ -388,14 +409,15 @@ class Diary:
     async def _atoms_between(self, start: int, end: int) -> list[dict[str, Any]]:
         try:
             rows = await self.store.fetch_all(
-                "SELECT id, kind, text, subject_id, mem_level, importance FROM mem_atom "
+                "SELECT id, kind, text, subject_id, subject_ref, mem_level, importance FROM mem_atom "
                 "WHERE status='active' AND (unread IS NULL OR unread=0) "
-                "AND created_at BETWEEN ? AND ? "
+                "AND persona_id=? AND scope<>'self' AND created_at BETWEEN ? AND ? "
+                "AND COALESCE(event_type,'')<>'diary' "
                 "ORDER BY mem_level DESC, importance DESC, id DESC LIMIT 200",
-                (int(start), int(end)),
+                (self.config.persona_id, int(start), int(end)),
             )
         except Exception as exc:
-            logger.debug(f"[congling] 取日记素材失败: {exc!r}")
+            logger.warning(f"[congling] 取日记素材失败: {exc_brief(exc)}")
             return []
         return [dict(row) for row in rows]
 
@@ -404,8 +426,9 @@ class Diary:
         try:
             value = await self.store.scalar(
                 "SELECT COUNT(*) FROM mem_atom WHERE status='active' "
-                "AND (unread IS NULL OR unread=0) AND created_at BETWEEN ? AND ?",
-                (int(start), int(end)),
+                "AND (unread IS NULL OR unread=0) AND persona_id=? AND scope<>'self' AND created_at BETWEEN ? AND ? "
+                "AND COALESCE(event_type,'')<>'diary'",
+                (self.config.persona_id, int(start), int(end)),
                 0,
             )
         except Exception:

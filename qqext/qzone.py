@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core.memory_guard import memory_work
 
 from .targets import TargetResolver
 from .qzone_client import (
@@ -320,6 +321,7 @@ class QzoneBridge:
         return "；".join(lines) or "没读到内容"
 
     # ================================================================ 写
+    @memory_work
     async def publish(self, text: str) -> dict[str, Any]:
         if not self.available():
             return {"ok": False, "text": "空间功能关着呢"}
@@ -350,7 +352,18 @@ class QzoneBridge:
         auth = await self.auth()
         client = QzoneClient(auth)
         result = await client.publish(content)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return {"ok": False, "text": "发布未确认成功"}
         self._last_error = ""
+        from ..memory.perspective import remember_action
+        import time
+        import uuid
+
+        await remember_action(
+            self.plugin, "qzone", str(result.get("fid") or uuid.uuid4().hex),
+            f"我在{time.strftime('%Y-%m-%d %H:%M')}发了QQ空间说说：{content[:300]}",
+            result={"fid": str(result.get("fid") or "")},
+        )
         return {"ok": True, "text": "发出去了", "fid": result.get("fid", "")}
 
     # ================================================================ 自动发

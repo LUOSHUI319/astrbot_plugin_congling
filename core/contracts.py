@@ -19,10 +19,10 @@ CONTRACT_VERSION = 1
 # --------------------------------------------------------------------- 人格
 @dataclass
 class Persona:
-    """人格档案。所有模块都带 persona_id，一套代码可跑多个角色。"""
+    """当前人格；persona_id 仅作历史兼容标识，不提供多档案切换。"""
 
     persona_id: str = "ling"
-    name: str = "绫"
+    name: str = "AstrBot 当前人格"
     version: int = CONTRACT_VERSION
     identity: str = ""
     style: dict[str, Any] = field(default_factory=dict)
@@ -102,6 +102,10 @@ class MemoryHit:
     session_id: str = ""
     session_kind: str = ""
     session_label: str = ""
+    subject_ref: str = ""
+    session_ref: str = ""
+    actor_ref: str = ""
+    weak_related: bool = False
 
     def line(self) -> str:
         stamp = ""
@@ -110,7 +114,8 @@ class MemoryHit:
         mark = " 【重要】" if self.importance >= 0.85 else ""
         prefix = f"({stamp}) " if stamp else ""
         where = f"[{self.session_label}] " if self.session_label else ""
-        return f"- {prefix}{where}{self.text}{mark}"
+        weak = "【弱相关】" if self.weak_related else ""
+        return f"- {weak}{prefix}{where}{self.text}{mark}"
 
 
 @dataclass
@@ -135,6 +140,9 @@ class MemoryDraft:
     level_tags: list[str] = field(default_factory=list)
     level_source: str = "llm"  # llm|rule|manual
     subject_key: str = ""  # 识别库里的主体键（通常是 QQ 号），入 tag 表用
+    experienced: bool = False  # 程序确认的自身行为，不需要睡醒后爬楼才能知道
+    platform: str = ""
+    actor_id: str = ""
 
 
 # --------------------------------------------------------------------- 节奏
@@ -326,9 +334,25 @@ class DreamEntry:
     decay_per_day: float = 0.15
     strength: float = 1.0
     expired: bool = False
-    mentioned: bool = False
     night_key: str = ""
     pinned: bool = False
+    planned_at: int = 0
+    stage_key: str = ""
+    cycle: int = 0
+    backfilled: bool = False
+    decay_at: int = 0
+
+    def age_to(self, now: float) -> None:
+        """按经历时间补足衰减；重复读取/重启不重复扣减。"""
+        start = self.decay_at or self.created_at
+        if self.pinned:
+            self.decay_at = max(start, int(now))
+            return
+        if start > 0 and now > start:
+            self.strength *= (1 - max(0.0, min(1.0, self.decay_per_day))) ** ((now - start) / 86400)
+            self.decay_at = int(now)
+            if self.strength < 0.15:
+                self.expired = True
 
     def remaining_days(self) -> int:
         if self.decay_per_day <= 0:
@@ -351,9 +375,13 @@ class DreamEntry:
             "decay_per_day": self.decay_per_day,
             "strength": round(self.strength, 4),
             "expired": self.expired,
-            "mentioned": self.mentioned,
             "night_key": self.night_key,
             "pinned": self.pinned,
+            "planned_at": self.planned_at,
+            "stage_key": self.stage_key,
+            "cycle": self.cycle,
+            "backfilled": self.backfilled,
+            "decay_at": self.decay_at,
         }
 
     @classmethod
@@ -369,8 +397,12 @@ class DreamEntry:
             decay_per_day=float(data.get("decay_per_day") or 0.15),
             strength=float(data.get("strength", 1.0)),
             expired=bool(data.get("expired")),
-            mentioned=bool(data.get("mentioned")),
             night_key=str(data.get("night_key") or ""),
             pinned=bool(data.get("pinned")),
+            planned_at=int(data.get("planned_at") or 0),
+            stage_key=str(data.get("stage_key") or ""),
+            cycle=int(data.get("cycle") or 0),
+            backfilled=bool(data.get("backfilled")),
+            decay_at=int(data.get("decay_at") or 0),
         )
 # /*congling:night:end*/

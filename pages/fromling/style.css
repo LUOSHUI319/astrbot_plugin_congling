@@ -86,7 +86,7 @@ body {
 .app {
   display: grid;
   grid-template-columns: 188px 1fr;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* ---------------------------------------------------------------- 侧栏 */
@@ -362,20 +362,7 @@ pre.block {
 .compat-cell .k { font-size: 14px; color: var(--ink-soft); letter-spacing: .08em; }
 .compat-cell .v { font-size: 15px; margin-top: 4px; }
 
-@media (max-width: 720px) {
-  .app { grid-template-columns: 1fr; }
-  .side {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    padding: 16px;
-    gap: 14px;
-  }
-  nav { flex-direction: row; flex-wrap: wrap; }
-  .nav-item { border-left: 0; border-bottom: 2px solid transparent; }
-  .nav-item.is-active { border-bottom-color: var(--accent); }
-  .side-foot { display: none; }
-  .main { padding: 18px; }
-}
+
 
 
 /* ---------------------------------------------------------------- 人设来源 */
@@ -536,11 +523,7 @@ pre.block {
   border-top: 1px solid var(--line);
 }
 
-@media (max-width: 900px) {
-  .settings-shell { grid-template-columns: 1fr; }
-  .settings-toc { display: none; }
-  .cfg-row { grid-template-columns: 1fr; gap: 8px; }
-}
+
 
 
 /* ---------------------------------------------------------------- 配置卡 */
@@ -637,11 +620,7 @@ details.adv[open] > summary { border-bottom: 1px solid var(--line); }
 }
 
 /* 侧栏在窄屏换行时保持紧凑 */
-@media (max-width: 720px) {
-  .nav-item { padding: 6px 8px; font-size: 14.5px; }
-  .entry-grid { grid-template-columns: 1fr 1fr; }
-  .cfg-foot { flex-wrap: wrap; }
-}
+
 
 /* ---------------------------------------------------------------- 记忆页 */
 .mem-stats {
@@ -682,7 +661,7 @@ details.adv[open] > summary { border-bottom: 1px solid var(--line); }
 
 .mem-body {
   /* 记忆区自己是个小窗，高度贴着视口算，主页面不再被它撑长 */
-  --mem-view: calc(100vh - 336px);
+  --mem-view: calc(100dvh - 336px);
   --mem-view-min: 260px;
   display: grid;
   grid-template-columns: 216px minmax(0, 1fr);
@@ -812,18 +791,7 @@ html[data-theme="dark"] .mem-kind.k-pref { color: var(--warn); }
 .mem-forget { margin-left: auto; font-size: 14px; }
 .mem-text { margin: 0; font-size: 15.5px; line-height: 1.7; }
 
-@media (max-width: 860px) {
-  .mem-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mem-body { --mem-view: calc(100vh - 380px); grid-template-columns: 1fr; }
-  .mem-sessions {
-    flex-direction: row;
-    flex-wrap: wrap;
-    position: static;
-    max-height: none;
-    overflow: visible;
-  }
-  .mem-list { min-height: 180px; }
-}
+
 
 
 /* ================================================================
@@ -851,7 +819,7 @@ body {
 .side {
   position: sticky;
   top: 0;
-  height: 100vh;
+  height: 100dvh;
   padding: 24px 14px 18px;
   gap: 22px;
   border-right: 0;
@@ -1509,43 +1477,14 @@ pre.block {
 .view > *:nth-child(4) { animation-delay: .1s; }
 .view > *:nth-child(5) { animation-delay: .13s; }
 
-@media (prefers-reduced-motion: reduce) {
-  .view > * { animation: none; }
-  * { transition: none !important; }
-}
+
 
 /* ---------------------------------------------------------------- 窄屏 */
-@media (max-width: 1180px) {
-  .main { padding: 0 24px 56px; }
-  .head { margin: 0 -24px 20px; padding: 18px 24px 14px; }
-}
 
-@media (max-width: 980px) {
-  .entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 
-@media (max-width: 720px) {
-  .app { grid-template-columns: 1fr; }
-  .side {
-    position: static;
-    height: auto;
-    padding: 18px 14px 14px;
-    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-  }
-  nav { flex-direction: row; flex-wrap: wrap; gap: 6px; }
-  .nav-item { padding: 7px 13px; }
-  .nav-item::before { display: none; }
-  .nav-item.is-active { padding-left: 13px; }
-  .side-foot { display: none; }
-  .main { padding: 0 16px 48px; }
-  .head { margin: 0 -16px 18px; padding: 16px 16px 12px; }
-  .grid-stats { grid-template-columns: 1fr 1fr; gap: 10px; }
-  .mem-stats { grid-template-columns: 1fr 1fr; }
-  .entry-grid { grid-template-columns: 1fr; }
-  .mem-toolbar { flex-wrap: wrap; }
-  .mem-toolbar .grow { flex-basis: 100%; }
-  table.list { border-spacing: 0 5px; }
-}
+
+
+
 
 
 /* ---------------------------------------------------------------- 二次微调 */
@@ -1700,14 +1639,12 @@ table.list tbody td {
   flex: none;
 }
 
-@media (max-width: 720px) {
-  .notice { font-size: 13.5px; padding: 6px 12px; margin-top: 10px; }
-}
+
 
 
 /* 声明条要的顶部间距交给父级，避免 margin 塌陷贴到视口边 */
 .main { padding-top: 16px; }
-@media (max-width: 720px) { .main { padding-top: 12px; } }
+
 
 /* ================================================================
    简约微调 2026-10-24
@@ -2071,17 +2008,7 @@ body {
 
 .unread-text { color: var(--ink-soft); line-height: 1.6; }
 
-@media (max-width: 720px) {
-  .night-hero {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "main"
-      "energy"
-      "acts";
-    padding: 18px;
-  }
-  .hero-energy { max-width: none; }
-}
+
 
 
 /* ---- 长夜页内的二级标签 ---- */
@@ -3413,10 +3340,7 @@ html[data-theme="dark"] .lv-4 { background: #2f2820; }
   font-size: 12px;
   opacity: .55;
 }
-@media (max-width: 560px) {
-  .join-nos span { font-size: 22px; }
-  .join-card h2 { font-size: 20px; }
-}
+
 
 
 /* 导入页的拖放区：拖文件进来时整块变色，给明确反馈 */

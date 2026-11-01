@@ -17,7 +17,9 @@ from ..core.contracts import NIGHT_ASLEEP, NIGHT_AWAKE, NIGHT_WAKING, PerceivedM
 from .close import close_minutes, is_closing, match_strength
 from .crawl import Crawler
 from .dream import Dreamer
+from .plans import DreamPlans
 from .state import SLEEP_WINDOW_KEY, NightService
+from ..core.exc import exc_brief
 
 __all__ = [
     "NightModule",
@@ -39,23 +41,30 @@ class NightModule:
         self.store = plugin.store
         self.state = NightService(plugin)
         self.dreamer = Dreamer(plugin)
+        self.plans = DreamPlans(self)
+        self.state.on_sleep = self.plans.plan_sleep
+        self.state.on_wake = self.plans.note_wake
         self.crawler = Crawler(plugin)
         self._waking_started: dict[str, int] = {}
         self.pending_sleep: dict[str, Any] | None = None
         # 爬楼语念过哪些会话（crawl_announce=once 时用）
         self._announced: set[str] = set()
         self.morning_dream: Any = None
+        self._dream_event_id = ""
 
     # ================================================================ 生命周期
     async def start(self) -> None:
-        await self.state.start()
         # 开关关着也读一遍：面板要显示「共几段」，而且万一开着之后第一段梦
         # 直接 append + save，会把以前存的梦整个覆盖掉
         await self.dreamer.load()
+        await self.state.start()
+        if self.state.state.mode == NIGHT_ASLEEP:
+            await self.plans.plan_sleep()
 
     async def shutdown(self) -> None:
+        await self.plans.cancel()
         await self.state.save()
-        if self.dreamer.enabled:
+        if self.dreamer.enabled and self.dreamer._loaded:
             await self.dreamer.save()
 
     # ================================================================ 消息入口
@@ -128,12 +137,14 @@ class NightModule:
                 f"（{pending.get('word') or '精力耗尽'}）"
             )
         except Exception as exc:
-            logger.debug(f"[congling] 入睡失败: {exc!r}")
+            logger.warning(f"[congling] 入睡失败: {exc_brief(exc)}")
 
     def _pick_morning_dream(self) -> None:
-        """醒来时掷一次：这段梦记不记得，记得就等着找机会说。"""
+        """本次醒来首次对话时掷一次，只回忆本次睡眠中的梦。"""
         try:
-            dream = self.dreamer.pick_to_mention()
+            dream = self.dreamer.pick_to_mention(
+                since=self.state._wake_sleep_at, until=self.state.wake_hints.started_at,
+            )
         except Exception:
             dream = None
         self.morning_dream = dream
@@ -185,7 +196,7 @@ class NightModule:
             if not await self.need_crawl(session_id):
                 return ""
         except Exception as exc:
-            logger.debug(f"[congling] 爬楼判定失败: {exc!r}")
+            logger.warning(f"[congling] 爬楼判定失败: {exc_brief(exc)}")
             return ""
         # 静默档：off 只清未读不说话；once 每个会话只念一次；always 每次都念。
         # 半夜被叫醒先来一句"我去翻翻"其实很人机，off 就是给这种情况留的。
@@ -198,19 +209,17 @@ class NightModule:
             try:
                 line = await self.crawler.crawl_line()
             except Exception as exc:
-                logger.debug(f"[congling] 爬楼语生成失败: {exc!r}")
+                logger.warning(f"[congling] 爬楼语生成失败: {exc_brief(exc)}")
                 line = ""
         self._announced.add(session_id)
         try:
             removed = await self.crawler.mark_read(session_id)
             await self.crawler.mark_crawled(session_id)
             await self.state.crawl_done(session_id)
-            if self.state.state.mode != NIGHT_WAKING:
-                self._pick_morning_dream()
             if removed:
                 logger.info(f"[congling] 爬楼完成：撤销 {removed} 条未读（{session_id}）")
         except Exception as exc:
-            logger.debug(f"[congling] 爬楼收尾失败: {exc!r}")
+            logger.warning(f"[congling] 爬楼收尾失败: {exc_brief(exc)}")
         return line
 
     async def crawl(self, session_id: str) -> str:
@@ -227,6 +236,9 @@ class NightModule:
     # ================================================================ 做梦
     async def dream_tick(self) -> None:
         """由 housekeeping 定时调用：该做梦就做一段。"""
+        if self.plans.mode != "live":
+            await self.plans.generate_live()
+            return
         if not self.dreamer.enabled:
             return
         state = self.state.state
@@ -259,10 +271,41 @@ class NightModule:
             state.dream_count_today += 1
             await self.state.save()
 
+    async def deliver_dream_plans(self, now: int | None = None) -> int:
+        return await self.plans.deliver_due(now)
+
+    async def reconcile_dream_plans(self, now: int | None = None) -> dict[str, int]:
+        task = self.plans._spawn("reconcile", lambda: self.plans.reconcile(now))
+        return await task
+
     # ================================================================ 面板
-    def prompt_hint(self) -> str:
-        """给 system prompt 加一段作息状态。空串表示不用加。"""
+    def _hint_take(self, kind: str, session_key: str, now: float) -> bool:
+        # woke 与 dream 共用同一个醒来事件；按类型/会话独立计数，过期不清账。
+        if kind == "dream" and self.config.str("night.dream_hint_scope", "session") == "global":
+            session_key = "__global__"
+        return self.state.wake_hints.take(
+            kind, session_key,
+            limit=self.config.int(f"night.{kind}_hint_max_uses", 2 if kind == "dream" else 1),
+            ttl_minutes=self.config.int(f"night.{kind}_hint_ttl_minutes", 120), now=now,
+        )
+
+    def prompt_hint(self, consume: bool = True, session_key: str = "", *, include_private: bool = False) -> str:
+        """生成临时用户上下文；不修改 system prompt。
+
+        consume=True 按事件、提示类型和会话消耗注入机会，不代表实际提及。
+        consume=False 只提供持续状态，绝不返回醒来语气或梦境正文。
+        """
         state = self.state.state
+        hints = self.state.wake_hints
+        now = time.time()
+        if self._dream_event_id != hints.event_id:
+            self.morning_dream = None
+            self._dream_event_id = ""
+        dream_valid = hints.valid(
+            now=now, ttl_minutes=self.config.int("night.dream_hint_ttl_minutes", 120),
+        )
+        if not dream_valid or not self.dreamer.enabled:
+            self.morning_dream = None
         if state.mode == "asleep" and not self.pending_sleep:
             # 只挡「真的睡着了」。pending_sleep 表示"这条回完就睡"，
             # 那时候必须继续往下走，好让下面那段把道别要求加进 prompt ——
@@ -277,11 +320,12 @@ class NightModule:
 
         woke_from = getattr(self.state, "_woke_from", None) or {}
         woke_key = str(woke_from.get("key") or "")
-        if state.mode in ("awake", "waking") and woke_key:
-            if woke_key == "n3":
-                lines.append("你是从深度睡眠里被硬拽起来的，脑子还是木的，说话短、慢，别急着接话题。")
-            elif woke_key == "rem":
-                lines.append("你是从梦里醒过来的，梦的碎片还挂在脑子里，可以顺手提一句你刚才梦见的东西。")
+        if consume and not self.pending_sleep and state.mode in ("awake", "waking") and woke_key:
+            if woke_key in ("n3", "rem") and self._hint_take("woke", session_key, now):
+                if woke_key == "n3":
+                    lines.append("你是从深度睡眠里被硬拽起来的，脑子还是木的，说话短、慢，别急着接话题。")
+                else:
+                    lines.append("你是从 REM 睡眠里醒过来的，脑子还在慢慢清醒，说话可以稍缓一些。")
 
         if self.pending_sleep:
             limit = max(4, self.config.int("close.max_closing_chars", 12))
@@ -293,13 +337,28 @@ class NightModule:
             else:
                 lines.append(f"这句话说完你就去睡了，回复控制在 {limit} 字以内，简短收尾就行。")
 
-        if self.morning_dream is not None:
+        # Select at most once per wake, including a failed recall roll. Crawl,
+        # preview and non-REM wake paths must not re-roll or renew the TTL.
+        if (consume and not self.pending_sleep and state.mode == NIGHT_AWAKE
+                and dream_valid and self.dreamer.enabled
+                and self._dream_event_id != hints.event_id):
+            self._dream_event_id = hints.event_id
+            self._pick_morning_dream()
+
+        if (consume and not self.pending_sleep and state.mode == NIGHT_AWAKE
+                and self.morning_dream is not None and not self.morning_dream.expired
+                and self.morning_dream.level >= self.dreamer.mention_min_level
+                and any(d is self.morning_dream for d in self.dreamer.living())
+                and self._hint_take("dream", session_key, now)):
             dream = self.morning_dream
-            excerpt = (dream.text or "")[:120]
-            lines.append(
-                f"你昨晚做了一个梦（{'、'.join(dream.tags) or '说不清'}，强度 {dream.level} 级）：{excerpt}"
-                "\n如果这轮对话有自然的缝隙，可以顺口提一句这个梦；没有就别说，别硬插。"
-            )
+            if include_private:
+                excerpt = (dream.text or "")[:120]
+                lines.append(
+                    f"你这次睡觉时做了一个梦（{'、'.join(dream.tags) or '说不清'}，强度 {dream.level} 级）：{excerpt}"
+                    "\n如果这轮对话有自然的缝隙，可以顺口提一句这个梦；没有就别说，别硬插。"
+                )
+            else:
+                lines.append("你这次睡觉时做过梦，正文是私人内容；本会话只可提及做过梦，不可透露梦的内容。")
 
         kind = energy_mod.fatigue_kind(self.config)
         if kind:
@@ -318,8 +377,10 @@ class NightModule:
 
     def snapshot(self) -> dict[str, Any]:
         data = self.state.snapshot()
+        data["state"] = {"last_tick": data["last_tick"]}
         data["dream"] = {
             "enabled": self.dreamer.enabled,
+            "pending": self.dreamer.pending,
             "stats": self.dreamer.stats() if self.dreamer.enabled else {},
         }
         return data
