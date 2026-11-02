@@ -246,8 +246,14 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
         if isinstance(persona, dict):
             if "persona_id" in persona and persona["persona_id"] != self.cfg.persona_id:
                 raise ValueError("当前人格标识不可修改")
-            if persona.get("mode", "astrbot") != "astrbot" or persona.get("astrbot_persona_id", ""):
-                raise ValueError("只支持跟随 AstrBot 当前人格，不支持切换")
+            if persona.get("mode", self.cfg.str("persona.mode", "astrbot")) not in {"builtin", "astrbot", "none"}:
+                raise ValueError("不支持的人格来源")
+            selected = persona.get("astrbot_persona_id", self.cfg.str("persona.astrbot_persona_id", ""))
+            if selected:
+                manager = getattr(self.plugin.context, "persona_manager", None)
+                if manager is None:
+                    raise ValueError("AstrBot 人格管理器不可用")
+                await manager.get_persona(selected)
         raw = self.plugin.raw_config
         saved = False
         if isinstance(raw, dict):
@@ -298,6 +304,7 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
             ("/health", self.health, ["GET"]),
             ("/diagnostics", self.diagnostics_tail, ["GET"]),
             ("/night/state", self.night_state, ["GET"]),
+            ("/night/logs", self.night_logs, ["GET"]),
             ("/night/dreams", self.night_dreams, ["GET"]),
             ("/night/wake", self.night_wake, ["POST"]),
             ("/night/sleep", self.night_sleep, ["POST"]),
@@ -395,10 +402,12 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
                 return _err("人格模块未就绪")
             data = self.plugin.persona.as_dict()
             data["versions"] = await self.plugin.persona.versions()
-            current = await self.plugin.persona.current_astrbot_persona()
-            data.update(name=current["name"], identity=current["prompt"], current_persona=current)
-            # 兼容旧渲染协议，只有当前人格；不枚举、不允许选择其他人格。
-            data["astrbot_personas"] = {"items": [{"id": "", **current}], "default": ""}
+            data["astrbot_personas"] = await self.plugin.persona.available_personas()
+            try:
+                identity = await self.plugin.persona.resolve()
+                data["effective"] = {key: identity[key] for key in ("mode", "id", "name", "token")}
+            except Exception as exc:
+                data["effective"] = {"mode": self.plugin.persona.mode, "error": str(exc)[:200]}
             return _ok(data)
         except Exception as exc:
             return _err(repr(exc)[:200])
@@ -411,9 +420,14 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
             # 人设来源属于插件配置，不进人格 KV
             mode = body.pop("mode", None)
             astrbot_id = body.pop("astrbot_persona_id", None)
-            if mode not in (None, "astrbot") or astrbot_id not in (None, ""):
-                return _err("只支持跟随 AstrBot 当前人格，不支持切换")
-            data = await self.plugin.persona.save(body)
+            if mode is not None and mode not in {"builtin", "astrbot", "none"}:
+                return _err("不支持的人格来源")
+            if mode == "astrbot" and isinstance(astrbot_id, str) and astrbot_id:
+                manager = getattr(self.plugin.context, "persona_manager", None)
+                if manager is None:
+                    return _err("AstrBot 人格管理器不可用")
+                await manager.get_persona(astrbot_id)
+            data = await self.plugin.persona.save(body) if body else self.plugin.persona.as_dict()
 
             changes: dict[str, str] = {}
             if isinstance(mode, str) and mode in {"builtin", "astrbot", "none"}:
@@ -811,6 +825,27 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
             if getattr(self.plugin, "night", None) is None:
                 return _ok({"enabled": False, "reason": "长夜如梦没有启用"})
             return _ok(self.plugin.night.snapshot())
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def night_logs(self) -> dict[str, Any]:
+        """只读精力流水；查询不推进状态机，也不调用模型。"""
+        try:
+            night = getattr(self.plugin, "night", None)
+            if night is None:
+                return _ok({"items": [], "has_more": False, "enabled": False})
+            params = await _params()
+            def number(key: str, default: int) -> int:
+                try:
+                    return max(0, int(params.get(key, default)))
+                except (TypeError, ValueError):
+                    return default
+            hours = min(168, number("hours", 24))
+            return _ok(await night.state.events.list(
+                limit=number("limit", 100), before_id=number("before_id", 0),
+                since=time.time() - hours * 3600 if hours else 0,
+                category=str(params.get("category") or "all"),
+            ))
         except Exception as exc:
             return _err(repr(exc)[:200])
 

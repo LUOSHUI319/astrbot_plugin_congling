@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import copy
 import time
 from typing import Any
 
@@ -115,7 +116,32 @@ class ModelHub:
             return ""
 
     # ================================================================ 图片
+    async def character_chat(self, prompt: str, system: str = "", *, umo: str = "",
+                             identity: dict[str, Any] | None = None,
+                             temperature: float = 0.7, max_tokens: int = 1024) -> str:
+        """角色发言使用当前唯一人格和目标会话模型；抽取任务仍使用 chat。"""
+        persona = self.plugin.persona
+        current = await persona.resolve(umo)
+        if identity is not None and identity["token"] != current["token"]:
+            raise ValueError("人格已切换，旧角色文本作废")
+        identity = identity or current
+        getter = getattr(self.context, "get_using_provider_async", None)
+        provider = await getter(umo or None) if callable(getter) else self.provider_of("chat")
+        if provider is None:
+            return ""
+        system_prompt = identity["prompt"]
+        if system:
+            system_prompt += "\n\n" + system
+        response = await provider.text_chat(
+            prompt=prompt, contexts=copy.deepcopy(identity["dialogs"]),
+            system_prompt=system_prompt or None,
+        )
+        if (await persona.resolve(umo))["token"] != identity["token"]:
+            raise ValueError("人格已切换，旧角色文本作废")
+        return str(getattr(response, "completion_text", "") or "").strip()
+
     async def describe_image(self, image: str, prompt: str) -> str:
+        # 公共版本只使用模型中心中的 vision 配置，不绑定部署实例的 provider ID。
         provider = self.provider_of("vision")
         if provider is not None:
             try:

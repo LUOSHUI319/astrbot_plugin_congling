@@ -278,6 +278,8 @@ class SubjectBook:
                 max(1, min(1000, limit)),
             ),
         )
+        for row in rows:
+            row.pop("embedding", None)
         return rows
 
     # ------------------------------------------------------------ 列表

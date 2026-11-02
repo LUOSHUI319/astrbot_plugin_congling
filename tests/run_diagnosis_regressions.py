@@ -84,6 +84,7 @@ from astrbot_plugin_congling.night.state import NightService
 from astrbot_plugin_congling.night.dream import Dreamer
 from astrbot_plugin_congling.night import stages
 from astrbot_plugin_congling.humanize.proactive import Proactive
+from astrbot_plugin_congling.humanize.persona import PersonaService
 from astrbot_plugin_congling.main import ConglingPlugin
 
 
@@ -99,6 +100,12 @@ class Regression(unittest.IsolatedAsyncioTestCase):
                                            should_yield=lambda _: False),
                                        is_admin=lambda e: False, diag=None)
         self.p.budget = Budget(self.cfg)
+        item = types.SimpleNamespace(persona_id="洛水", name="洛水", system_prompt="你是洛水")
+        self.p.context.persona_manager = types.SimpleNamespace(
+            default_persona="洛水", get_persona=AsyncMock(return_value=item),
+            get_all_personas=AsyncMock(return_value=[item]),
+        )
+        self.p.persona = PersonaService(self.p)
         self.mem = self.p.memory = MemoryService(self.p)
 
     async def asyncTearDown(self):

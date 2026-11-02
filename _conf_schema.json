@@ -1,4 +1,16 @@
 {
+  "bridge_livingmemory": {
+    "description": "LivingMemory 镜像",
+    "hint": "可选追加镜像，仅召回同一平台和会话的记录；镜像属于外部库，需在 LivingMemory 中单独管理和删除。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用记忆镜像",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
   "basic": {
     "description": "基础设置",
     "hint": "启用范围与管理员。改动后需重载插件才完全生效。",
@@ -43,21 +55,23 @@
   },
   "persona": {
     "description": "当前人格",
-    "hint": "只有一个人格，跟随 AstrBot 当前使用的人格；旧标识和设定保留以兼容已有数据。",
+    "hint": "内置、AstrBot、无人格三选一，修改后立即生效；内部标识保留历史记忆引用。",
     "type": "object",
     "items": {
       "mode": {
         "description": "人设来源",
-        "hint": "固定跟随 AstrBot 当前人格，不提供切换或内置人设。",
+        "hint": "三种来源互斥，普通回复、主动消息和醒后补课统一采用当前选择。",
         "type": "string",
         "options": [
-          "astrbot"
+          "astrbot",
+          "builtin",
+          "none"
         ],
         "default": "astrbot"
       },
       "astrbot_persona_id": {
-        "description": "历史选择（兼容保留）",
-        "hint": "已停用，不影响当前人格。",
+        "description": "AstrBot 人格",
+        "hint": "填写 AstrBot 人格 ID；留空跟随目标会话当前人格。指定人格不存在时暂停发言。",
         "type": "string",
         "default": ""
       },
@@ -74,7 +88,7 @@
       },
       "identity": {
         "description": "身份设定",
-        "hint": "历史设定保留；实际人设由 AstrBot 提供，本插件没有内置默认人设。",
+        "hint": "仅在内置模式生效；AstrBot 模式使用框架人设，无人格模式不注入身份。",
         "type": "text",
         "default": ""
       },
@@ -832,6 +846,12 @@
         "hint": "检测到 reply_delay 在跑时停止包装 event.send",
         "type": "bool",
         "default": true
+      },
+      "at_guard_coupled": {
+        "description": "醒后补课耦合 at_guard",
+        "hint": "开：睡醒后判定「该不该回」交给 at_guard 打分；关：用本插件的回复阈值判定",
+        "type": "bool",
+        "default": false
       }
     }
   },
@@ -1010,7 +1030,11 @@
         "description": "梦境生成模式",
         "hint": "hybrid 入睡预生成前 3 段，其余 REM 在线实时生成；precomputed 预生成全部；live 仅在线生成。补发窗口固定为醒后 24 小时",
         "type": "string",
-        "options": ["hybrid", "precomputed", "live"],
+        "options": [
+          "hybrid",
+          "precomputed",
+          "live"
+        ],
         "default": "hybrid"
       },
       "dream_mention_min_level": {
@@ -1023,7 +1047,10 @@
         "description": "醒后梦提示次数作用域",
         "hint": "session 各会话独立计数；global 所有会话共享次数。TTL 均从实际醒来计算",
         "type": "string",
-        "options": ["session", "global"],
+        "options": [
+          "session",
+          "global"
+        ],
         "default": "session"
       },
       "dream_recall_guard": {
@@ -1166,6 +1193,85 @@
         "hint": "默认 120，从实际醒来时间起算，与醒来语气独立；0 关闭。重启不恢复提示",
         "type": "int",
         "default": 120
+      },
+      "waking_timeout_minutes": {
+        "description": "补课状态超时（分钟）",
+        "hint": "默认 5，最低 1；醒后补课未完成时，到时退出“刚醒，补课中”并转为“醒着”，不会入睡或删除未读消息",
+        "type": "int",
+        "default": 5
+      },
+      "rollup": {
+        "description": "醒后补课",
+        "hint": "睡醒/强制唤醒后，对睡着期间没回的消息做摘要、分流、逐条回复。独立于爬楼机制，爬楼开关关掉也照跑。默认关闭，上线先看日志。",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用醒后补课",
+            "type": "bool",
+            "default": false,
+            "hint": "总开关。默认关，上线先只跑 L1+L2 看日志"
+          },
+          "chunk_size": {
+            "description": "分块条数",
+            "type": "int",
+            "default": 45,
+            "hint": "一块最多压多少条，谁先到谁封块"
+          },
+          "chunk_window_minutes": {
+            "description": "分块时间窗（分钟）",
+            "type": "int",
+            "default": 60,
+            "hint": "时间跨过这个也封块"
+          },
+          "chunk_hard_cap": {
+            "description": "单块硬上限（条）",
+            "type": "int",
+            "default": 80,
+            "hint": "防刷屏撑爆"
+          },
+          "hi_threshold": {
+            "description": "高分线",
+            "type": "int",
+            "default": 80,
+            "hint": "达到直接进回复"
+          },
+          "mid_threshold": {
+            "description": "低分线",
+            "type": "int",
+            "default": 50,
+            "hint": "低于静默或记待办，中间档可补判"
+          },
+          "max_replies_per_wake": {
+            "description": "单次最多回几条",
+            "type": "int",
+            "default": 3,
+            "hint": "醒后一轮最多解答几条，宁可少答"
+          },
+          "mirror_livingmemory": {
+            "description": "镜像到 livingmemory",
+            "type": "bool",
+            "default": false,
+            "hint": "只镜像偏好/结论/约定这类长线记忆"
+          },
+          "wake_idle_minutes": {
+            "description": "醒后静默待机（分钟）",
+            "type": "int",
+            "default": 10,
+            "hint": "默认 10，0 关闭；仅被叫醒且精力未满时，连续静默达到阈值准备一次提示；新消息撤销旧提示，不自动入睡"
+          },
+          "idle_merge_seconds": {
+            "description": "待机并入窗口（秒）",
+            "type": "int",
+            "default": 60,
+            "hint": "待发想睡提示的有效期；超过此秒数、新消息到来或人格切换则丢弃，不超时单独发送"
+          },
+          "wake_mood_pool": {
+            "description": "强制唤醒情绪池",
+            "type": "list",
+            "default": [],
+            "hint": "如 生气、温柔、朦胧、可爱。强制唤醒时随机抽一个临时接话"
+          }
+        }
       }
     }
   },
@@ -1411,6 +1517,12 @@
     "items": {
       "enabled": {
         "description": "启用收线静默",
+        "type": "bool",
+        "default": true
+      },
+      "strong_enabled": {
+        "description": "强档结束语触发入睡",
+        "hint": "关掉后「晚安/我睡了」这类强档词不再直接睡到起床时间，避免聊天中随口一句就睡一路；中档（拜拜/回头聊）不受影响。",
         "type": "bool",
         "default": true
       },

@@ -131,16 +131,34 @@ async function njPersonaBoot(force) {
   window.__njPersonaAt = now;
   try {
     const data = await get("page/persona");
-    /* 人设来源固定跟随 AstrBot：侧栏不看 data.mode，否则库里存着 builtin 就会
-       出现「人格页说跟随、左下角写绫」的错位。 */
-    const list = (data.astrbot_personas && data.astrbot_personas.items) || [];
-    const wanted = String(data.astrbot_persona_id || "");
-    const fallback = String((data.astrbot_personas && data.astrbot_personas.default) || "");
-    const pickId = wanted || fallback;
-    const hit = list.find((item) => String(item.id || item.persona_id || "") === pickId);
-    const name = String((hit && (hit.name || hit.id)) || pickId || "AstrBot 默认人格");
-    const id = pickId ? `AstrBot · ${pickId}` : "AstrBot";
+    const mode = String(data.mode || "astrbot");
+    let name = String(data.name || "");
+    let id = String(data.persona_id || "ling");
+    if (data.effective) {
+      name = data.effective.error ? "人格不可用" : String(data.effective.name || "无人格");
+      id = String(data.effective.id || mode);
+    } else if (mode === "astrbot") {
+      const wanted = String(data.astrbot_persona_id || "");
+      const list = (data.astrbot_personas && data.astrbot_personas.items) || [];
+      const hit = list.find((item) => String(item.id || item.persona_id || "") === wanted);
+      name = String((hit && (hit.name || hit.id)) || wanted || "AstrBot 人格");
+      id = wanted ? `AstrBot · ${wanted}` : "AstrBot";
+    } else if (mode === "none") {
+      name = "无人格";
+      id = "关闭";
+    }
     if (name) njPersonaName(name, id);
+    const hero = view.querySelector(".nj-herobar");
+    if (hero?.querySelector(".nj-herobar-eyebrow")?.textContent.includes("PERSONA")) {
+      hero.querySelector("h2").textContent = mode === "none" ? "无人格" : name;
+      hero.querySelector(".nj-herobar-main p").textContent = mode === "astrbot"
+        ? `人设来自 AstrBot 里的人格「${name}」，改那边才会变`
+        : mode === "none" ? "不加入角色身份，保留关系、作息和场景上下文"
+        : "插件自带的内置人设，下面这段文字就是「她是谁」";
+      const stats = hero.querySelectorAll(".nj-herobar-stats > div");
+      if (stats[0]) stats[0].querySelector("b").textContent =
+        {builtin:"插件自带",astrbot:"AstrBot 人格",none:"无人格"}[mode] || mode;
+    }
   } catch (err) {
     /* 拉不到就保持原样，不影响页面 */
   } finally {
@@ -583,14 +601,12 @@ async function njPersona() {
   njTitle("02");
   const [data, settings] = await Promise.all([get("page/persona"), loadSettings()]);
   state.persona = data;
-  /* 只保留「跟随 AstrBot」：插件自带和「只用默认」都已移除。
-     库里若还存着 builtin/none，一律按 astrbot 呈现。 */
-  const mode = "astrbot";
+  const mode = String(data.mode || "astrbot");
   const astr = data.astrbot_personas || { items: [], default: "default" };
   const personas = astr.items || [];
   const selected = data.astrbot_persona_id || "";
   const style = data.style || {};
-  njPersonaName(data.name || "绫", data.persona_id || "ling");
+  njPersonaName(data.effective?.name || "人格不可用", data.effective?.id || mode);
 
   const options = ['<option value="">（AstrBot 默认人格）</option>']
     .concat(
@@ -619,26 +635,35 @@ async function njPersona() {
         .join("")}</div>`
     : '<div class="nj-empty">还没有历史版本</div>';
 
-  const modeCN = { builtin: "插件自带", astrbot: "AstrBot 人格", none: "只用默认" };
+  const modeCN = { builtin: "插件自带", astrbot: "AstrBot 人格", none: "无人格" };
   const modeName =
     mode === "astrbot"
       ? (personas.find((item) => item.id === selected) || {}).name || selected || "AstrBot 默认"
-      : data.name || "未命名";
+      : mode === "none" ? "无人格" : data.name || "未命名";
   view.innerHTML = `
     ${njHeroBar({
       eyebrow: "02 / PERSONA",
       variant: "quote",
       title: modeName,
-      note: `人设来自 AstrBot 里的人格「${modeName}」，改那边这边就会变`,
+      note: mode === "astrbot"
+        ? `人设来自 AstrBot 里的人格「${modeName}」，改那边才会变`
+        : mode === "none"
+          ? "不加入角色身份，保留关系、作息和场景上下文"
+          : "插件自带的内置人设，下面这段文字就是「她是谁」",
       art: "persona",
       stats: [
-        { label: "来源", value: "AstrBot 人格" },
+        { label: "来源", value: modeCN[mode] || mode },
         { label: "单句字数", value: style.max_chars || 25, unit: "字" },
         { label: "活跃时段", value: data.active_hours || "09:00-03:30" },
         { label: "版本", value: (data.versions || []).length, unit: "版" },
       ],
     })}
-    <div class="nj-head" style="margin-top:22px"><h2>人设来源</h2><span>固定跟随 AstrBot</span></div>
+    <div class="nj-head" style="margin-top:22px"><h2>人设来源</h2><span>三选一，选了立刻生效</span></div>
+    <div class="nj-modes">
+      ${njModeCard("builtin", "内置人格", "写在本插件里，可直接编辑", mode)}
+      ${njModeCard("astrbot", "AstrBot 人格", "用框架里已有的人格", mode)}
+      ${njModeCard("none", "无人格", "不加入任何角色身份", mode)}
+    </div>
 
     <div id="persona-body" style="margin-top:16px"></div>
 
@@ -654,6 +679,24 @@ async function njPersona() {
   const body = document.getElementById("persona-body");
   let currentMode = "astrbot";  // 只保留跟随 AstrBot，builtin/none 分支保留但走不到
   let currentAstrId = selected;
+  let selecting = false;
+  async function persistChoice(nextMode, nextId) {
+    const msg = document.getElementById("p-saved");
+    if (selecting) return false;
+    selecting = true;
+    msg.textContent = "切换中…";
+    try {
+      await post("page/persona/save", { mode: nextMode, astrbot_persona_id: nextId });
+      msg.textContent = "已立即生效";
+      await njPersonaBoot(true);
+      return true;
+    } catch (err) {
+      msg.textContent = "切换失败：" + (err.message || err);
+      return false;
+    } finally {
+      selecting = false;
+    }
+  }
 
   function drawBody() {
     if (currentMode === "builtin") {
@@ -682,7 +725,7 @@ async function njPersona() {
           </div>
         </section>`;
     } else if (currentMode === "astrbot") {
-      const found = personas.find((item) => item.id === currentAstrId) || personas.find((item) => item.id === astr.default);
+      const found = personas.find((item) => item.id === (currentAstrId || astr.default));
       body.innerHTML = `
         <section class="cfg-group">
           <div class="cfg-head"><h3>跟随 AstrBot 人格</h3><p>当前跟的是「${esc((found && found.name) || currentAstrId || astr.default || "AstrBot 默认")}」——要改人设请去 AstrBot 的「人格」页面</p></div>
@@ -699,8 +742,14 @@ async function njPersona() {
           </div>
         </section>`;
       const select = document.getElementById("p-astr");
-      select.onchange = () => {
-        currentAstrId = select.value;
+      select.value = currentAstrId;
+      select.onchange = async () => {
+        const nextId = select.value;
+        select.disabled = true;
+        const saved = await persistChoice(currentMode, nextId);
+        select.disabled = false;
+        if (!saved) { select.value = currentAstrId; return; }
+        currentAstrId = nextId;
         const pick = personas.find((item) => item.id === currentAstrId);
         document.getElementById("astr-prompt").textContent =
           (pick && pick.prompt) || "这个人格没有写 system prompt，将使用 AstrBot 的默认设定";
@@ -711,7 +760,7 @@ async function njPersona() {
           <div class="cfg-head"><h3>不用插件人设</h3><p>本插件不注入任何人设文本</p></div>
           <div class="pad">
             <p class="hint" style="margin:0">
-              它会完全按 AstrBot 的默认人格说话。插件仍然补充「关系远近、当前状态、群聊还是私聊」这三条信息，
+              不加入内置或 AstrBot 的角色身份。插件仍然补充「关系远近、当前状态、群聊还是私聊」这三条信息，
               因为那些属于上下文，不属于人设。
             </p>
           </div>
@@ -728,11 +777,25 @@ async function njPersona() {
 
   drawBody();
 
+  view.querySelectorAll(".nj-mode").forEach((card) => {
+    card.onclick = async () => {
+      const nextMode = card.dataset.mode;
+      if (nextMode === currentMode || !await persistChoice(nextMode, currentAstrId)) return;
+      currentMode = nextMode;
+      view.querySelectorAll(".nj-mode").forEach((item) => {
+        const on = item.dataset.mode === currentMode;
+        item.classList.toggle("is-on", on);
+        item.querySelector(".mark").textContent = on ? "当前" : "选择";
+      });
+      drawBody();
+    };
+  });
+
   document.getElementById("p-save").onclick = async () => {
     const msg = document.getElementById("p-saved");
     msg.textContent = "保存中…";
     const payload = {
-      mode: "astrbot",
+      mode: currentMode,
       astrbot_persona_id: document.getElementById("p-astr") ? document.getElementById("p-astr").value : currentAstrId || "",
     };
     if (currentMode === "builtin") {
@@ -1974,6 +2037,7 @@ function njNightHero(st, opts) {
       : "";
 
   const chips = [
+    ...(asleep ? [["入睡原因", st.sleep_reason_label || ({ energy: "精力耗尽", talk: "结束语收线", latest: "最晚入睡时间", manual: "手动操作" }[st.sleep_reason] || st.sleep_reason || "—")]] : []),
     ["当前时段", fatigueText],
     ["最晚入睡", st.latest_sleep_time || "—"],
     ["夜间疲劳", st.night_fatigue || "—"],
@@ -2010,7 +2074,7 @@ function njNightHero(st, opts) {
   </section>`;
 }
 
-const NJ_NIGHT_TAB_CN = { state: "状态", sleep: "睡眠", memory: "记忆", dream: "梦境", config: "设置" };
+const NJ_NIGHT_TAB_CN = { state: "状态", sleep: "睡眠", memory: "记忆", dream: "梦境", log: "日志", config: "设置" };
 
 function njNightTabs(active) {
   const TABS = [
@@ -2018,6 +2082,7 @@ function njNightTabs(active) {
     ["sleep", "睡眠"],
     ["memory", "记忆"],
     ["dream", "梦境"],
+    ["log", "日志"],
     ["config", "设置"],
   ];
   return `<div class="nj-night-tabs">
@@ -2031,18 +2096,19 @@ function njNightTabs(active) {
 async function njNight() {
   njShell();
   njTitle("05");
-  const TABS = ["state", "sleep", "memory", "dream", "config"];
+  const TABS = ["state", "sleep", "memory", "dream", "log", "config"];
   if (!TABS.includes(nightTab)) nightTab = "state";
 
-  const needState = nightTab === "state" || nightTab === "sleep" || nightTab === "memory";
+  const needState = nightTab === "state" || nightTab === "sleep" || nightTab === "memory" || nightTab === "log";
   const needUnread = nightTab === "state" || nightTab === "memory";
-  const [st, unreadData, heatData, dreamData, settings, dreamPeek] = await Promise.all([
+  const [st, unreadData, heatData, dreamData, settings, dreamPeek, logData] = await Promise.all([
     needState ? get("night/state").catch(() => ({})) : Promise.resolve({}),
     needUnread ? get("night/unread", { limit: 40 }).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
     nightTab === "state" ? get("page/memory/m3/overview").catch(() => ({})) : Promise.resolve({}),
     nightTab === "dream" ? get("night/dreams", { limit: 60 }).catch((err) => ({ __error: String((err && err.message) || err) })) : Promise.resolve(null),
     nightTab === "config" ? loadSettings() : Promise.resolve(null),
     nightTab === "state" ? get("night/dreams", { limit: 3 }).catch((err) => ({ __error: String((err && err.message) || err) })) : Promise.resolve(null),
+    nightTab === "log" ? nightLogFetch() : Promise.resolve(null),
   ]);
   const unread = (unreadData.items || []).slice().sort((a, b) => Number(b.unread_since || 0) - Number(a.unread_since || 0));
   const heat = heatData.heatmap || {};
@@ -2054,12 +2120,14 @@ async function njNight() {
     ? `<div class="nj-empty">梦境读取失败：${dreamData.__error}<br><button class="nj-btn tiny" data-night-refresh>重试</button></div>`
     : njNightDream(dreamData);
   else if (nightTab === "config") body = njNightSettings(settings);
+  else if (nightTab === "log") body = nightLogPage(st, logData);
   else body = njNightState(st, unread, heat, dreamPeek);
 
   if (typeof currentView === "string" && currentView !== "night") return;
 
 
   view.innerHTML = `${njNightTabs(nightTab)}${body}`;
+  if (nightTab === "log") nightLogBind(logData);
 
   njDiaryBind();
 
@@ -2283,6 +2351,7 @@ function njNightSleep(st) {
     ["唤醒档位", st.wake_mode === "both" ? "私聊和群聊都能叫" : st.wake_mode === "never" ? "叫不醒" : "只在私聊里能叫", st.wake_window ? `叫醒窗口 ${st.wake_window}` : ""],
     ["睡前道别", st.farewell_on ? "会道别" : "不说，直接睡", ""],
     ["真的会睡", st.allow_sleep === false ? "不会，只是累" : "会", ""],
+    ["补课状态超时", `${st.waking_timeout_minutes || 5} 分钟`, "超时退出补课状态，转为醒着"],
   ];
   const info = rows
     .map(
@@ -2968,6 +3037,7 @@ function njNightSettings(settings) {
     ${card("精力", "疲劳期里怎么掉、平时怎么回", [...NIGHT_ENERGY_KEYS, "min_turns_before_sleep"])}
     ${card("爬楼", "关掉之后睡着的记忆就直接可读了", NIGHT_MEMORY_KEYS)}
     ${card("梦境", "关掉就不做梦，开着 token 消耗会明显增加", NIGHT_DREAM_KEYS)}
+    ${card("醒后补课", "睡醒后做摘要、分流和回复；静默待机只准备一次想睡文案，不自动入睡", NIGHT_ROLLUP_KEYS)}
     ${configCard(close, { title: "收线静默", desc: "聊到晚安、拜拜这种话就真的停下来" })}
     ${pageActions("保存本页设置")}
   `;

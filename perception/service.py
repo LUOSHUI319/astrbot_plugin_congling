@@ -25,7 +25,7 @@ from .media import MediaInterpreter
 from .quote import QuoteExpander
 from .render import blocks_to_text, component_to_block
 
-MEDIA_TIMEOUT = 6.0
+MEDIA_TIMEOUT = 12.0
 MARKER_PREFIX = "<!--congling:perceived:"
 
 
@@ -87,6 +87,23 @@ class PerceptionService:
         msg.mentions = [b.text for b in blocks if b.kind == "at"]
         msg.is_forward_expanded = any(b.kind == "forward" and b.meta.get("expanded") for b in blocks)
 
+        # L1：探测 bot 自身 id，供「是否@我」判定。失败静默降级。
+        try:
+            self_id = ""
+            for getter in ("get_self_id", "get_bot_id"):
+                func = getattr(event, getter, None)
+                if callable(func):
+                    try:
+                        value = func()
+                        if value:
+                            self_id = str(value)
+                            break
+                    except Exception:
+                        continue
+            msg.meta["self_id"] = self_id
+        except Exception:
+            msg.meta["self_id"] = ""
+
         if enrich:
             await self._enrich_with_timeout(msg)
 
@@ -115,7 +132,7 @@ class PerceptionService:
             return ""
         try:
             rows = await self.store.fetch_all(
-                "SELECT sender_name, text FROM msg_archive "
+                "SELECT sender_id, sender_name, text FROM msg_archive "
                 "WHERE session_id=? AND ts<=? AND msg_id<>? AND text IS NOT NULL AND text<>'' "
                 "ORDER BY id DESC LIMIT ?",
                 (msg.session_id, msg.ts, msg.msg_id, int(limit)),
@@ -136,6 +153,9 @@ class PerceptionService:
             if len(text) > 600:
                 text = text[:600] + "…"
             name = str(row.get("sender_name") or "")
+            if str(row.get("sender_id") or "") == "bot":
+                # 老归档中的休眠角色名不能作为当前对话里的另一个参与者。
+                name = "你自己（bot）"
             line = f"{name}: {text}" if name else text
             if total + len(line) > budget:
                 lines.insert(0, "…（更早的略）")
@@ -287,6 +307,36 @@ class PerceptionService:
             block.meta["transcribed"] = True
 
     # ================================================================ 归档
+    def _is_at_me(self, msg: PerceivedMessage) -> int:
+        """判定这条消息是否@了 bot。返回 0/1。"""
+        self_id = str(msg.meta.get("self_id") or "")
+        if not self_id:
+            return 0
+        for mention in msg.mentions or []:
+            text = str(mention)
+            if self_id in text:
+                return 1
+        # at 块可能带 meta 里的目标 id
+        for block in msg.blocks:
+            if block.kind == "at":
+                target = str(block.meta.get("target_id") or block.meta.get("qq") or "")
+                if target and self_id in target:
+                    return 1
+        return 0
+
+    def _reply_to_id(self, msg: PerceivedMessage) -> str:
+        """引用的目标消息 id。取 quote 块的 meta，退而求其次取 forward_id。"""
+        for block in msg.blocks:
+            if block.kind == "quote":
+                rid = str(block.meta.get("id") or block.meta.get("reply_id") or "")
+                if rid:
+                    return rid
+            if block.kind == "forward":
+                rid = str(block.meta.get("forward_id") or block.meta.get("id") or "")
+                if rid:
+                    return rid
+        return ""
+
     async def archive(self, msg: PerceivedMessage) -> None:
         if not msg.text and not msg.blocks:
             return
@@ -310,8 +360,8 @@ class PerceptionService:
         try:
             await self.store.execute(
                 "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
-                "blocks_json, expanded, forward_id, umo, platform) "
-                "SELECT ?,?,?,?,?,?,?,?,?,?,?,? "
+                "blocks_json, expanded, forward_id, umo, platform, is_at_me, reply_to_msg_id, handled) "
+                "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? "
                 "WHERE NOT EXISTS(SELECT 1 FROM msg_archive WHERE msg_id = ? AND session_id = ?)",
                 (
                     dedupe_id,
@@ -333,6 +383,9 @@ class PerceptionService:
                     ),
                     str(msg.meta.get("umo") or ""),
                     str(msg.meta.get("platform") or ""),
+                    self._is_at_me(msg),
+                    self._reply_to_id(msg),
+                    0,
                     dedupe_id,
                     msg.session_id,
                 ),

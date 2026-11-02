@@ -75,6 +75,17 @@ class QzoneBridge:
                 "external": self._external_present(),
                 "note": "空间功能关着呢",
             }
+        native = await self._native_action("get_qzone_profile")
+        if native is not None:
+            return {
+                "mode": self.mode(),
+                "available": True,
+                "write_allowed": self.write_allowed(),
+                "auth": {"ok": True, "source": "onebot-native"},
+                "external": self._external_present(),
+                "note": "",
+                "last_error": "",
+            }
         try:
             auth = await self.auth()
             summary = auth.summary()
@@ -177,6 +188,64 @@ class QzoneBridge:
             result = await result
         return result
 
+    async def _native_action(self, action: str, **params: Any) -> dict[str, Any] | None:
+        """Call a Qzone action exposed directly by newer OneBot clients."""
+        bot = self._onebot_bot()
+        if bot is None:
+            return None
+        try:
+            payload = await asyncio.wait_for(
+                self._call_action(bot, action, **params),
+                timeout=COOKIE_ACTION_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.debug(f"[congling] OneBot 原生空间动作 {action} 不可用: {exc!r}")
+            if action == "send_qzone_msg":
+                # 发送超时/断线不代表未发布，不能再用 HTTP 把同一条重发。
+                raise QzoneRequestError("原生空间发布结果未知，请先查看空间确认") from exc
+            return None
+        if not isinstance(payload, dict):
+            if action == "send_qzone_msg":
+                raise QzoneRequestError("原生空间发布返回未知结果，请先查看空间确认")
+            return None
+        if payload.get("status") == "failed":
+            return None
+        retcode = payload.get("retcode")
+        if isinstance(retcode, int) and retcode != 0:
+            return None
+        data = payload.get("data") if "data" in payload else payload
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _native_msg_items(payload: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+        rows = payload.get("msglist")
+        if not isinstance(rows, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            created = int(row.get("time") or 0)
+            items.append(
+                {
+                    "fid": str(row.get("tid") or ""),
+                    "appid": 311,
+                    "uin": int(row.get("uin") or 0),
+                    "nickname": str(row.get("name") or ""),
+                    "content": str(row.get("content") or "")[:800],
+                    "created_at": created,
+                    "created_text": (
+                        time.strftime("%m-%d %H:%M", time.localtime(created)) if created else ""
+                    ),
+                    "comment_count": int(row.get("comment_num") or 0),
+                    "like_count": int(row.get("like_num") or 0),
+                    "images": list(row.get("images") or [])[:9],
+                }
+            )
+            if len(items) >= max(1, int(limit)):
+                break
+        return items
+
     async def _login_uin(self, bot: Any) -> int:
         try:
             info = await asyncio.wait_for(
@@ -240,6 +309,49 @@ class QzoneBridge:
         """
         if not self.available():
             return {"ok": False, "text": "空间功能关着呢", "items": []}
+
+        # SnowLuma and other newer clients expose Qzone directly. Prefer that
+        # path because their in-process session remains valid even when the
+        # browser-style cookie returned by get_cookies cannot access Qzone.
+        native_target = int(target_uin or 0)
+        if not native_target and event is None and target.strip() in {"", "我", "我的", "自己", "me"}:
+            native = await self._native_action(
+                "get_qzone_msg_list",
+                pos=max(0, (max(1, int(page)) - 1) * max(1, int(limit))),
+                num=max(1, int(limit)),
+            )
+            if native is not None:
+                items = self._native_msg_items(native, limit)
+                return {
+                    "ok": True,
+                    "items": items,
+                    "text": (
+                        f"你自己的空间：{self._render_feed(items)}"
+                        if items
+                        else "你自己的空间最近没动静"
+                    ),
+                    "source": "onebot",
+                }
+        elif native_target:
+            native = await self._native_action(
+                "get_qzone_msg_list",
+                target_uin=native_target,
+                pos=max(0, (max(1, int(page)) - 1) * max(1, int(limit))),
+                num=max(1, int(limit)),
+            )
+            if native is not None:
+                items = self._native_msg_items(native, limit)
+                who = target_label or str(native_target)
+                return {
+                    "ok": True,
+                    "items": items,
+                    "text": (
+                        f"{who}的空间：{self._render_feed(items)}"
+                        if items
+                        else f"{who}的空间最近没动静"
+                    ),
+                    "source": "onebot",
+                }
         try:
             auth = await self.auth()
         except Exception as exc:
@@ -330,6 +442,29 @@ class QzoneBridge:
         content = (text or "").strip()
         if not content:
             return {"ok": False, "text": "内容是空的"}
+
+        try:
+            native = await self._native_action("send_qzone_msg", content=content, ugc_right=1)
+        except QzoneRequestError as exc:
+            self._last_error = str(exc)
+            return {"ok": False, "text": str(exc)}
+        if native is not None:
+            fid = str(native.get("tid") or "")
+            if not fid:
+                return {"ok": False, "text": "原生发布未确认成功，请先查看空间"}
+            self._last_error = ""
+            from ..memory.perspective import remember_action
+            await remember_action(
+                self.plugin, "qzone", fid,
+                f"我在{time.strftime('%Y-%m-%d %H:%M')}发了QQ空间说说：{content[:300]}",
+                result={"fid": fid, "source": "onebot"},
+            )
+            return {
+                "ok": True,
+                "text": "发出去了",
+                "fid": fid,
+                "source": "onebot",
+            }
 
         try:
             return await self._publish_once(content)

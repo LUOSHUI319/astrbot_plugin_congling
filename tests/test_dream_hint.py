@@ -97,6 +97,7 @@ class DreamHintTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(DREAM, self.hint("new"))
 
     async def test_delayed_natural_wake_uses_scheduled_time(self):
+        self.night.state.state.mode = "asleep"
         self.night.state.state.sleep_at = int(NOW-12*3600)
         self.night.state.state.wake_at = int(NOW-4*3600)
         await self.night.state._do_wake(reason="natural")
@@ -216,7 +217,8 @@ class DreamHintTests(unittest.IsolatedAsyncioTestCase):
         plugin.persona = plugin.qqext = plugin.diary = plugin.capabilities = None
         plugin.night = self.night
         plugin.is_admin = lambda _: True
-        event = SimpleNamespace(unified_msg_origin="g", get_group_id=lambda: "")
+        event = SimpleNamespace(unified_msg_origin="g", get_group_id=lambda: "",
+                                get_sender_id=lambda: "u", get_message_id=lambda: "m")
         req = SimpleNamespace(system_prompt="STATIC", extra_user_content_parts=[])
         await plugin.persona_hook(event, req)
         await plugin.persona_hook(event, req)

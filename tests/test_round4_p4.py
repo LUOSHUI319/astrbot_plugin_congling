@@ -466,6 +466,9 @@ class Delivery(Fixture):
         self.assertTrue(self.night.dreamer._dreams[0].backfilled)
 
     async def test_shutdown_three_hours_still_sleeping_keeps_until_loop(self):
+        # 本用例验证睡中排产投递；避免新引入的满精力自然醒提前结束这一觉。
+        self.cfg.override("night.energy_recover_per_minute", 0)
+        self.night.state.state.energy = 10
         rows = await self.sleep()
         off_at = T0 + 600
         await self.restart(off_at + 3 * 3600)

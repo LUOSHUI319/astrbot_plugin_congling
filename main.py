@@ -95,6 +95,7 @@ class ConglingPlugin(Star):
         self.night: Any = None
         self.page_api: Any = None
         self.commands: Any = None
+        self.lm_bridge: Any = None
 
         self._started_at = int(time.time())
         self._boot_errors: list[str] = []
@@ -139,8 +140,12 @@ class ConglingPlugin(Star):
         await self._safe_boot("page_api", self._boot_page_api)
 
         self.probe.refresh(force=True)
+        try:
+            active_name = await self.persona.display_name()
+        except Exception:
+            active_name = "所选人格不可用"
         logger.info(
-            f"[congling] 已启动：人格={self.cfg.persona_name} "
+            f"[congling] 已启动：人格={active_name} "
             f"模式={self.cfg.str('compat.mode', 'auto')} "
             f"| {self.probe.summary_line()}"
         )
@@ -150,6 +155,7 @@ class ConglingPlugin(Star):
         try:
             self.spawn_background(self._housekeeping())
             self.spawn_background(self._beat_loop())
+            self.spawn_background(self._qzone_daily_loop())
             if self.night is not None:
                 self.spawn_background(self._dream_loop())
         except RuntimeError:
@@ -219,6 +225,16 @@ class ConglingPlugin(Star):
 
         self.memory = MemoryService(self)
         await self.memory.start()
+
+        # livingmemory 镜像桥：把抽取出的原子记忆镜像到 livingmemory 统一仓库。
+        # 独立于主记忆链路，livingmemory 不可用时静默降级。
+        try:
+            from .memory.bridge_livingmemory import create_bridge
+
+            self.lm_bridge = create_bridge(self)
+            await self.lm_bridge.start()
+        except Exception as exc:
+            logger.warning(f"[congling] livingmemory 镜像桥启动失败: {exc_brief(exc)}")
 
     async def _boot_night(self) -> None:
         # 长夜如梦没开、但收线静默开着时也要装起来：这时只有「说晚安就停」这一件事生效
@@ -295,7 +311,7 @@ class ConglingPlugin(Star):
                 # 主动找人已挪到 _beat_loop（60 秒一拍），这里不能再调一次
                 await self.decision.purge()
                 await self._purge_cache()
-                await self._qq_daily_tick()
+                await self._qq_hourly_tick()
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -318,12 +334,13 @@ class ConglingPlugin(Star):
         interval = max(15, min(300, self.cfg.int("night.beat_interval_seconds", 60)))
         await asyncio.sleep(20)  # 避开启动时的插件竞争
         while True:
-            for name, module in (("作息", getattr(self.night, "state", None)),
-                                 ("主动", self.proactive)):
-                if module is None:
+            for name, tick in (("作息", getattr(getattr(self.night, "state", None), "tick", None)),
+                               ("醒后待机", getattr(self.night, "idle_tick", None)),
+                               ("主动", getattr(self.proactive, "tick", None))):
+                if tick is None:
                     continue
                 try:
-                    await module.tick()
+                    await tick()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -344,6 +361,27 @@ class ConglingPlugin(Star):
                 logger.warning(f"[congling] 做梦任务出错: {exc!r}")
             await asyncio.sleep(300)
 
+    async def _qzone_daily_loop(self) -> None:
+        """Check the Qzone posting plan every minute, independent of restart time."""
+        await asyncio.sleep(15)
+        while True:
+            try:
+                await self._qzone_daily_tick()
+            except asyncio.CancelledError:
+                return
+            await asyncio.sleep(60)
+
+    async def _qzone_daily_tick(self) -> None:
+        daily = getattr(self.qqext, "qzone_daily", None)
+        if daily is None:
+            return
+        try:
+            await daily.tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"[congling] 每日说说任务出错: {exc_brief(exc)}")
+
     async def _purge_cache(self) -> None:
         cutoff = int(time.time()) - 7 * 86400
         try:
@@ -351,21 +389,11 @@ class ConglingPlugin(Star):
         except Exception as exc:
             logger.warning(f"[congling] 清理转发缓存失败: {exc_brief(exc)}")
 
-    async def _qq_daily_tick(self) -> None:
-        """每小时看一次：今天的说说到点了没有，该换脸了没有。
-
-        两件事都很轻：说说受配额和时段约束，头像受日限和头像库约束，
-        没到点就立刻返回，不占资源。
-        """
+    async def _qq_hourly_tick(self) -> None:
+        """Run QQ maintenance that only needs an hourly cadence."""
         ext = self.qqext
         if ext is None:
             return
-        try:
-            daily = getattr(ext, "qzone_daily", None)
-            if daily is not None:
-                await daily.tick()
-        except Exception as exc:
-            logger.warning(f"[congling] 每日说说任务出错: {exc_brief(exc)}")
         try:
             pool = getattr(ext, "avatar_pool", None)
             avatar = getattr(ext, "avatar", None)
@@ -623,16 +651,42 @@ class ConglingPlugin(Star):
     async def persona_hook(self, event: AstrMessageEvent, req: Any) -> None:
         if not self.enabled_for(event):
             return
+        identity_stage = True
         try:
             if self.persona is not None:
+                session_id = str(event.get_group_id() or event.get_sender_id() or "")
+                umo = str(event.unified_msg_origin)
+                identity = await self.persona.resolve(umo, getattr(req, "conversation", None))
+                event.set_extra("congling:persona_token", identity["token"])
+                if self.night is not None and not (
+                    self.night.state.state.is_asleep()
+                    and self.night._pending_allowed()
+                    and self.night._pending_matches(session_id, str(event.get_message_id() or ""))
+                ):
+                    row = {"session_id": session_id, "umo": umo,
+                           "session_kind": "group" if event.get_group_id() else "private"}
+                    await self.night.wake_flow.prepare(
+                        session_id, umo,
+                        lambda text, phase, role: self.proactive.send_stage(row, text, phase, role),
+                        exclude_msg_id=str(event.get_message_id() or ""),
+                    )
+                    receipt = await self.store.kv_get("night.wake_flow:" + session_id, {}) or {}
+                    if receipt.get("reply_persona") == identity["token"] and receipt.get("reply"):
+                        add_temp_part(req, "本次醒后已经发送补课回复，不要重复补答；继续处理当前消息。",
+                                      "<!--congling:wake_reply-->")
                 await self.persona.inject(event, req)
+            identity_stage = False
             owner_private = False
             try:
                 owner_private = bool(not event.get_group_id() and self.is_admin(event))
             except Exception:
                 pass  # 缺少可信受众信息只关闭正文，不跳过正常作息提示。
             if self.night is not None and not has_temp_part(req, "<!--congling:night-->"):
-                hint = self.night.prompt_hint(session_key=self.session_key(event), include_private=owner_private)
+                hint = self.night.prompt_hint(
+                    session_key=str(event.unified_msg_origin), include_private=owner_private,
+                    session_id=str(event.get_group_id() or event.get_sender_id() or ""),
+                    msg_id=str(getattr(event, "get_message_id", lambda: "")() or ""),
+                )
                 if hint:
                     add_temp_part(req, hint, "<!--congling:night-->")
             if self.qqext is not None:
@@ -650,6 +704,10 @@ class ConglingPlugin(Star):
             if self.capabilities is not None:
                 self.capabilities.attach_tools(req)
         except Exception as exc:
+            if identity_stage:
+                event.set_extra("congling:wake_blocked", True)
+                event.stop_event()
+                logger.warning(f"[congling] 醒后流程或人格解析暂停: {exc!r}")
             logger.debug(f"[congling] 人格注入失败: {exc!r}")
 
     @filter.on_llm_response(priority=PRIO_RESPONSE)
@@ -684,6 +742,20 @@ class ConglingPlugin(Star):
             if result is None or not getattr(result, "chain", None):
                 await _note("no_chain")
                 return
+            # 角色切换/醒后阶段失败时撤销生成中的旧回复。
+            token = event.get_extra("congling:persona_token")
+            blocked = bool(event.get_extra("congling:wake_blocked"))
+            if token:
+                try:
+                    blocked = blocked or token != (await self.persona.resolve(
+                        str(event.unified_msg_origin)
+                    ))["token"]
+                except Exception:
+                    blocked = True  # 生成途中所选人格被删除，不能把旧角色文本放行。
+            if blocked:
+                result.chain.clear()
+                await _note("wake_or_persona_changed")
+                return
             # 流式输出不做分句：分句会把流式体验撕碎
             try:
                 from astrbot.core.message.message_event_result import ResultContentType
@@ -701,18 +773,18 @@ class ConglingPlugin(Star):
                     await _note("not_llm")
                     self.guard.clean_chain(result.chain)
                     return
-            # 爬楼：醒来后的第一句，先把「等我翻翻」发出去，再走正式回复。
-            # 必须在发送前做——原来放在 after_message_sent，句子生成完就丢了。
-            if self.night is not None:
+            # 醒后流程已在生成主回复前按顺序发送，不能在此倒序插入或每轮重跑。
+            # 想继续睡：60s 并入窗口内的待发文案，并进主回复。
+            if self.night is not None and getattr(self.night, "wake_idle", None) is not None:
                 try:
                     session_id = str(event.get_group_id() or event.get_sender_id() or "")
-                    line = await self.night.take_crawl_line(session_id)
-                    if line:
+                    sleepy = self.night.take_sleepy_line(session_id, token or "")
+                    if sleepy:
                         from astrbot.api.message_components import Plain
 
-                        result.chain.insert(0, Plain(text=line))
+                        result.chain.insert(0, Plain(text=sleepy))
                 except Exception as exc:
-                    logger.debug(f"[congling] 爬楼插入失败: {exc!r}")
+                    logger.debug(f"[congling] 想继续睡并入失败: {exc!r}")
             # 延时回复：只有 rhythm 让位（装了外部节奏/延时插件）时才独立接管发送；
             # rhythm 在位时延时是通过 build_plan 的 extra_hold 实现的，这里什么都不做。
             try:
@@ -752,7 +824,8 @@ class ConglingPlugin(Star):
                     session_id = str(event.get_group_id() or event.get_sender_id() or "")
                 except Exception:
                     session_id = ""
-                await self.night.after_reply(None, session_id=session_id)
+                await self.night.after_reply(None, session_id=session_id,
+                                            msg_id=str(event.get_message_id() or ""))
             except Exception as exc:
                 logger.debug(f"[congling] 长夜收尾失败: {exc!r}")
 

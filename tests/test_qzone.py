@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+from astrbot_plugin_congling.qqext.qzone_daily import QzoneDaily
 from astrbot_plugin_congling.qqext.qzone_client import (
     MAX_POST_CHARS,
     QzoneAuth,
@@ -22,6 +25,7 @@ from astrbot_plugin_congling.qqext.qzone_client import (
     parse_cookie_text,
     strip_html,
 )
+from astrbot_plugin_congling.qqext.qzone import QzoneBridge
 
 
 def _reference_hash33(key: str, phash: int = 5381) -> int:
@@ -167,6 +171,62 @@ class TestFeedParsing(unittest.TestCase):
         items = QzoneClient._parse_feed(payload, 5)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["content"], "有用的")
+
+    def test_parse_native_qzone_messages(self):
+        payload = {
+            "total": 1,
+            "msglist": [
+                {
+                    "tid": "native-1",
+                    "content": "原生空间接口",
+                    "time": 1700000000,
+                    "comment_num": 2,
+                    "images": ["https://example.com/a.jpg"],
+                }
+            ],
+        }
+        items = QzoneBridge._native_msg_items(payload, 5)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["fid"], "native-1")
+        self.assertEqual(items[0]["content"], "原生空间接口")
+        self.assertEqual(items[0]["comment_count"], 2)
+
+
+class TestDailySchedule(unittest.IsolatedAsyncioTestCase):
+    async def test_missed_slots_are_caught_up_one_at_a_time(self):
+        class Config:
+            @staticmethod
+            def bool(_key, default=False):
+                return default
+
+            @staticmethod
+            def int(_key, default=0):
+                return default
+
+        class Store:
+            async def kv_get(self, _key, default=None):
+                return {
+                    "day": "2026-10-30",
+                    "target": 3,
+                    "hours": [9, 13, 17],
+                    "posted": [{"text": "first", "at": 1}],
+                }
+
+        bridge = SimpleNamespace(available=lambda: True)
+        plugin = SimpleNamespace(
+            cfg=Config(),
+            store=Store(),
+            qqext=SimpleNamespace(qzone=bridge),
+        )
+        daily = QzoneDaily(plugin)
+        daily.post_now = AsyncMock(return_value={"ok": True})
+        fake_localtime = SimpleNamespace(tm_hour=21)
+
+        with patch("astrbot_plugin_congling.qqext.qzone_daily.time.localtime", return_value=fake_localtime):
+            result = await daily.tick()
+
+        self.assertTrue(result["ok"])
+        daily.post_now.assert_awaited_once_with(reason="auto")
 
 
 class TestErrorHandling(unittest.TestCase):

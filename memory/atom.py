@@ -339,6 +339,7 @@ class AtomStore:
         offset: int = 0,
         include_unread: bool = False,
     ) -> list[dict[str, Any]]:
+        # 保留迁移新增的身份字段及旧库兼容，返回前移除二进制向量。
         sql = "SELECT * FROM mem_atom WHERE 1=1"
         params: list[Any] = []
         # 「未曾爬楼」的记忆不算进记忆库：她还没看过，拿不出来用，

@@ -17,6 +17,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -89,6 +91,9 @@ class FakeModels:
         self.calls += 1
         return self.text
 
+    async def character_chat(self, prompt, system="", **kwargs):
+        return await self.chat(prompt, system)
+
 
 class FakeAffinity:
     def __init__(self, stage: int = 4) -> None:
@@ -113,6 +118,8 @@ class FakeState:
 class FakeNight:
     def __init__(self, state: FakeState) -> None:
         self.state = type("S", (), {"state": state})()
+        self.wake_flow = SimpleNamespace(
+            prepare=AsyncMock(), epoch=AsyncMock(return_value=(0, 0)), check=AsyncMock())
 
 
 class FakeComposer:
@@ -173,6 +180,10 @@ class FakePlugin:
         self.composer = FakeComposer()
         self.context = FakeContext(send_fail)
         self.context.plugin = self
+        self.persona = SimpleNamespace(resolve=AsyncMock(return_value={
+            "mode": "astrbot", "id": "demo", "name": "演示人格", "token": "demo",
+            "prompt": "演示人设", "dialogs": [],
+        }))
 
 
 def run(coro):

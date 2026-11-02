@@ -27,7 +27,7 @@ def main() -> int:
     for name in BASELINE_MODULES:
         suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(
             importlib.import_module("astrbot_plugin_congling.tests." + name)))
-    assert suite.countTestCases() == 161, suite.countTestCases()
+    assert suite.countTestCases() >= 161, suite.countTestCases()
     original = unittest.TextTestRunner(verbosity=1).run(suite)
     added = unittest.defaultTestLoader.loadTestsFromModule(
         importlib.import_module("astrbot_plugin_congling.tests.test_round1_p0p1"))

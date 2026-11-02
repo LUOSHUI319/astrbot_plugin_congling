@@ -48,14 +48,19 @@ class Decider:
     # ================================================================ 判断
     async def decide(self, event: Any, msg: PerceivedMessage) -> ReplyDecision:
         signals: dict[str, float] = {}
+        try:
+            role = await self.plugin.persona.resolve(str(getattr(event, "unified_msg_origin", "") or ""))
+            name = "" if role["mode"] == "none" else role["name"]
+        except Exception:
+            name = ""
         is_group = msg.session_kind == "group"
 
         if not is_group:
             signals["私聊"] = 100.0
         else:
-            if self._is_addressed(event, msg):
+            if self._is_addressed(event, msg, name):
                 signals["被点名"] = 100.0
-            elif self._contains_name(msg.text):
+            elif self._contains_name(msg.text, name):
                 signals["叫了名字"] = 60.0
             if self._is_question(msg.text):
                 signals["问句"] = 25.0
@@ -70,11 +75,11 @@ class Decider:
 
         # 刚回过且没人接话：别自嗨
         last_reply = self._last_reply.get(msg.session_id, 0.0)
-        if last_reply and time.time() - last_reply < 20 and not self._is_addressed(event, msg):
+        if last_reply and time.time() - last_reply < 20 and not self._is_addressed(event, msg, name):
             signals["刚回过"] = -40.0
 
         # 静默时段（被点名时不惩罚）
-        if not self._in_active_hours() and not self._is_addressed(event, msg):
+        if not self._in_active_hours() and not self._is_addressed(event, msg, name):
             signals["静默时段"] = -999.0
 
         threshold = float(self.config.int("humanize.reply_threshold", 35))
@@ -102,12 +107,12 @@ class Decider:
         )
 
     # ---------------------------------------------------------------- 细项
-    def _is_addressed(self, event: Any, msg: PerceivedMessage) -> bool:
+    def _is_addressed(self, event: Any, msg: PerceivedMessage, name: str = "") -> bool:
         self_id = self._resolve_self_id(event)
         for mention in msg.mentions:
             if self_id and self_id in mention:
                 return True
-            if "@" in mention and self.plugin.cfg.persona_name in mention:
+            if name and "@" in mention and name in mention:
                 return True
         if msg.quoted and self_id and self_id in (msg.quoted or ""):
             return True
@@ -135,11 +140,8 @@ class Decider:
                 return self._self_id
         return ""
 
-    def _contains_name(self, text: str) -> bool:
-        book = getattr(self.plugin, "persona", None)
-        name = book.get().name if book is not None else self.config.persona_name
-        hints = set(NAME_HINTS) | {name}
-        return any(hint and hint in (text or "") for hint in hints)
+    def _contains_name(self, text: str, name: str = "") -> bool:
+        return bool(name and name in (text or ""))
 
     @staticmethod
     def _is_question(text: str) -> bool:
