@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html data-layout="desktop" lang="zh-CN" data-ui="night">
+<html lang="zh-CN" data-ui="night">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -11,7 +11,6 @@
   <link rel="stylesheet" href="./night-light.1031.css" id="cg-skin-day" />
   <link rel="stylesheet" href="./skin-switch.1031.css" />
   <link rel="stylesheet" href="./diarybook.css" />
-  <link rel="stylesheet" href="./responsive.css" />
   <script>
     /* 首屏定皮肤：必须在 CSS 之后、body 之前跑，否则会先闪一下深色 */
     (function () {
@@ -27,15 +26,28 @@
     })();
   </script>
   <script>
-    /* 默认桌面视图：整页按比例缩放，媒体查询全部挂 html[data-layout="mobile"]，
-       所以这里是 desktop 时不会触发手机布局。切换按钮在侧栏底部。 */
+    /* 桌面面板只管桌面，手机端交给 mobile.html。这里只做「把手机送过去」这一件事：
+       - ?to=mobile  强制进手机版（手机版那边点「桌面面板」会带 ?desk=1 回来）
+       - ?desk=1     强制留在桌面版，不再往回踢（手机版里「打开完整桌面面板」用的就是它）
+       - 手机 UA / 手指操作的窄屏 → 自动进手机版
+       注：AstrBot 给插件页发的响应带 Referrer-Policy: no-referrer，document.referrer 拿不到
+       值，所以两边来回弹不靠 referrer 判断，靠 desk=1 这个显式开关。 */
     (function () {
       try {
-        var m = localStorage.getItem("congling.layout") || "desktop";
-        document.documentElement.dataset.layout = m;
-      } catch (e) {
-        document.documentElement.dataset.layout = "desktop";
-      }
+        var q = new URLSearchParams(location.search);
+        if (q.get("desk") === "1") return;
+        var toMobile = q.get("to") === "mobile";
+        if (!toMobile) {
+          var ua = navigator.userAgent || "";
+          var phone = /Android|iPhone|iPad|iPod|HarmonyOS|Mobile|Windows Phone/i.test(ua);
+          var coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+          var narrow = (window.innerWidth || document.documentElement.clientWidth || 0) <= 900;
+          if (!phone && !(coarse && narrow)) return;
+        }
+        var out = "./mobile.html";
+        if (q.get("skin") === "day" || q.get("skin") === "night") out += "?skin=" + q.get("skin");
+        location.replace(out);
+      } catch (e) {}
     })();
   </script>
 </head>
@@ -50,7 +62,7 @@
           <span class="brand-cn">从绫开始</span>
         </span>
         <span class="brand-en">congling</span>
-        <span class="brand-ver" title="当前版本">1.1.0 · 测试版</span>
+        <span class="brand-ver" title="当前版本">1.1.1 · 测试版</span>
       </div>
       <nav id="nav">
         <button class="nav-item is-active" data-view="overview" data-short="概览">概览</button>
@@ -93,12 +105,37 @@
     </main>
   </div>
   <!-- night.js 要先于 app.js 执行：app.js 的 render 会在这里找 nj* 函数 -->
-  <button class="layout-toggle" id="layout-toggle" type="button" title="切换桌面 / 手机视图">
-    <span class="layout-toggle-icon">▭</span><span class="layout-toggle-text">手机视图</span>
-  </button>
-  <script src="./layout-toggle.js" defer></script>
   <script src="./night.1029c.js" defer></script>
   <script src="./app.1029c.js" defer></script>
   <script src="./skin-switch.1031.js" defer></script>
+
+  <!-- 手机端专用界面（mobile.html）的唯一入口。
+       桌面面板在手机上字小、按钮难点；手机进来一般会自动跳过去，这里是兜底入口。 -->
+  <style>
+    .mobile-entry {
+      position: fixed;
+      right: 12px;
+      top: 12px;
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      gap: 6px;
+      height: 34px;
+      padding: 0 13px;
+      border-radius: 999px;
+      background: rgba(155, 196, 177, 0.16);
+      border: 1px solid rgba(155, 196, 177, 0.42);
+      color: #9bc4b1;
+      font: 13px/1 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+      text-decoration: none;
+      -webkit-backdrop-filter: blur(10px);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 24px -14px rgba(0, 0, 0, 0.8);
+    }
+    @media (max-width: 860px) {
+      .mobile-entry { display: inline-flex; }
+    }
+  </style>
+  <a class="mobile-entry" href="./mobile.html" title="打开手机版界面">手机版 ›</a>
 </body>
 </html>

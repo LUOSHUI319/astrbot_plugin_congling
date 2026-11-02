@@ -33,7 +33,7 @@ from .core.store import Store
 from .humanize.delay import ReplyDelayer
 from .core.exc import exc_brief
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）

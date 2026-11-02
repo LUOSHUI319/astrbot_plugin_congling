@@ -42,6 +42,8 @@ TEXT_PROMPT = """现在没人跟你说话，你想主动找对方说一句。
 2. 不许客套，不许「在吗」「有什么可以帮你」「需要我做什么」
 3. 可以点具体的事（只能是上面材料里有的），不许编造
 4. 只输出这句话本身，不要引号，不要解释
+5. 材料里写着「我」的是你自己说过的话，写着「对方」的就是正在跟你说话的那个人，跟他说话一律用「你」
+6. 绝对不许拿任何人的昵称当第三人称主语去转述，像「望山一早发了好几条」「某某说…」这种一律不行，也不要把自己写成第三人称
 """
 
 
@@ -340,15 +342,24 @@ class Proactive:
         materials: list[str] = []
         try:
             recent = await self.store.fetch_all(
-                "SELECT sender_name, text, ts FROM msg_archive WHERE session_id=? "
+                "SELECT sender_id, sender_name, text, ts FROM msg_archive WHERE session_id=? "
                 "ORDER BY ts DESC LIMIT 6",
                 (session_id,),
             )
+            is_group = str(row.get("session_kind") or "") == "group"
             for item in reversed(recent):
-                who = str(item.get("sender_name") or "对方")
                 what = str(item.get("text") or "").strip()
-                if what:
-                    materials.append(f"- {who}：{what[:120]}")
+                if not what:
+                    continue
+                # 素材里的主语必须分成「我」和「对方」两种：直接写昵称会让模型
+                # 把昵称当第三人称转述，写出「望山一早发了好几条…」「绫说…」这种怪句子
+                if str(item.get("sender_id") or "") == "bot":
+                    who = "我"
+                elif is_group:
+                    who = str(item.get("sender_name") or "对方")
+                else:
+                    who = "对方"
+                materials.append(f"- {who}：{what[:120]}")
         except Exception as exc:
             logger.warning(f"[congling] 读取主动聊天素材失败: {exc_brief(exc)}")
         try:
