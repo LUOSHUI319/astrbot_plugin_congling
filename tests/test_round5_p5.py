@@ -527,9 +527,9 @@ class Persona(Fixture):
             self.assertEqual(MEMORY_BACKUP_DIR(), Path("plugin_data/congling/backups"))
         self.assertEqual((ROOT / "pages/fromling/night.js").read_bytes(),
                          (ROOT / "pages/fromling/night.1029c.js").read_bytes())
-        # 版本号从 1.0.1 提到 1.1.0，这里的哈希随之更新；改动元数据时同步改它
+        # 与上游 1.1.1 元数据一致；适配服务器修复时不另改版本号。
         self.assertEqual(hashlib.sha256((ROOT / "metadata.yaml").read_bytes()).hexdigest(),
-                         "79dbdd355b377cb6359d36d19594a6f3f17471c283f67b7df7ad477fb7b280a3")
+                         "bf7bdf5cb340ac41e0ebc79ee3ce4208e7c6c4042770dc640ba407ba3ce0bef4")
 
 
 MEMORY_BACKUP_DIR = paths.memory_backup_dir

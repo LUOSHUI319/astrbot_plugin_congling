@@ -47,7 +47,10 @@ def main_hook(name):
     namespace = {"Any": object, "AstrMessageEvent": object, "time": time,
                  "logger": sys.modules["astrbot.api"].logger, "add_temp_part": add_temp_part,
                  "has_temp_part": has_temp_part}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), "actual_main_hook", "exec"), namespace)
+    # 钩子依赖真实的消息 ID 兼容函数，提取时一并加载，避免替身遗漏依赖。
+    helpers = [node for node in tree.body
+               if isinstance(node, ast.FunctionDef) and node.name == "_congling_msg_id"]
+    exec(compile(ast.Module(body=[*helpers, method], type_ignores=[]), "actual_main_hook", "exec"), namespace)
     return namespace[name]
 
 

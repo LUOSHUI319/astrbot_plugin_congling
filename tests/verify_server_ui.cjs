@@ -57,7 +57,7 @@ window.AstrBotPluginPage = {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
     const errors = [];
     page.on("pageerror", e => errors.push(e.message));
-    await page.route("**/*", async route => {
+    const serveFixture = async route => {
       const url = new URL(route.request().url());
       if (url.pathname === "/api/plugin/page/bridge-sdk.js")
         return route.fulfill({ contentType: "application/javascript", body: bridge });
@@ -68,7 +68,8 @@ window.AstrBotPluginPage = {
         contentType: ({ ".html": "text/html", ".js": "application/javascript", ".css": "text/css" })[path.extname(file)]
           || "application/octet-stream", body: fs.readFileSync(file),
       });
-    });
+    };
+    await page.route("**/*", serveFixture);
     await page.goto("http://congling-ui.test/");
     await page.locator('[data-view="persona"]').click();
     await page.locator("#p-astr").waitFor();
@@ -118,16 +119,42 @@ window.AstrBotPluginPage = {
     await page.locator("#night-log-auto").click();
     assert.equal(await page.locator("#night-log-auto").getAttribute("aria-pressed"), "false");
 
-    await page.setViewportSize({ width: 390, height: 844 });
-    const toggle = page.locator("#layout-toggle");
-    if (await toggle.count()) await toggle.click();
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2));
-    await page.locator('[data-view="persona"]').click();
-    await page.locator("#p-astr").waitFor();
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 2));
+    // 1.1.1 手机端为独立页面，验证自动跳转、人格设置与返回桌面防循环。
+    const mobile = await browser.newPage({
+      viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile/15E148",
+    });
+    mobile.on("pageerror", e => errors.push(e.message));
+    await mobile.route("**/*", serveFixture);
+    await mobile.goto("http://congling-ui.test/");
+    await mobile.waitForURL("**/mobile.html");
+    await mobile.locator("#m-tabbar").waitFor();
+    assert.equal(await mobile.locator("#m-tabbar [data-tab]").count(), 5);
+    await mobile.locator('#m-tabbar [data-tab="more"]').click();
+    await mobile.locator('.m-nav-row[data-act="open"][data-page="persona"]').click();
+    await mobile.locator("#m-persona-identity").waitFor();
+    assert.match(await mobile.locator("#m-main").innerText(), /当前生效：大小姐/);
+    await mobile.getByRole("button", { name: "选择人格来源", exact: true }).click();
+    const mode = mobile.locator('[data-path="persona.mode"]');
+    await mode.waitFor();
+    assert.equal(await mode.locator("option").count(), 3);
+    assert.equal(await mobile.locator('[data-path="persona.astrbot_persona_id"]').count(), 1);
+    assert.equal(await mobile.locator('[data-path="persona.persona_id"]').count(), 0);
+    await mode.selectOption("none");
+    await mobile.locator('#m-savedock [data-act="settings-save"]').click();
+    await mobile.waitForFunction(() => window.__posts.length === 1);
+    assert.deepEqual(await mobile.evaluate(() => window.__posts[0]), {
+      p: "page/settings/save", data: { changes: { "persona.mode": "none" } },
+    });
+    await mobile.goto("http://congling-ui.test/index.html?desk=1");
+    await mobile.locator("#nav").waitFor();
+    assert.equal(new URL(mobile.url()).pathname, "/index.html");
+    assert.equal(new URL(mobile.url()).searchParams.get("desk"), "1");
+    assert.equal(await mobile.locator("#layout-toggle").count(), 0);
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, immediate_saves: 5, help: true, logs: true,
-      mobile: true, console_errors: 0, live_requests: 0 }));
+      mobile: true, mobile_persona_settings: true, desktop_return: true,
+      console_errors: 0, live_requests: 0 }));
   } finally {
     await browser.close();
   }

@@ -616,10 +616,10 @@ class SourceGuards(unittest.TestCase):
                 if path.name != "persona.py" and isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
                     self.assertNotEqual(node.attr, "system_prompt", str(path))
 
-    def test_metadata_and_plugin_version_unchanged(self):
+    def test_metadata_and_plugin_version_match_upstream_111(self):
         self.assertEqual(hashlib.sha256((ROOT / "metadata.yaml").read_bytes()).hexdigest(),
-                         "79dbdd355b377cb6359d36d19594a6f3f17471c283f67b7df7ad477fb7b280a3")
-        self.assertEqual(importlib.import_module("astrbot_plugin_congling.main").PLUGIN_VERSION, "1.1.0")
+                         "bf7bdf5cb340ac41e0ebc79ee3ce4208e7c6c4042770dc640ba407ba3ce0bef4")
+        self.assertEqual(importlib.import_module("astrbot_plugin_congling.main").PLUGIN_VERSION, "1.1.1")
 
     def test_all_19_page_assets_present(self):
         """P6 之外唯一允许改前端的一轮（P5 加了删除记忆按钮），

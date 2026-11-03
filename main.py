@@ -33,7 +33,7 @@ from .core.store import Store
 from .humanize.delay import ReplyDelayer
 from .core.exc import exc_brief
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -661,14 +661,14 @@ class ConglingPlugin(Star):
                 if self.night is not None and not (
                     self.night.state.state.is_asleep()
                     and self.night._pending_allowed()
-                    and self.night._pending_matches(session_id, str(event.get_message_id() or ""))
+                    and self.night._pending_matches(session_id, _congling_msg_id(event))
                 ):
                     row = {"session_id": session_id, "umo": umo,
                            "session_kind": "group" if event.get_group_id() else "private"}
                     await self.night.wake_flow.prepare(
                         session_id, umo,
                         lambda text, phase, role: self.proactive.send_stage(row, text, phase, role),
-                        exclude_msg_id=str(event.get_message_id() or ""),
+                        exclude_msg_id=_congling_msg_id(event),
                     )
                     receipt = await self.store.kv_get("night.wake_flow:" + session_id, {}) or {}
                     if receipt.get("reply_persona") == identity["token"] and receipt.get("reply"):
@@ -685,7 +685,7 @@ class ConglingPlugin(Star):
                 hint = self.night.prompt_hint(
                     session_key=str(event.unified_msg_origin), include_private=owner_private,
                     session_id=str(event.get_group_id() or event.get_sender_id() or ""),
-                    msg_id=str(getattr(event, "get_message_id", lambda: "")() or ""),
+                    msg_id=_congling_msg_id(event),
                 )
                 if hint:
                     add_temp_part(req, hint, "<!--congling:night-->")
@@ -825,7 +825,7 @@ class ConglingPlugin(Star):
                 except Exception:
                     session_id = ""
                 await self.night.after_reply(None, session_id=session_id,
-                                            msg_id=str(event.get_message_id() or ""))
+                                            msg_id=_congling_msg_id(event))
             except Exception as exc:
                 logger.debug(f"[congling] 长夜收尾失败: {exc!r}")
 
@@ -879,3 +879,20 @@ class ConglingPlugin(Star):
             "recall": memory["recall"],
             "subject": memory["subject"],
         }
+
+
+def _congling_msg_id(event) -> str:
+    """AstrBot 4.x 的 AiocqhttpMessageEvent 没有 get_message_id 方法。
+
+    优先调用同名方法（兼容后续版本），否则退回 message_obj.message_id。
+    """
+    try:
+        getter = getattr(event, "get_message_id", None)
+        if callable(getter):
+            return str(getter() or "")
+    except Exception:
+        pass
+    obj = getattr(event, "message_obj", None)
+    if obj is None:
+        return ""
+    return str(getattr(obj, "message_id", "") or "")
