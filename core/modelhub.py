@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import copy
+import contextvars
+import functools
 import time
 from typing import Any
 
@@ -32,6 +34,40 @@ USAGE = {
 
 # mmx 工具能顶替的能力
 MMX_CAPS = {"vision", "stt", "tts"}
+
+
+def _max_tokens_scope(provider: Any) -> Any:
+    """原生兼容提供商丢弃 kwargs 时，在 SDK 边界落实本次输出限制。"""
+    resource = getattr(getattr(getattr(provider, "client", None), "chat", None), "completions", None)
+    original = getattr(resource, "create", None)
+    if not callable(original):
+        return None  # API 路由等提供商直接处理 text_chat 的 max_tokens。
+    existing = getattr(original, "_congling_max_tokens_scope", None)
+    if existing is not None:
+        return existing
+    scope = contextvars.ContextVar("congling_max_tokens", default=None)
+
+    @functools.wraps(original)
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        limit = scope.get()
+        if limit is not None:
+            extra_body = dict(kwargs.get("extra_body") or {})
+            field = "max_completion_tokens" if (
+                "max_completion_tokens" in kwargs or "max_completion_tokens" in extra_body
+            ) else "max_tokens"
+            # 配置中的同名字段不能覆盖本次限制；只修改请求副本，不改提供商配置。
+            for name in ("max_tokens", "max_completion_tokens"):
+                kwargs.pop(name, None)
+                extra_body.pop(name, None)
+            kwargs[field] = limit
+            if "extra_body" in kwargs:
+                kwargs["extra_body"] = extra_body
+        return await original(*args, **kwargs)
+
+    # 保存 scope 而非 ModelHub 实例，热重载可复用；无本次限制时原样透传。
+    create._congling_max_tokens_scope = scope
+    resource.create = create
+    return scope
 
 
 class ModelHub:
@@ -108,12 +144,24 @@ class ModelHub:
         provider = self.provider_of("chat")
         if provider is None:
             return ""
+        scope = None
+        token = None
         try:
-            resp = await provider.text_chat(prompt=prompt, contexts=[], system_prompt=system or None)
+            if type(max_tokens) is not int or max_tokens <= 0:
+                raise ValueError("max_tokens must be a positive integer")
+            scope = _max_tokens_scope(provider)
+            if scope is not None:
+                token = scope.set(max_tokens)
+            resp = await provider.text_chat(
+                prompt=prompt, contexts=[], system_prompt=system or None, max_tokens=max_tokens,
+            )
             return str(getattr(resp, "completion_text", "") or "").strip()
         except Exception as exc:
             logger.debug(f"[congling] 对话调用失败: {exc!r}")
             return ""
+        finally:
+            if scope is not None and token is not None:
+                scope.reset(token)
 
     # ================================================================ 图片
     async def character_chat(self, prompt: str, system: str = "", *, umo: str = "",
