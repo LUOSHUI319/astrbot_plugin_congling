@@ -657,7 +657,13 @@ class Store:
                 except BaseException:
                     conn.rollback()
                     raise
-        return await asyncio.to_thread(_run)
+        task = asyncio.create_task(asyncio.to_thread(_run))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # 重载取消请求时，仍等原子提交/回滚完成，不能留下半批已读。
+            await asyncio.shield(task)
+            raise
 
     async def commit(self) -> None:
         def _run() -> None:

@@ -3,6 +3,7 @@ import asyncio
 import ast
 import importlib
 import json
+import re
 import sys
 import tempfile
 import time
@@ -94,8 +95,9 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             if "只输出一个 JSON" in prompt:
                 return SimpleNamespace(completion_text=json.dumps({
                     "summary": "有人询问视频",
-                    "items": [{"msg_id": "sleep-question", "who": "AKI", "what": "视频什么时候做？",
-                               "targets_me": True, "answered": False, "priority": 100}],
+                    "items": [{"msg_id": msg_id, "who": "AKI", "what": "视频什么时候做？",
+                               "targets_me": True, "answered": False, "priority": 100}
+                              for msg_id in re.findall(r"\[msg_id=([^\]]+)\]", prompt)],
                 }))
             return SimpleNamespace(completion_text="补课答复" if "合并成一段" in prompt else "主动正文")
         self.provider = SimpleNamespace(text_chat=text_chat)
@@ -113,6 +115,9 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         now = int(time.time())
         self.since, self.wake = now - 900, now - 400
         self.night.state.state.last_wake_at = self.wake
+        self.night.state.state.mode = "waking"
+        self.night.state.state.enter_waking_at = self.wake
+        self.night.state.state.pending_crawl = ["s"]
         self.night.state.state.last_wake_reason = "message"
         self.night.state.state.energy = 40
         await self.store.kv_set("night.last_sleep_window",
@@ -146,7 +151,9 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.night.state.state.last_wake_at, self.wake)
         result = await self.plugin.proactive.send_one(self.row)
         self.assertTrue(result["ok"])
-        self.assertEqual(self.sent, ["爬楼语", "补课答复", "主动正文"])
+        # 超时转为 awake 后仍读完整历史，但不再发醒后提示或补课答复。
+        self.assertEqual(self.sent, ["主动正文"])
+        self.assertEqual(await self.night.crawler.pending("s"), [])
         self.assertEqual(result["persona"], "大小姐")
         rows = await self.store.fetch_all("SELECT sender_name FROM msg_archive WHERE sender_id='bot'")
         self.assertEqual({r["sender_name"] for r in rows}, {"大小姐"})
@@ -178,6 +185,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("你是大小姐", request.system_prompt)
         self.assertFalse(event.extras.get("stopped"))
         self.assertIn("已经发送", str(request.extra_user_content_parts))
+        self.assertIn("有人询问视频", str(request.extra_user_content_parts))
+        self.assertGreaterEqual(event.get_extra("congling:wake_prepare_seconds"), 0)
         await main_hook("persona_hook")(self.plugin, event, request)
         self.assertEqual(len(self.sent), 2)
 

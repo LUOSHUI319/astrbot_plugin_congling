@@ -31,7 +31,7 @@ CREATE TABLE msg_archive(
   msg_id TEXT, session_id TEXT NOT NULL, session_kind TEXT DEFAULT 'private',
   sender_id TEXT, sender_name TEXT, ts INTEGER NOT NULL, text TEXT,
   blocks_json TEXT, expanded INTEGER DEFAULT 0, forward_id TEXT,
-  umo TEXT DEFAULT '', platform TEXT DEFAULT ''
+  umo TEXT DEFAULT '', platform TEXT DEFAULT '', handled INTEGER DEFAULT 0
 );
 CREATE TABLE proactive_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, persona_id TEXT DEFAULT 'ling',
@@ -282,6 +282,8 @@ class ProactiveTest(unittest.TestCase):
             "SELECT COUNT(*) FROM msg_archive WHERE sender_id='bot'"
         ).fetchone()[0]
         self.assertEqual(archived, 1, "主动消息必须进归档")
+        self.assertEqual(plugin.store.conn.execute(
+            "SELECT handled FROM msg_archive WHERE sender_id='bot'").fetchone()[0], 1)
         self.assertTrue(plugin.memory.affinity.added)
 
     def test_empty_reply_sends_nothing(self) -> None:

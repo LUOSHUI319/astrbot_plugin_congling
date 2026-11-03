@@ -550,7 +550,7 @@ class Proactive:
             platform = umo.split(":", 1)[0] if ":" in umo else ""
             await self.store.execute(
                 "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
-                "blocks_json, expanded, umo, platform) VALUES(?,?,?,?,?,?,?,?,0,?,?)",
+                "blocks_json, expanded, umo, platform, handled) VALUES(?,?,?,?,?,?,?,?,0,?,?,1)",
                 (
                     f"{phase}-{time.time_ns()}",
                     session_id,

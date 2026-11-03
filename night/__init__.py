@@ -407,14 +407,20 @@ class NightModule:
 
     async def crawl(self, session_id: str) -> str:
         """执行爬楼，返回要说的话（面板/指令用；回复链路走 take_crawl_line）。"""
+        rows = await self.crawler.pending(session_id)
+        if not rows:
+            return "之前的消息已经读过了"
         line = await self.crawler.crawl_line()
-        removed = await self.crawler.mark_read(session_id)
+        # 手动入口也先完整读完冻结批次，失败时不撤销未读。
+        chunks = await self.rollup.rollup_session(
+            session_id, commit=False, rows=rows, read_only=True)
+        removed = await self.crawler.mark_read(session_id, strict=True, rows=rows)
         await self.crawler.mark_crawled(session_id)
         await self.state.crawl_done(session_id)
         self._waking_started.pop(session_id, None)
         if removed:
             logger.info(f"[congling] 爬楼完成：撤销 {removed} 条未读（{session_id}）")
-        return line
+        return line + "\n" + "\n".join(chunk.summary for chunk in chunks if chunk.summary)
 
     # ================================================================ 做梦
     async def dream_tick(self) -> None:

@@ -139,6 +139,10 @@ class Adaptation(unittest.IsolatedAsyncioTestCase):
         night = self.p.night = NightModule(self.p)
         now = 1793500000
         night.state.state.last_wake_at = now
+        night.crawler.pending = AsyncMock(return_value=[
+            {"id": 1, "msg_id": "history", "session_id": "A", "ts": now - 5, "text": "历史"}])
+        night.rollup.rollup_session = AsyncMock(return_value=[
+            SimpleNamespace(chunk_end_id=1, summary="背景")])
         await self.store.kv_set("night.last_sleep_window",
                                 [{"sleep_at": now - 10, "wake_at": now, "kind": "night"}])
         night.crawler.mark_read = AsyncMock()

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import time
 from typing import Any
@@ -141,14 +142,34 @@ class Crawler:
         ])
 
     # ------------------------------------------------------------ 未读统计
+    async def pending(self, session_id: str, *, exclude_msg_id: str = "",
+                      until_id: int | None = None) -> list[dict[str, Any]]:
+        """冻结本次未读范围；不按最近一觉截断，也不吃掉读取期间的新消息。"""
+        if not session_id:
+            return []
+        if until_id is None:
+            current = await self.store.scalar(
+                "SELECT MIN(id) FROM msg_archive WHERE session_id=? AND msg_id=?",
+                (session_id, exclude_msg_id),
+            ) if exclude_msg_id else None
+            until_id = int(current) - 1 if current else int(await self.store.scalar(
+                "SELECT MAX(id) FROM msg_archive WHERE session_id=?", (session_id,)
+            ) or 0)
+        return await self.store.fetch_all(
+            "SELECT id,session_id,msg_id,sender_id,sender_name,ts,text FROM msg_archive "
+            "WHERE session_id=? AND id<=? AND COALESCE(handled,0)=0 "
+            "AND (?='' OR COALESCE(msg_id,'')<>?) ORDER BY id ASC",
+            (session_id, until_id, exclude_msg_id, exclude_msg_id),
+        )
+
     async def unread_count(self, session_id: str, since: int) -> int:
-        """统计这个会话从 since 到现在有多少条消息没爬。"""
-        if not session_id or since <= 0:
+        """旧 since 参数兼容保留；未读以逐条状态为准，不按最近一觉漏计。"""
+        if not session_id:
             return 0
         try:
             value = await self.store.scalar(
-                "SELECT COUNT(*) FROM msg_archive WHERE session_id = ? AND ts >= ?",
-                (session_id, since),
+                "SELECT COUNT(*) FROM msg_archive WHERE session_id=? AND COALESCE(handled,0)=0",
+                (session_id,),
             )
             return int(value or 0)
         except Exception:
@@ -161,9 +182,53 @@ class Crawler:
         return total
 
     # ------------------------------------------------------------ 撤销未读
-    async def mark_read(self, session_id: str = "", *, strict: bool = False) -> int:
+    async def mark_read(self, session_id: str = "", *, strict: bool = False,
+                        rows: list[dict[str, Any]] | None = None) -> int:
         """把「未曾爬楼」标记撤掉，返回撤了几条。"""
         try:
+            if rows is not None:
+                # 只认领真正读过的消息；与记忆标记在同一事务提交。
+                ids = {int(row["id"]) for row in rows}
+                message_ids = {str(row["msg_id"]) for row in rows if row.get("msg_id")}
+                persona_id = self.config.persona_id
+                def commit(conn):
+                    conn.executemany(
+                        "UPDATE msg_archive SET handled=1 WHERE session_id=? AND id=?",
+                        [(session_id, row_id) for row_id in ids],
+                    )
+                    changed = 0
+                    for atom in conn.execute(
+                        "SELECT id,source_msg_ids FROM mem_atom "
+                        "WHERE persona_id=? AND session_id=? AND unread=1",
+                        (persona_id, session_id),
+                    ).fetchall():
+                        try:
+                            evidence = json.loads(atom["source_msg_ids"] or "[]")
+                        except (ValueError, TypeError):
+                            continue
+                        # 缺少可核验来源时保留未读，不能用时间猜它已经被看到。
+                        if not isinstance(evidence, list) or not evidence:
+                            continue
+                        sources = set(map(str, evidence))
+                        confirmed = sources <= message_ids
+                        if not confirmed:
+                            # 一条事实的来源可能分属两次爬楼，已读前批也应计入。
+                            confirmed_count = 0
+                            source_list = list(sources)
+                            for offset in range(0, len(source_list), 500):
+                                batch = source_list[offset:offset + 500]
+                                confirmed_count += conn.execute(
+                                    "SELECT COUNT(DISTINCT msg_id) FROM msg_archive "
+                                    "WHERE session_id=? AND handled=1 AND msg_id IN (" +
+                                    ",".join("?" for _ in batch) + ")",
+                                    (session_id, *batch),
+                                ).fetchone()[0]
+                            confirmed = confirmed_count == len(sources)
+                        if confirmed:
+                            conn.execute("UPDATE mem_atom SET unread=0 WHERE id=?", (atom["id"],))
+                            changed += 1
+                    return changed
+                return await self.store.transaction(commit)
             if session_id:
                 value = await self.store.scalar(
                     "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND unread=1 AND session_id=?",

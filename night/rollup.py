@@ -220,10 +220,14 @@ class Rollup:
                 name = "bot（当前角色）"
             text = " ".join(str(r.get("text") or "").split())
             if text:
-                lines.append(f"[msg_id={r.get('msg_id', '')}][{name}] {text[:200]}")
+                # 爬楼承诺读完整条消息；模型失败保留未读，不静默截掉后半段。
+                stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(r.get("ts") or 0)))
+                lines.append(f"[msg_id={r.get('msg_id', '')}][at={stamp}][{name}] {text}")
         transcript = "\n".join(lines)
 
         items, summary = await self._llm_summarize(transcript)
+        known_ids = {str(row.get("msg_id") or "") for row in chunk}
+        items = [item for item in items if item.msg_id and item.msg_id in known_ids]
         for item in items:
             item.session_id = session_id
 
@@ -243,11 +247,12 @@ class Rollup:
         if model is None:
             return [], ""
         prompt = (
-            "下面是一段你睡着期间没来得及看的群聊/私聊记录。请你只输出一个 JSON 对象，"
+            "下面是当前会话尚未读完的历史消息，包括更早遗留和醒来后没处理的内容。"
+            "已经结束、被解答或失效的话题不要强行补答。请你只输出一个 JSON 对象，"
             "不要输出任何 JSON 以外的文字。JSON 结构如下：\n"
             '{"summary": "一段话概括这段记录发生了什么", '
             '"items": [{"msg_id":"原消息ID","who":"谁","what":"问的/说的什么","targets_me":true或false,'
-            '"answered":true或false,"refs":["引用的消息片段"],"priority":0到100的整数}]}\n'
+            '"answered":true或false,"expired":true或false,"refs":["引用的消息片段"],"priority":0到100的整数}]}\n'
             "targets_me 表示这条是不是冲着你（bot）来的（被@、被点名、直接问你）；"
             "answered 表示你在记录里是否已经回答过；priority 表示值不值得你醒来后回，"
             "冲你来的、还没回答的、是明确问题的打高分。\n\n记录：\n" + transcript
@@ -278,6 +283,7 @@ class Rollup:
                         what=str(it.get("what") or ""),
                         targets_me=bool(it.get("targets_me")),
                         answered=bool(it.get("answered")),
+                        expired=bool(it.get("expired")),
                         refs=[str(x) for x in (it.get("refs") or [])],
                         priority=max(0, min(100, int(it.get("priority") or 0))),
                     )
@@ -314,12 +320,15 @@ class Rollup:
     # ------------------------------------------------------------ L2 入口
     async def rollup_session(self, session_id: str, since_ts: int = 0, *,
                              until_ts: int = 0, exclude_msg_id: str = "",
-                             commit: bool = True) -> list[RollupChunk]:
+                             commit: bool = True,
+                             rows: list[dict[str, Any]] | None = None,
+                             read_only: bool = False) -> list[RollupChunk]:
         """醒来后对某个会话跑一次增量摘要。返回压出来的块（可能多块）。"""
-        if not self.enabled:
+        if not self.enabled and not read_only:
             return []
-        cursor = await self._cursor(session_id)
-        rows = await self._read_incremental(session_id, cursor, since_ts, until_ts, exclude_msg_id)
+        if rows is None:
+            cursor = await self._cursor(session_id)
+            rows = await self._read_incremental(session_id, cursor, since_ts, until_ts, exclude_msg_id)
         if not rows:
             return []
         chunks: list[RollupChunk] = []
