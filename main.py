@@ -774,7 +774,8 @@ class ConglingPlugin(Star):
                 if getattr(result, "result_content_type", None) == ResultContentType.STREAMING_RESULT:
                     # 流式结果不分句 —— 这是插件里的既定行为，但用户会觉得"分句没了"
                     await _note("streaming")
-                    self.guard.clean_chain(result.chain)
+                    if event.get_extra("_at_guard_reply_owner") != "at_guard":
+                        self.guard.clean_chain(result.chain)
                     return
             except Exception:
                 pass
@@ -782,7 +783,8 @@ class ConglingPlugin(Star):
             if self.composer is not None and hasattr(result, "is_llm_result"):
                 if not result.is_llm_result():
                     await _note("not_llm")
-                    self.guard.clean_chain(result.chain)
+                    if event.get_extra("_at_guard_reply_owner") != "at_guard":
+                        self.guard.clean_chain(result.chain)
                     return
             # 醒后流程已在生成主回复前按顺序发送，不能在此倒序插入或每轮重跑。
             # 想继续睡：60s 并入窗口内的待发文案，并进主回复。
@@ -796,6 +798,10 @@ class ConglingPlugin(Star):
                         result.chain.insert(0, Plain(text=sleepy))
                 except Exception as exc:
                     logger.debug(f"[congling] 想继续睡并入失败: {exc!r}")
+            # 只交接主回复格式与发送节奏；作息、记忆及人格校验仍由从绫负责。
+            if event.get_extra("_at_guard_reply_owner") == "at_guard":
+                await _note("at_guard_owner")
+                return
             # 延时回复：只有 rhythm 让位（装了外部节奏/延时插件）时才独立接管发送；
             # rhythm 在位时延时是通过 build_plan 的 extra_hold 实现的，这里什么都不做。
             try:
