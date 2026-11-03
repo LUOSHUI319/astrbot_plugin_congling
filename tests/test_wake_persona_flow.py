@@ -3,7 +3,6 @@ import asyncio
 import ast
 import importlib
 import json
-import re
 import sys
 import tempfile
 import time
@@ -48,9 +47,7 @@ def main_hook(name):
     namespace = {"Any": object, "AstrMessageEvent": object, "time": time,
                  "logger": sys.modules["astrbot.api"].logger, "add_temp_part": add_temp_part,
                  "has_temp_part": has_temp_part}
-    # 钩子依赖真实的消息 ID 兼容函数，提取时一并加载，避免替身遗漏依赖。
-    helpers = [node for node in tree.body
-               if isinstance(node, ast.FunctionDef) and node.name == "_congling_msg_id"]
+    helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_congling_msg_id"]
     exec(compile(ast.Module(body=[*helpers, method], type_ignores=[]), "actual_main_hook", "exec"), namespace)
     return namespace[name]
 
@@ -95,12 +92,12 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             if "只输出一个 JSON" in prompt:
                 return SimpleNamespace(completion_text=json.dumps({
                     "summary": "有人询问视频",
-                    "items": [{"msg_id": msg_id, "who": "AKI", "what": "视频什么时候做？",
-                               "targets_me": True, "answered": False, "priority": 100}
-                              for msg_id in re.findall(r"\[msg_id=([^\]]+)\]", prompt)],
+                    "items": [{"msg_id": "sleep-question", "who": "AKI", "what": "视频什么时候做？",
+                               "targets_me": True, "answered": False, "priority": 100}],
                 }))
             return SimpleNamespace(completion_text="补课答复" if "合并成一段" in prompt else "主动正文")
-        self.provider = SimpleNamespace(text_chat=text_chat)
+        self.provider = SimpleNamespace(text_chat=text_chat,
+                                        provider_config={"id": "offline-summary", "model": "test-model"})
         self.context = SimpleNamespace(persona_manager=Manager(), send_message=send,
                                        get_using_provider=lambda: self.provider,
                                        get_using_provider_async=AsyncMock(return_value=self.provider))
@@ -115,11 +112,12 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         now = int(time.time())
         self.since, self.wake = now - 900, now - 400
         self.night.state.state.last_wake_at = self.wake
-        self.night.state.state.mode = "waking"
-        self.night.state.state.enter_waking_at = self.wake
-        self.night.state.state.pending_crawl = ["s"]
         self.night.state.state.last_wake_reason = "message"
         self.night.state.state.energy = 40
+        # 醒后发送测试必须明确标记真实待补课状态，不能把 awake 当作刚醒。
+        self.night.state.state.mode = "waking"
+        self.night.state.state.enter_waking_at = now
+        self.night.state.state.pending_crawl = ["s"]
         await self.store.kv_set("night.last_sleep_window",
                                 [{"sleep_at": self.since, "wake_at": self.wake, "kind": "night"}])
         self.night.crawler.crawl_line = AsyncMock(return_value="爬楼语")
@@ -151,9 +149,10 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.night.state.state.last_wake_at, self.wake)
         result = await self.plugin.proactive.send_one(self.row)
         self.assertTrue(result["ok"])
-        # 超时转为 awake 后仍读完整历史，但不再发醒后提示或补课答复。
         self.assertEqual(self.sent, ["主动正文"])
-        self.assertEqual(await self.night.crawler.pending("s"), [])
+        self.assertEqual(await self.store.scalar(
+            "SELECT COUNT(*) FROM msg_archive WHERE COALESCE(handled,0)=0"), 0)
+        self.assertTrue(any("msg_id=old" in c["prompt"] for c in self.model_calls))
         self.assertEqual(result["persona"], "大小姐")
         rows = await self.store.fetch_all("SELECT sender_name FROM msg_archive WHERE sender_id='bot'")
         self.assertEqual({r["sender_name"] for r in rows}, {"大小姐"})
@@ -314,6 +313,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sent, [])
 
     async def test_wake_when_already_awake_does_not_reset_energy_or_epoch(self):
+        self.night.state.state.mode = "awake"
+        self.night.state.state.pending_crawl = []
         self.night.state.state.energy = 100
         await self.night.state.wake_now()
         self.assertEqual(self.night.state.state.energy, 100)
@@ -324,7 +325,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.cfg.override("night.rollup.max_replies_per_wake", 1)
         await self.prepare()
         compose_prompt = next(c["prompt"] for c in self.model_calls if "合并成一段" in c["prompt"])
-        self.assertEqual(compose_prompt.count("AKI："), 1)
+        self.assertEqual(compose_prompt.count("对方："), 1)
+        self.assertNotIn("AKI：", compose_prompt)
         self.assertEqual(self.sent, ["爬楼语", "补课答复"])
 
     async def test_failed_completion_write_does_not_resend_successful_reply(self):
@@ -362,7 +364,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                                       contexts=[{"role": "assistant", "content": "另一个开场"},
                                                 {"role": "user", "content": "用户历史"}])
             event = SimpleNamespace(unified_msg_origin=self.row["umo"], get_sender_id=lambda: "u",
-                                    get_group_id=lambda: "s")
+                                    get_group_id=lambda: "s", get_extra=lambda key: None)
             await self.plugin.persona.inject(event, request)
             self.assertIn("工具说明", request.system_prompt)
             self.assertNotIn(old, request.system_prompt)

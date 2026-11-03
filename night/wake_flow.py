@@ -110,19 +110,27 @@ class WakeFlow:
                     receipt["crawl"] = True
                     await self.store.kv_set(key, receipt)
 
+            # 阅读与补答分开控制：活跃、关闭补答、名额用尽、已发补答时只读摘要。
+            limit = max(0, self.night.rollup._max_replies() - int(receipt.get("reply_count") or 0))
+            include_items = (self.night.rollup.enabled and waking_here()
+                             and limit > 0 and not receipt.get("reply"))
             chunks = await self.night.rollup.rollup_session(
                 session_id, commit=False, rows=rows, read_only=True,
+                include_items=include_items, umo=umo,
             )
             replies = {}
-            if self.night.rollup.enabled and waking_here():
+            if include_items and waking_here():
                 for chunk in chunks:
                     plan = await self.night.rollup.triage(chunk)
                     for item in plan.get("to_reply") or []:
                         replies.setdefault(item["item"].msg_id, item)
+                    # 剩余名额已够，不再调用后续块的 at_guard/Decider 打分。
+                    if len(replies) >= limit:
+                        break
             if chunks:
                 # 每次醒来的回复上限对整次补课生效，而不是每块各发一轮。
-                limit = max(0, self.night.rollup._max_replies() - int(receipt.get("reply_count") or 0))
-                plan = {"to_reply": list(replies.values())[:limit]}
+                plan = {"to_reply": list(replies.values())[:limit],
+                        "facts": [fact for chunk in chunks for fact in chunk.facts]}
                 if plan["to_reply"] and not receipt.get("reply"):
                     text = await self.night.rollup.compose_reply(
                         plan, umo=umo, identity=identity, strict=True
@@ -143,4 +151,4 @@ class WakeFlow:
             await self.store.kv_set(key, receipt)
             logger.info(f"[congling] 醒后流程完成 session={session_id} wake={wake} "
                         f"persona={identity['mode']}:{identity['id']} read={len(rows)}")
-            return [chunk.summary for chunk in chunks if chunk.summary]
+            return [chunk.context_text() for chunk in chunks if chunk.summary or chunk.facts]

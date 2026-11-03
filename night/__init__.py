@@ -413,14 +413,15 @@ class NightModule:
         line = await self.crawler.crawl_line()
         # 手动入口也先完整读完冻结批次，失败时不撤销未读。
         chunks = await self.rollup.rollup_session(
-            session_id, commit=False, rows=rows, read_only=True)
+            session_id, commit=False, rows=rows, read_only=True, include_items=False)
         removed = await self.crawler.mark_read(session_id, strict=True, rows=rows)
         await self.crawler.mark_crawled(session_id)
         await self.state.crawl_done(session_id)
         self._waking_started.pop(session_id, None)
         if removed:
             logger.info(f"[congling] 爬楼完成：撤销 {removed} 条未读（{session_id}）")
-        return line + "\n" + "\n".join(chunk.summary for chunk in chunks if chunk.summary)
+        return line + "\n" + "\n".join(
+            chunk.context_text() for chunk in chunks if chunk.summary or chunk.facts)
 
     # ================================================================ 做梦
     async def dream_tick(self) -> None:

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import paths
+from ..night.rollup_cache import PREFIX as ROLLUP_CACHE_PREFIX
 
 PHRASE = "删除所有记忆"
 TABLES = (
@@ -25,6 +26,11 @@ TABLES = (
     "event_ledger", "night_dream_plan",
 )
 KEEP = ["人格设定（persona:*）", "插件配置", "msg_archive", "头像库", "qzone:auth"]
+
+
+def _memory_kv(key: str) -> bool:
+    return (key == "night.dreams" or key.startswith(ROLLUP_CACHE_PREFIX)
+            or (key.startswith("memory_") and key.endswith("_cursor")))
 
 
 def _quote(name: str) -> str:
@@ -76,7 +82,7 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         result["counts"][name] = len(rows)
     for row in conn.execute("SELECT k,v,updated_at FROM kv ORDER BY k"):
         key = row[0]
-        if key == "night.dreams" or (key.startswith("memory_") and key.endswith("_cursor")):
+        if _memory_kv(key):
             result["kv"].append(list(row))
     dream_rows = [r for r in result["kv"] if r[0] == "night.dreams"]
     dreams = json.loads(dream_rows[0][1]) if dream_rows else []
@@ -85,7 +91,9 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     if not isinstance(dreams, list):
         raise ValueError("梦库格式异常，请先修复；不能显示不真实的条数")
     result["counts"]["night.dreams"] = len(dreams)
-    result["counts"]["memory_kv_cursors"] = len(result["kv"]) - len(dream_rows)
+    cache_rows = [r for r in result["kv"] if r[0].startswith(ROLLUP_CACHE_PREFIX)]
+    result["counts"]["rollup_cache_entries"] = len(cache_rows)
+    result["counts"]["memory_kv_cursors"] = len(result["kv"]) - len(dream_rows) - len(cache_rows)
     # 保留消息的水位也参与确认，避免两次确认之间的新消息被静默跳过。
     result["archive_watermarks"] = [list(r) for r in conn.execute(
         "SELECT session_id,MAX(id) FROM msg_archive GROUP BY session_id ORDER BY session_id")]
@@ -143,7 +151,7 @@ def restore_backup(conn: sqlite3.Connection, path: Path, expected: str) -> None:
             conn.executemany(f"INSERT INTO {_quote(name)}({cols}) VALUES({marks})",
                              [[_decode(v) for v in r] for r in table["rows"]])
         for key, value, updated in data["kv"]:
-            if key != "night.dreams" and not (key.startswith("memory_") and key.endswith("_cursor")):
+            if not _memory_kv(key):
                 raise ValueError("备份包含非记忆 KV")
             if conn.execute("SELECT 1 FROM kv WHERE k=?", (key,)).fetchone():
                 raise ValueError("目标 KV 非空，拒绝覆盖")
@@ -298,6 +306,10 @@ class MemoryReset:
         for session, water in before["archive_watermarks"]:
             conn.execute("INSERT INTO inject_cursor(persona_id,session_id,last_msg_row,last_atom_ids,updated_at) "
                          "VALUES(?,?,?,?,?)", (self.plugin.cfg.persona_id, session, water, "[]", int(time.time())))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(msg_archive)")}
+        if "handled" in columns:
+            # 清除时保留原文供管理，但禁止自动爬楼重新生成刚清除的内容。
+            conn.execute("UPDATE msg_archive SET handled=1")
         # 旧合并撤销持有完整前像；保留审计记录，但禁止用它复活已清除的主体。
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mem_repair_log'").fetchone():
             conn.execute("UPDATE mem_repair_log SET reversed=1")

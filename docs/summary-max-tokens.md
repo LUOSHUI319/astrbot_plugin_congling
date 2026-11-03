@@ -1,7 +1,8 @@
 # 摘要输出限制
 
 `ModelHub.chat` 现在把调用方的 `max_tokens` 传给 `provider.text_chat`。
-爬楼摘要保留原有的 2000 Token 参数；梦境和日记等同一入口保留各自限制。
+爬楼纯阅读请求限制为 512 Token，需要补答清单时为 2000 Token；
+梦境和日记等同一入口保留各自限制。
 
 部分 AstrBot 原生 OpenAI 兼容提供商虽然接受 `**kwargs`，却没有把其中的
 `max_tokens` 写入请求。因此只增加关键字不足以控制实际消费。

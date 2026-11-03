@@ -488,6 +488,7 @@ class Proactive:
         """同一通道发送醒后阶段和主动正文；每段发送前检查当前作息与人格。"""
         from astrbot.api.event import MessageChain
         from astrbot.api.message_components import Plain
+        from ..core.reply_mentions import MentionReply
 
         umo = self._umo_of(row)
         session_id = str(row["session_id"])
@@ -495,7 +496,9 @@ class Proactive:
         epoch = epoch if epoch is not None else (await night.wake_flow.epoch() if night else None)
         # 醒后阶段不能截断补课文本；正文仍沿用原分句上限。
         composer = getattr(self.plugin, "composer", None)
-        parts = composer.split(text, str(row.get("session_kind") or "private")) if composer else [text]
+        # 补答与真实 @ 同条发送，避免分句截断来源占位符；主动正文仍沿用原上限。
+        parts = ([text] if phase == "reply" or composer is None else
+                 composer.split(text, str(row.get("session_kind") or "private")))
         parts = [p for p in parts if p.strip()]
         if phase == "proactive":
             parts = parts[:3]
@@ -519,14 +522,24 @@ class Proactive:
                     if latest != activity:
                         raise RuntimeError("会话收到新消息，撤销旧主动文本")
                 # 超时不能证明未发送；不盲重试，避免同一句重复出现。
-                result = await self.plugin.context.send_message(umo, MessageChain([Plain(text=part)]))
+                chain = [Plain(text=part)]
+                archived = str(part)
+                if isinstance(text, MentionReply):
+                    archived = text.readable(str(part))
+                    if phase == "reply" and text.mentions and str(row.get("session_kind") or "") == "group":
+                        from astrbot.api.message_components import At
+                        chain = [At(qq=value) if kind == "at" else Plain(text=value)
+                                 for kind, value in text.segments(str(part))]
+                    else:
+                        chain = [Plain(text=archived)]
+                result = await self.plugin.context.send_message(umo, MessageChain(chain))
                 if result is False or (isinstance(result, dict) and (
                     result.get("ok") is False or result.get("success") is False
                     or result.get("status") == "failed" or result.get("retcode", 0) not in (0, "0")
                 )):
                     raise RuntimeError("平台未确认发送成功")
-                sent.append(part)
-                await self._archive(session_id, umo, part, str(row.get("session_kind") or "private"),
+                sent.append(archived)
+                await self._archive(session_id, umo, archived, str(row.get("session_kind") or "private"),
                                     identity=identity, phase=phase)
         finally:
             # 中途取消/失败也保留已经成功发送的片段，沿用新版自述证据规则。
