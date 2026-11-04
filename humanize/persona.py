@@ -16,7 +16,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.prompt_parts import add_temp_part
+from ..core.prompt_parts import add_temp_part, next_temp_version, request_temp_source
 
 from ..core.contracts import Persona
 from ..core.exc import exc_brief
@@ -330,7 +330,9 @@ class PersonaService:
         if scene:
             dynamic.append(scene)
         if dynamic:
-            add_temp_part(req, "\n\n".join(dynamic), "<!--congling:persona:dynamic-->")
+            add_temp_part(req, "\n\n".join(dynamic), "<!--congling:persona:dynamic-->",
+                source=request_temp_source(req, event, "congling.persona_dynamic",
+                    version=next_temp_version(req, "congling.persona_dynamic")))
 
     # ---------------------------------------------------------------- 分层
     async def _relation_line(self, event: Any) -> str:

@@ -16,7 +16,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.prompt_parts import add_temp_part
+from ..core.prompt_parts import add_temp_part, next_temp_version, request_temp_source
 
 from ..core.contracts import Block, PerceivedMessage
 from .card import parse_card
@@ -208,7 +208,9 @@ class PerceptionService:
             + "\n".join(sections)
             + "\n【补充结束】"
         )
-        add_temp_part(req, block, marker)
+        add_temp_part(req, block, marker,
+            source=request_temp_source(req, event, "congling.perception",
+                version=next_temp_version(req, "congling.perception")))
 
     def _prompt_sections(self, msg: PerceivedMessage) -> list[str]:
         sections: list[str] = []

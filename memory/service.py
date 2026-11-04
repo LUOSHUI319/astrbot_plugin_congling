@@ -19,7 +19,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.prompt_parts import add_temp_part
+from ..core.prompt_parts import add_temp_part, next_temp_version, request_temp_source
 from ..core.memory_guard import memory_work
 
 from ..core.budget import BudgetSlice
@@ -407,7 +407,9 @@ class MemoryService:
             f"{content}\n"
             "【记忆结束】"
         )
-        add_temp_part(req, block, MARKER)
+        add_temp_part(req, block, MARKER,
+            source=request_temp_source(req, event, "congling.memory",
+                version=next_temp_version(req, "congling.memory")))
 
         # 命中标记 / 游标推进只对 congling 自己的记忆库有意义；
         # 让位给 livingmemory 时，统一中枢那边自己维护命中统计，这里跳过。
