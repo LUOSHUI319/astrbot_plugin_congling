@@ -17,6 +17,7 @@ import copy
 import contextvars
 import functools
 import time
+from contextlib import contextmanager
 from typing import Any
 
 from astrbot.api import logger
@@ -68,6 +69,64 @@ def _max_tokens_scope(provider: Any) -> Any:
     create._congling_max_tokens_scope = scope
     resource.create = create
     return scope
+
+
+def _background_scope(provider: Any) -> Any:
+    """后台任务在最终请求上关闭 DeepSeek 思考，隔离共享 provider 的主对话。"""
+    resource = getattr(getattr(getattr(provider, "client", None), "chat", None), "completions", None)
+    original = getattr(resource, "create", None)
+    if not callable(original):
+        return None
+    existing = getattr(original, "_congling_background_scope", None)
+    if existing is not None:
+        return existing
+    scope = contextvars.ContextVar("congling_background", default=False)
+
+    @functools.wraps(original)
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        config = getattr(provider, "provider_config", {})
+        model = kwargs.get("model") or (config.get("model") if isinstance(config, dict) else "")
+        if scope.get() and _supports_nonthinking(model):
+            body = dict(kwargs.get("extra_body") or {})
+            body["thinking"] = {"type": "disabled"}
+            kwargs["extra_body"] = body
+        return await original(*args, **kwargs)
+
+    create._congling_background_scope = scope
+    resource.create = create
+    return scope
+
+
+def _supports_nonthinking(model: Any) -> bool:
+    # 仅对已经使用该参数的型号生效，其他兼容提供商不追加厂商私有参数。
+    return str(model or "").lower() in {
+        "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro",
+    }
+
+
+@contextmanager
+def provider_request_budget(provider: Any, max_tokens: int, *, background: bool = True):
+    """保留原函数的 text_chat 调用位置，兼容用量采集的路由归因。"""
+    if type(max_tokens) is not int or max_tokens <= 0:
+        raise ValueError("max_tokens must be a positive integer")
+    tokens = []
+    try:
+        scope = _max_tokens_scope(provider)
+        if scope is not None:
+            tokens.append((scope, scope.set(max_tokens)))
+        options = {"max_tokens": max_tokens}
+        if background:
+            quiet = _background_scope(provider)
+            if quiet is not None:
+                tokens.append((quiet, quiet.set(True)))
+            else:
+                config = getattr(provider, "provider_config", {})
+                if isinstance(config, dict) and _supports_nonthinking(config.get("model")):
+                    options["extra_body"] = {"thinking": {"type": "disabled"}}
+        yield options
+    finally:
+        for scope, token in reversed(tokens):
+            scope.reset(token)
 
 
 class ModelHub:
@@ -140,28 +199,20 @@ class ModelHub:
         return "none"
 
     # ================================================================ 对话
-    async def chat(self, prompt: str, system: str = "", temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    async def chat(self, prompt: str, system: str = "", temperature: float = 0.7,
+                   max_tokens: int = 1024, *, background: bool = False) -> str:
         provider = self.provider_of("chat")
         if provider is None:
             return ""
-        scope = None
-        token = None
         try:
-            if type(max_tokens) is not int or max_tokens <= 0:
-                raise ValueError("max_tokens must be a positive integer")
-            scope = _max_tokens_scope(provider)
-            if scope is not None:
-                token = scope.set(max_tokens)
-            resp = await provider.text_chat(
-                prompt=prompt, contexts=[], system_prompt=system or None, max_tokens=max_tokens,
-            )
+            with provider_request_budget(provider, max_tokens, background=background) as options:
+                resp = await provider.text_chat(
+                    prompt=prompt, contexts=[], system_prompt=system or None, **options,
+                )
             return str(getattr(resp, "completion_text", "") or "").strip()
         except Exception as exc:
             logger.debug(f"[congling] 对话调用失败: {exc!r}")
             return ""
-        finally:
-            if scope is not None and token is not None:
-                scope.reset(token)
 
     # ================================================================ 图片
     async def character_chat(self, prompt: str, system: str = "", *, umo: str = "",

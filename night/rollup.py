@@ -312,6 +312,7 @@ class Rollup:
                         if include_items else "你负责阅读聊天记录并提炼简短摘要。只输出 JSON。"),
                 temperature=0.2,
                 max_tokens=2000 if include_items else 512,
+                background=True,
             )
         except Exception as exc:
             logger.debug(f"{LOG} L2 摘要模型调用失败: {exc!r}")
