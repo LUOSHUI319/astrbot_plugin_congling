@@ -47,6 +47,13 @@ def main_hook(name):
     namespace = {"Any": object, "AstrMessageEvent": object, "time": time,
                  "logger": sys.modules["astrbot.api"].logger, "add_temp_part": add_temp_part,
                  "has_temp_part": has_temp_part}
+    # 编译真实钩子时同样装配当前版本的请求来源记录依赖。
+    prompt_parts = importlib.import_module("cg.core.prompt_parts")
+    namespace.update(
+        next_temp_version=prompt_parts.next_temp_version,
+        request_temp_source=prompt_parts.request_temp_source,
+        record_request_composition=importlib.import_module(
+            "cg.core.request_evidence").record_request_composition)
     helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_congling_msg_id"]
     exec(compile(ast.Module(body=[*helpers, method], type_ignores=[]), "actual_main_hook", "exec"), namespace)
     return namespace[name]
@@ -380,6 +387,29 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             await self.plugin.persona.resolve()
         self.assertFalse((await self.plugin.proactive.send_one(self.row))["ok"])
         self.assertEqual(self.sent, [])
+
+    async def test_livinghello_fixed_persona_overrides_all_local_modes(self):
+        guard = SimpleNamespace(get_fixed_native_persona_id=lambda umo: "另一个")
+        self.context.get_registered_star = lambda _: SimpleNamespace(activated=True, star_cls=guard)
+        for mode in ("builtin", "astrbot", "none"):
+            self.cfg.override("persona.mode", mode)
+            identity = await self.plugin.persona.resolve(self.row["umo"])
+            self.assertEqual(identity["id"], "另一个")
+            self.assertEqual(identity["mode"], "astrbot")
+            self.assertIn("你是另一个角色", identity["prompt"])
+        guard.get_fixed_native_persona_id = lambda umo: "[%None]"
+        identity = await self.plugin.persona.resolve(self.row["umo"])
+        self.assertEqual(identity["mode"], "none")
+        self.assertEqual(identity["prompt"], "")
+
+    async def test_livinghello_missing_fixed_persona_fails_without_fallback(self):
+        self.context.get_registered_star = lambda _: SimpleNamespace(activated=True,
+            star_cls=SimpleNamespace(get_fixed_native_persona_id=lambda umo: "不存在"))
+        with self.assertRaises(ValueError):
+            await self.plugin.persona.resolve(self.row["umo"])
+        self.context.get_registered_star = lambda _: SimpleNamespace(activated=False,
+            star_cls=SimpleNamespace(get_fixed_native_persona_id=lambda umo: "不存在"))
+        self.assertEqual((await self.plugin.persona.resolve(self.row["umo"]))["id"], "大小姐")
 
     async def test_full_or_natural_wake_never_claims_sleepy_line(self):
         idle = self.night.wake_idle
