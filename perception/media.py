@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import time
 from typing import Any
 
@@ -32,6 +33,8 @@ class MediaInterpreter:
 
             hub = ModelHub(plugin)
         self.hub = hub
+        self._images: dict[str, tuple[float, str]] = {}
+        self._image_tasks: dict[str, Any] = {}
 
     # ------------------------------------------------------------ 图片
     async def describe_image(self, url: str, source: str = "") -> str:
@@ -40,14 +43,22 @@ class MediaInterpreter:
         url = str(url or "").strip()
         if not url:
             return "[图片]"
-        cache_key = "img:" + hashlib.sha1(url.encode("utf-8", "ignore")).hexdigest()[:20]
-        try:
-            cached = await self.store.kv_get(cache_key)
-            if isinstance(cached, str) and cached:
-                return cached
-        except Exception:
-            pass
-
+        # source由事件传入，含会话与用户；不读取旧的无受众、永久图片缓存。
+        cache_key = hashlib.sha256((source + "\0" + url + "\0" + IMAGE_PROMPT).encode()).hexdigest()
+        now = time.monotonic()
+        self._images = {key: value for key, value in self._images.items() if value[0] > now}
+        if source and cache_key in self._images:
+            return self._images[cache_key][1]
+        if source and cache_key in self._image_tasks:
+            return await asyncio.shield(self._image_tasks[cache_key])
+        if not source:
+            return await self._describe_uncached(url, "")
+        task = asyncio.create_task(self._describe_uncached(url, cache_key))
+        self._image_tasks[cache_key] = task
+        task.add_done_callback(lambda _: self._image_tasks.pop(cache_key, None))
+        return await asyncio.shield(task)
+    # 图片缓存未命中时沿用原有模型入口。
+    async def _describe_uncached(self, url: str, cache_key: str) -> str:
         text = ""
         try:
             text = await self.hub.describe_image(url, IMAGE_PROMPT)
@@ -57,12 +68,13 @@ class MediaInterpreter:
 
         if not text:
             return "[图片]"
-        text = text.replace("\n", " ")[:200]
+        # 截图文字不能在200字处丢失关键报错/对象；仍限制上下文大小。
+        text = text.replace("\n", " ")[:1200]
         result = f"[图片：{text}]"
-        try:
-            await self.store.kv_set(cache_key, result)
-        except Exception:
-            pass
+        if cache_key:
+            if len(self._images) >= 256:
+                self._images.pop(next(iter(self._images)))
+            self._images[cache_key] = (time.monotonic() + 3600, result)
         return result
 
     # ------------------------------------------------------------ 诊断

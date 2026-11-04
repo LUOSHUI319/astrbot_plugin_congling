@@ -47,6 +47,8 @@ def load_guard():
     from guard_expression import Expression, congling_for, takeover
     from guard_fragments import FragmentWait
     from guard_understanding import Understanding
+    from guard_segments import ReplySegments
+    from guard_evidence import EvidenceMemory
     tree = ast.parse((GUARD_ROOT / "main.py").read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Main")
     cls.bases = [ast.Name(id="object", ctx=ast.Load())]
@@ -65,6 +67,7 @@ def load_guard():
         "ReplyDelivery": ReplyDelivery, "congling_for": congling_for,
         "number": number, "Expression": Expression, "takeover": takeover,
         "FragmentWait": FragmentWait, "Understanding": Understanding,
+        "ReplySegments": ReplySegments, "EvidenceMemory": EvidenceMemory,
         "Decision": Decision, "POLICY_VERSION": POLICY_VERSION,
         "Plain": Plain, "At": type("At", (), {}), "Image": type("Image", (), {}),
         "Reply": type("Reply", (), {}), "TextPart": TextPart,

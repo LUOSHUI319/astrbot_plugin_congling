@@ -40,6 +40,14 @@ class PerceptionService:
 
     # ================================================================ 主流程
     async def perceive(self, event: Any, enrich: bool = True) -> PerceivedMessage:
+        cached = getattr(event, "_congling_perceived", None)
+        if isinstance(cached, PerceivedMessage):
+            # 归档先解析、生成前才补媒体；同一事件不重新展开转发或重复调用视觉模型。
+            if enrich and not cached.meta.get("_media_enriched"):
+                await self._enrich_with_timeout(cached)
+                cached.meta["_media_enriched"] = True
+                cached.text = blocks_to_text(cached.blocks)
+            return cached
         # 先挂上当前事件与 bot：转发展开、引用拉取都要用
         self.plugin._current_event = event
         self.plugin._current_bot = getattr(event, "bot", None)
@@ -106,6 +114,8 @@ class PerceptionService:
 
         if enrich:
             await self._enrich_with_timeout(msg)
+            msg.meta["_media_enriched"] = True
+            msg.text = blocks_to_text(blocks)
 
         # 缓存当前事件与消息，供记忆、拟人、QQ 扩展复用
         self.plugin._current_event = event
@@ -282,7 +292,9 @@ class PerceptionService:
         tasks: list[asyncio.Task] = []
         for block in msg.blocks:
             if block.kind == "image" and block.meta.get("url"):
-                tasks.append(asyncio.create_task(self._describe(block)))
+                source = str(msg.meta.get("umo") or "") + ":" + msg.sender_id
+                source += ":" + str(self.config.persona_id)
+                tasks.append(asyncio.create_task(self._describe(block, source)))
             elif block.kind == "voice" and block.meta.get("url"):
                 tasks.append(asyncio.create_task(self._transcribe(block)))
         if not tasks:
@@ -294,8 +306,8 @@ class PerceptionService:
         except Exception as exc:
             logger.debug(f"[congling] 媒体理解异常: {exc!r}")
 
-    async def _describe(self, block: Block) -> None:
-        text = await self.media.describe_image(str(block.meta.get("url") or ""))
+    async def _describe(self, block: Block, source: str = "") -> None:
+        text = await self.media.describe_image(str(block.meta.get("url") or ""), source)
         if text and text != "[图片]":
             block.text = text
             block.meta["described"] = True
@@ -358,6 +370,17 @@ class PerceptionService:
             blocks_json = json.dumps(blocks, ensure_ascii=False, default=str)
 
         try:
+            if msg.meta.get("_archive_written"):
+                if msg.meta.get("_media_enriched") and not msg.meta.get("_archive_enriched"):
+                    # 只补当前事件的观察结果；旧归档和数据库结构不做迁移。
+                    await self.store.execute(
+                        "UPDATE msg_archive SET text=?, blocks_json=? WHERE msg_id=? AND session_id=? "
+                        "AND sender_id=? AND umo=?",
+                        (msg.text, blocks_json, dedupe_id, msg.session_id, msg.sender_id,
+                         str(msg.meta.get("umo") or "")),
+                    )
+                    msg.meta["_archive_enriched"] = True
+                return
             await self.store.execute(
                 "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
                 "blocks_json, expanded, forward_id, umo, platform, is_at_me, reply_to_msg_id, handled) "
@@ -390,6 +413,8 @@ class PerceptionService:
                     msg.session_id,
                 ),
             )
+            msg.meta["_archive_written"] = True
+            msg.meta["_archive_enriched"] = bool(msg.meta.get("_media_enriched"))
             await self.plugin.bus.emit(self.plugin.bus.ON_PERCEIVED, msg)
         except Exception as exc:
             logger.debug(f"[congling] 消息归档失败: {exc!r}")
