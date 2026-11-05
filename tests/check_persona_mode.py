@@ -1,4 +1,4 @@
-"""P5：旧模式兼容输入均跟随 AstrBot，动态内容仍只进临时块。"""
+"""三种人格来源互斥，动态内容只进临时块。"""
 
 from __future__ import annotations
 
@@ -31,6 +31,15 @@ class FakeStore:
 
 
 class FakeContext:
+    def __init__(self):
+        item = SimpleNamespace(persona_id="demo", name="演示人格", system_prompt="你是演示人格")
+        async def get_persona(pid):
+            return item
+        async def get_all():
+            return [item]
+        self.persona_manager = SimpleNamespace(default_persona="demo", get_persona=get_persona,
+                                               get_all_personas=get_all)
+
     def get_all_stars(self):
         return []
 
@@ -58,7 +67,7 @@ async def run_mode(mode: str) -> str:
     plugin = make_plugin(mode)
     service = PersonaService(plugin)
     await service.load()
-    assert service.mode == "astrbot"
+    assert service.mode == mode
     req = SimpleNamespace(system_prompt="", extra_user_content_parts=[])
     await service.inject(FakeEvent(), req)
     assert req.extra_user_content_parts, "动态层必须存在于临时块"
@@ -75,23 +84,25 @@ async def main() -> int:
         print(prompt.strip()[:400] if prompt.strip() else "(空，未注入)")
 
     problems = []
-    if "你叫绫" in results["builtin"]:
-        problems.append("旧 builtin 配置仍注入已取消的人设")
+    if "你叫绫" not in results["builtin"]:
+        problems.append("builtin 未注入内置人设")
     if "你叫绫" in results["astrbot"]:
         problems.append("astrbot 模式仍然注入了内置人设")
     if "说话方式" in results["astrbot"]:
         problems.append("astrbot 模式仍然注入了插件风格约束")
     if "你叫绫" in results["none"] or "说话方式" in results["none"]:
         problems.append("none 模式仍然注入了人设")
-    if len(set(results.values())) != 1:
-        problems.append("旧模式没有统一为 AstrBot 静态规则")
+    if "你是演示人格" not in results["astrbot"]:
+        problems.append("astrbot 未采用框架人设")
+    if "你是演示人格" in results["none"] or "你是演示人格" in results["builtin"]:
+        problems.append("框架人设混入其他来源")
 
     if problems:
         print("\n=== 问题 ===")
         for item in problems:
             print("-", item)
         return 1
-    print("\n单一 AstrBot 人格与临时注入验证通过")
+    print("\n三种人格来源互斥与临时注入验证通过")
     return 0
 
 

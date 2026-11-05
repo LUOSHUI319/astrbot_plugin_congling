@@ -551,9 +551,7 @@
   };
 
   var READONLY_PATHS = {
-    "persona.mode": "跟随 AstrBot，不可改",
     "persona.persona_id": "内部兼容标识，不可改",
-    "persona.astrbot_persona_id": "历史兼容字段，已停用",
   };
 
   function memoryLoaded() {
@@ -1017,6 +1015,8 @@
     render: function () {
       return apiGet("persona").then(function (data) {
         st.persona = data;
+        var effective = data.effective || {};
+        var source = { builtin: "插件内置", astrbot: "AstrBot 人格", none: "不启用人格" }[data.mode] || "AstrBot 人格";
         var style = data.style || {};
         var styleText = Object.keys(style).map(function (key) {
           return key + "：" + (typeof style[key] === "object" ? JSON.stringify(style[key]) : style[key]);
@@ -1031,12 +1031,16 @@
 
         return (
           '<div class="m-page">' +
+            '<div class="m-card m-card-pad"><div class="m-field-label">当前生效：' +
+              esc(effective.name || source) + '</div><div class="m-field-hint">' + esc(source) +
+              '；可在「设置 → 人格」选择来源和 AstrBot 人格 ID</div>' +
+              '<button class="m-btn is-ghost" type="button" data-act="open" data-page="settings-group" data-group="persona">选择人格来源</button></div>' +
             '<div class="m-card">' +
               '<div class="m-field"><div class="m-field-label">名字</div>' +
                 '<input class="m-input" id="m-persona-name" value="' + esc(data.name || "") + '" placeholder="她叫什么" /></div>' +
               '<div class="m-field"><div class="m-field-label">身份设定</div>' +
                 '<textarea class="m-textarea" id="m-persona-identity" style="min-height:220px" placeholder="她是谁、怎么说话">' + esc(data.identity || "") + "</textarea>" +
-                '<div class="m-field-hint">实际人设由 AstrBot 当前人格提供；这里改的是本插件保存的兼容设定</div></div>' +
+                '<div class="m-field-hint">这份身份设定仅在「插件内置」来源下生效</div></div>' +
               '<div class="m-field"><div class="m-field-label">活跃时段</div>' +
                 '<input class="m-input" id="m-persona-hours" value="' + esc(data.active_hours || "") + '" placeholder="09:00-03:30" /></div>' +
               '<div class="m-field"><div class="m-field-label">风格（只读）</div>' +

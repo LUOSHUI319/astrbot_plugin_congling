@@ -1,4 +1,4 @@
-"""单一人格：跟随 AstrBot，保留旧标识和 KV 以兼容历史数据。
+"""互斥人格来源：内置 / AstrBot / 无人格，切换立即作用于所有输出。
 
 注入策略（很重要）：
 - 检测到 private_companion 在跑 → 不注入人格（避免双人格打架），只做表达层；
@@ -7,17 +7,28 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
+import re
 import time
 from typing import Any
 
 from astrbot.api import logger
 
-from ..core.prompt_parts import add_temp_part
+from ..core.prompt_parts import add_temp_part, next_temp_version, request_temp_source
 
 from ..core.contracts import Persona
 from ..core.exc import exc_brief
 
 DEFAULT_IDENTITY = ""
+BUILTIN_IDENTITY = (
+    "你叫绫，二十几岁，住在城市边缘的老小区，房间朝北，窗台上有一盆总也养不好的薄荷。\n"
+    "你话不多，句子短，习惯把情绪落在具体的事情上，而不是形容词上。\n"
+    "别人讲事情的时候，你更关心他当时的感觉，而不是急着给方案。\n"
+    "你不知道的事就说不知道，不编，不硬答。\n"
+    "你会记得别人随口提过的小事，在合适的时候提一句，但不像翻档案一样列出来。"
+)
 
 DEFAULT_STYLE = {
     "max_chars": 25,
@@ -77,7 +88,6 @@ class PersonaService:
                 state=data.get("state") if isinstance(data.get("state"), dict) else {},
             )
         self._loaded = True
-        self._persona.name = await self.display_name()
         logger.debug(f"[congling] 人格已加载: {self._persona.name}")
 
     def get(self) -> Persona:
@@ -162,7 +172,7 @@ class PersonaService:
         persona = self._persona
         return {
             "mode": self.mode,
-            "astrbot_persona_id": "",
+            "astrbot_persona_id": self.config.str("persona.astrbot_persona_id", ""),
             "persona_id": persona.persona_id,
             "name": persona.name,
             "identity": persona.identity,
@@ -178,8 +188,8 @@ class PersonaService:
 
     @property
     def mode(self) -> str:
-        # 旧配置 builtin/none 仍可读取，但不再启用另一套人设。
-        return MODE_ASTRBOT
+        mode = self.config.str("persona.mode", MODE_ASTRBOT).strip().lower()
+        return mode if mode in (MODE_BUILTIN, MODE_ASTRBOT, MODE_NONE) else MODE_ASTRBOT
 
     async def current_astrbot_persona(self) -> dict[str, Any]:
         """只解析框架当前默认人格，不枚举档案、不采用插件旧选择器。"""
@@ -202,19 +212,90 @@ class PersonaService:
             return {"name": "AstrBot 当前人格", "prompt": ""}
 
     async def available_personas(self) -> dict[str, Any]:
-        """旧接口兼容壳：只返回当前人格，不提供可切换目录。"""
-        current = await self.current_astrbot_persona()
-        return {"items": [{"id": "", **current}], "default": ""}
+        manager = getattr(self.plugin.context, "persona_manager", None)
+        if manager is None:
+            return {"items": [], "default": ""}
+        items = await manager.get_all_personas()
+        return {"items": [{"id": str(getattr(item, "persona_id", "")),
+                           "name": str(getattr(item, "name", "") or getattr(item, "persona_id", "")),
+                           "prompt": str(getattr(item, "system_prompt", ""))}
+                          for item in items],
+                "default": str(getattr(manager, "default_persona", "default"))}
+
+    async def resolve(self, umo: str = "", conversation: Any = None) -> dict[str, Any]:
+        """每次输出重新解析唯一人格；指定角色不存在时禁止退回休眠角色。"""
+        mode = self.mode
+        # LivingHello页面保存的人格是唯一选择，避免本插件再次覆盖框架人格。
+        fixed = None
+        if umo:
+            lookup = getattr(self.plugin.context, "get_registered_star", None)
+            try:
+                metadata = lookup("astrbot_plugin_at_guard") if callable(lookup) else None
+            except (KeyError, ValueError):
+                metadata = None
+            guard = getattr(metadata, "star_cls", None)
+            getter = getattr(guard, "get_fixed_native_persona_id", None)
+            if getattr(metadata, "activated", False) and callable(getter):
+                fixed = getter(umo)
+        if fixed is not None:
+            mode = MODE_NONE if fixed == "[%None]" else MODE_ASTRBOT
+        dialogs: list[Any] = []
+        if mode == MODE_BUILTIN:
+            pid, name = self._persona.persona_id, self._persona.name
+            if name == "AstrBot 当前人格":
+                name = "绫"
+            prompt = (self._persona.identity or BUILTIN_IDENTITY) + "\n\n" + self.style_text()
+            if self._persona.taboos:
+                prompt += "\n不要碰：\n" + "\n".join(f"- {x}" for x in self._persona.taboos)
+        elif mode == MODE_ASTRBOT:
+            manager = getattr(self.plugin.context, "persona_manager", None)
+            if manager is None:
+                raise ValueError("AstrBot 人格管理器不可用")
+            pid = fixed if fixed is not None else self.config.str("persona.astrbot_persona_id", "").strip()
+            if not pid and umo and hasattr(manager, "resolve_selected_persona"):
+                pid, _, _, _ = await manager.resolve_selected_persona(
+                    umo=umo, conversation_persona_id=getattr(conversation, "persona_id", None),
+                    platform_name=umo.split(":", 1)[0]
+                )
+            pid = str(pid or getattr(manager, "default_persona", "default"))
+            item = await manager.get_persona(pid)
+            prompt = str(getattr(item, "system_prompt", "") or "")
+            name = str(getattr(item, "name", "") or pid)
+            native = manager.get_persona_v3_by_id(pid) if hasattr(manager, "get_persona_v3_by_id") else {}
+            dialogs = copy.deepcopy((native or {}).get("_begin_dialogs_processed") or [])
+        else:
+            pid, name, prompt = "none", "bot", ""
+        identity = {"mode": mode, "id": pid, "name": name, "prompt": prompt, "dialogs": dialogs}
+        identity["token"] = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        return identity
 
     async def display_name(self) -> str:
-        """写作类模块（日记 / 说说）要用的「我是谁」。
+        return str((await self.resolve())["name"])
 
-        astrbot 模式下取 AstrBot 当前人格的名字 —— 不然插件还叫自己「绫」，
-        而框架里挂的是别人，日记一开头就自我介绍了错的名字。
-        """
-        name = str((await self.current_astrbot_persona())["name"])
-        self._persona.name = name
-        return name
+    async def _replace_framework_persona(self, req: Any, identity: dict[str, Any]) -> None:
+        """仅替换框架已知的角色段/开场对话，保留工具、技能及其他系统说明。"""
+        existing = str(getattr(req, "system_prompt", "") or "")
+        existing = re.sub(r"\n*\s*<!--congling:persona-->.*?<!--congling:persona:end-->",
+                          "", existing, flags=re.S)
+        contexts = list(getattr(req, "contexts", None) or [])
+        manager = getattr(self.plugin.context, "persona_manager", None)
+        if manager is not None:
+            for item in await manager.get_all_personas():
+                prompt = str(getattr(item, "system_prompt", "") or "")
+                if prompt:
+                    existing = existing.replace(f"\n# Persona Instructions\n\n{prompt}\n", "")
+                pid = str(getattr(item, "persona_id", "") or "")
+                native = manager.get_persona_v3_by_id(pid) if hasattr(manager, "get_persona_v3_by_id") else {}
+                dialogs = (native or {}).get("_begin_dialogs_processed") or []
+                if dialogs and contexts[:len(dialogs)] == dialogs:
+                    del contexts[:len(dialogs)]
+        prompt = identity["prompt"]
+        if prompt:
+            existing += f"\n# Persona Instructions\n\n{prompt}\n"
+        req.system_prompt = existing
+        req.contexts = copy.deepcopy(identity["dialogs"]) + contexts
 
     # ================================================================ 注入
     def style_text(self) -> str:
@@ -231,13 +312,16 @@ class PersonaService:
         )
 
     async def inject(self, event: Any, req: Any) -> None:
+        identity = await self.resolve(str(getattr(event, "unified_msg_origin", "") or ""),
+                                      getattr(req, "conversation", None))
+        await self._replace_framework_persona(req, identity)
         if not self.config.bool("humanize.enable_persona_inject", True):
             return
         if self.plugin.probe.should_yield("humanize"):
             logger.debug("[congling] 拟人主链路已让位，跳过人格注入")
             return
 
-        # 人设文本始终交给框架；只追加两条恒定的行为规则。
+        # 身份已互斥替换；保留新版恒定的自述和私密梦境规则。
         layers = [SELF_ACTION_RULE, DREAM_RECALL_RULE]
 
         # 静态人设（identity / style / taboos）每轮内容完全一样，留在 system_prompt
@@ -261,7 +345,9 @@ class PersonaService:
         if scene:
             dynamic.append(scene)
         if dynamic:
-            add_temp_part(req, "\n\n".join(dynamic), "<!--congling:persona:dynamic-->")
+            add_temp_part(req, "\n\n".join(dynamic), "<!--congling:persona:dynamic-->",
+                source=request_temp_source(req, event, "congling.persona_dynamic",
+                    version=next_temp_version(req, "congling.persona_dynamic")))
 
     # ---------------------------------------------------------------- 分层
     async def _relation_line(self, event: Any) -> str:
@@ -292,6 +378,10 @@ class PersonaService:
         return "关系：" + "；".join(parts) if parts else ""
 
     async def _state_line(self, event: Any) -> str:
+        night = getattr(getattr(self.plugin, "night", None), "state", None)
+        state = getattr(night, "state", None)
+        if state is not None and getattr(night, "enabled", False):
+            return f"当前状态：{state.mode}，精力 {state.energy:.0f}；以实际作息状态为准。"
         now = time.localtime()
         hour = now.tm_hour
         if 0 <= hour < 5:

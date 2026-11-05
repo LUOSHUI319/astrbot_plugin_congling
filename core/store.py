@@ -375,9 +375,17 @@ class Store:
             for name, stmt in (
                 ("umo", "ALTER TABLE msg_archive ADD COLUMN umo TEXT DEFAULT ''"),
                 ("platform", "ALTER TABLE msg_archive ADD COLUMN platform TEXT DEFAULT ''"),
+                # L1 醒后补课三字段：是否@我 / 引用哪条 / 处理过没有
+                ("is_at_me", "ALTER TABLE msg_archive ADD COLUMN is_at_me INTEGER DEFAULT 0"),
+                ("reply_to_msg_id", "ALTER TABLE msg_archive ADD COLUMN reply_to_msg_id TEXT DEFAULT ''"),
+                ("handled", "ALTER TABLE msg_archive ADD COLUMN handled INTEGER DEFAULT 0"),
             ):
                 if name not in msg_cols:
                     self._conn.execute(stmt)
+            # L2 醒后补课按 handled 增量读
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_msg_handled ON msg_archive(handled, session_id, id)"
+            )
         except Exception as exc:
             raise RuntimeError("msg_archive migration failed") from exc
         if "mem_level" not in columns:
@@ -649,7 +657,13 @@ class Store:
                 except BaseException:
                     conn.rollback()
                     raise
-        return await asyncio.to_thread(_run)
+        task = asyncio.create_task(asyncio.to_thread(_run))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # 重载取消请求时，仍等原子提交/回滚完成，不能留下半批已读。
+            await asyncio.shield(task)
+            raise
 
     async def commit(self) -> None:
         def _run() -> None:

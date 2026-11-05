@@ -16,7 +16,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.prompt_parts import add_temp_part
+from ..core.prompt_parts import add_temp_part, next_temp_version, request_temp_source
 
 from ..core.contracts import Block, PerceivedMessage
 from .card import parse_card
@@ -25,7 +25,7 @@ from .media import MediaInterpreter
 from .quote import QuoteExpander
 from .render import blocks_to_text, component_to_block
 
-MEDIA_TIMEOUT = 6.0
+MEDIA_TIMEOUT = 12.0
 MARKER_PREFIX = "<!--congling:perceived:"
 
 
@@ -40,6 +40,14 @@ class PerceptionService:
 
     # ================================================================ 主流程
     async def perceive(self, event: Any, enrich: bool = True) -> PerceivedMessage:
+        cached = getattr(event, "_congling_perceived", None)
+        if isinstance(cached, PerceivedMessage):
+            # 归档先解析、生成前才补媒体；同一事件不重新展开转发或重复调用视觉模型。
+            if enrich and not cached.meta.get("_media_enriched"):
+                await self._enrich_with_timeout(cached)
+                cached.meta["_media_enriched"] = True
+                cached.text = blocks_to_text(cached.blocks)
+            return cached
         # 先挂上当前事件与 bot：转发展开、引用拉取都要用
         self.plugin._current_event = event
         self.plugin._current_bot = getattr(event, "bot", None)
@@ -87,8 +95,27 @@ class PerceptionService:
         msg.mentions = [b.text for b in blocks if b.kind == "at"]
         msg.is_forward_expanded = any(b.kind == "forward" and b.meta.get("expanded") for b in blocks)
 
+        # L1：探测 bot 自身 id，供「是否@我」判定。失败静默降级。
+        try:
+            self_id = ""
+            for getter in ("get_self_id", "get_bot_id"):
+                func = getattr(event, getter, None)
+                if callable(func):
+                    try:
+                        value = func()
+                        if value:
+                            self_id = str(value)
+                            break
+                    except Exception:
+                        continue
+            msg.meta["self_id"] = self_id
+        except Exception:
+            msg.meta["self_id"] = ""
+
         if enrich:
             await self._enrich_with_timeout(msg)
+            msg.meta["_media_enriched"] = True
+            msg.text = blocks_to_text(blocks)
 
         # 缓存当前事件与消息，供记忆、拟人、QQ 扩展复用
         self.plugin._current_event = event
@@ -115,7 +142,7 @@ class PerceptionService:
             return ""
         try:
             rows = await self.store.fetch_all(
-                "SELECT sender_name, text FROM msg_archive "
+                "SELECT sender_id, sender_name, text FROM msg_archive "
                 "WHERE session_id=? AND ts<=? AND msg_id<>? AND text IS NOT NULL AND text<>'' "
                 "ORDER BY id DESC LIMIT ?",
                 (msg.session_id, msg.ts, msg.msg_id, int(limit)),
@@ -136,6 +163,9 @@ class PerceptionService:
             if len(text) > 600:
                 text = text[:600] + "…"
             name = str(row.get("sender_name") or "")
+            if str(row.get("sender_id") or "") == "bot":
+                # 老归档中的休眠角色名不能作为当前对话里的另一个参与者。
+                name = "你自己（bot）"
             line = f"{name}: {text}" if name else text
             if total + len(line) > budget:
                 lines.insert(0, "…（更早的略）")
@@ -178,7 +208,9 @@ class PerceptionService:
             + "\n".join(sections)
             + "\n【补充结束】"
         )
-        add_temp_part(req, block, marker)
+        add_temp_part(req, block, marker,
+            source=request_temp_source(req, event, "congling.perception",
+                version=next_temp_version(req, "congling.perception")))
 
     def _prompt_sections(self, msg: PerceivedMessage) -> list[str]:
         sections: list[str] = []
@@ -262,7 +294,9 @@ class PerceptionService:
         tasks: list[asyncio.Task] = []
         for block in msg.blocks:
             if block.kind == "image" and block.meta.get("url"):
-                tasks.append(asyncio.create_task(self._describe(block)))
+                source = str(msg.meta.get("umo") or "") + ":" + msg.sender_id
+                source += ":" + str(self.config.persona_id)
+                tasks.append(asyncio.create_task(self._describe(block, source)))
             elif block.kind == "voice" and block.meta.get("url"):
                 tasks.append(asyncio.create_task(self._transcribe(block)))
         if not tasks:
@@ -274,8 +308,8 @@ class PerceptionService:
         except Exception as exc:
             logger.debug(f"[congling] 媒体理解异常: {exc!r}")
 
-    async def _describe(self, block: Block) -> None:
-        text = await self.media.describe_image(str(block.meta.get("url") or ""))
+    async def _describe(self, block: Block, source: str = "") -> None:
+        text = await self.media.describe_image(str(block.meta.get("url") or ""), source)
         if text and text != "[图片]":
             block.text = text
             block.meta["described"] = True
@@ -287,6 +321,36 @@ class PerceptionService:
             block.meta["transcribed"] = True
 
     # ================================================================ 归档
+    def _is_at_me(self, msg: PerceivedMessage) -> int:
+        """判定这条消息是否@了 bot。返回 0/1。"""
+        self_id = str(msg.meta.get("self_id") or "")
+        if not self_id:
+            return 0
+        for mention in msg.mentions or []:
+            text = str(mention)
+            if self_id in text:
+                return 1
+        # at 块可能带 meta 里的目标 id
+        for block in msg.blocks:
+            if block.kind == "at":
+                target = str(block.meta.get("target_id") or block.meta.get("qq") or "")
+                if target and self_id in target:
+                    return 1
+        return 0
+
+    def _reply_to_id(self, msg: PerceivedMessage) -> str:
+        """引用的目标消息 id。取 quote 块的 meta，退而求其次取 forward_id。"""
+        for block in msg.blocks:
+            if block.kind == "quote":
+                rid = str(block.meta.get("id") or block.meta.get("reply_id") or "")
+                if rid:
+                    return rid
+            if block.kind == "forward":
+                rid = str(block.meta.get("forward_id") or block.meta.get("id") or "")
+                if rid:
+                    return rid
+        return ""
+
     async def archive(self, msg: PerceivedMessage) -> None:
         if not msg.text and not msg.blocks:
             return
@@ -308,10 +372,21 @@ class PerceptionService:
             blocks_json = json.dumps(blocks, ensure_ascii=False, default=str)
 
         try:
+            if msg.meta.get("_archive_written"):
+                if msg.meta.get("_media_enriched") and not msg.meta.get("_archive_enriched"):
+                    # 只补当前事件的观察结果；旧归档和数据库结构不做迁移。
+                    await self.store.execute(
+                        "UPDATE msg_archive SET text=?, blocks_json=? WHERE msg_id=? AND session_id=? "
+                        "AND sender_id=? AND umo=?",
+                        (msg.text, blocks_json, dedupe_id, msg.session_id, msg.sender_id,
+                         str(msg.meta.get("umo") or "")),
+                    )
+                    msg.meta["_archive_enriched"] = True
+                return
             await self.store.execute(
                 "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
-                "blocks_json, expanded, forward_id, umo, platform) "
-                "SELECT ?,?,?,?,?,?,?,?,?,?,?,? "
+                "blocks_json, expanded, forward_id, umo, platform, is_at_me, reply_to_msg_id, handled) "
+                "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? "
                 "WHERE NOT EXISTS(SELECT 1 FROM msg_archive WHERE msg_id = ? AND session_id = ?)",
                 (
                     dedupe_id,
@@ -333,10 +408,15 @@ class PerceptionService:
                     ),
                     str(msg.meta.get("umo") or ""),
                     str(msg.meta.get("platform") or ""),
+                    self._is_at_me(msg),
+                    self._reply_to_id(msg),
+                    0,
                     dedupe_id,
                     msg.session_id,
                 ),
             )
+            msg.meta["_archive_written"] = True
+            msg.meta["_archive_enriched"] = bool(msg.meta.get("_media_enriched"))
             await self.plugin.bus.emit(self.plugin.bus.ON_PERCEIVED, msg)
         except Exception as exc:
             logger.debug(f"[congling] 消息归档失败: {exc!r}")

@@ -111,6 +111,13 @@ def is_closing(text: str, config: Any) -> tuple[bool, str, str]:
     if not strength:
         return False, "", ""
 
+    # 短指令必须整句表达收线，不能把“模型停止回复”里的“停”当用户要下线。
+    if word in {"停", "闭嘴", "安静"}:
+        compact = re.sub(r"[\s，,。.!！~～、]+", "", body)
+        command = rf"(?:你|请|先|给我|麻烦你)?{re.escape(word)}(?:一下|一会儿|一会|点|吧|了)?"
+        if re.fullmatch(command, compact) is None:
+            return False, "", ""
+
     # 1. 叙述别人说的话，不算
     if _looks_like_narration(body):
         return False, "", ""

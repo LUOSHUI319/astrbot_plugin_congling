@@ -98,15 +98,16 @@ def drain(
     messages: int,
     per_minute: float,
     per_message: float,
+    high: float = 100.0,
 ) -> float:
-    """疲劳期内扣精力。"""
+    """疲劳期内扣精力。high 是精力上限（应传 energy_max），默认 100 兼容旧调用。"""
     spend = max(0.0, minutes) * max(0.0, per_minute) + max(0, messages) * max(0.0, per_message)
-    return clamp(energy - spend)
+    return clamp(energy - spend, high=high)
 
 
-def recover(energy: float, *, minutes: float, per_minute: float) -> float:
-    """非疲劳期回精力。"""
-    return clamp(energy + max(0.0, minutes) * max(0.0, per_minute))
+def recover(energy: float, *, minutes: float, per_minute: float, high: float = 100.0) -> float:
+    """非疲劳期回精力。high 是精力上限（应传 energy_max），默认 100 兼容旧调用。"""
+    return clamp(energy + max(0.0, minutes) * max(0.0, per_minute), high=high)
 
 
 def exhausted(energy: float, threshold: float = 0.5) -> bool:

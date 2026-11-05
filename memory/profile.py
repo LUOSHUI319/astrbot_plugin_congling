@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core.modelhub import provider_request_budget
 from ..core.memory_guard import memory_work
 from ..core.exc import exc_brief
 
@@ -121,7 +123,9 @@ class ProfileBook:
             .replace("{atoms}", body[:6000])
         )
         try:
-            resp = await provider.text_chat(prompt=prompt, contexts=[])
+            async with asyncio.timeout(60):
+                with provider_request_budget(provider, 1024) as options:
+                    resp = await provider.text_chat(prompt=prompt, contexts=[], **options)
             raw = str(getattr(resp, "completion_text", "") or "")
         except Exception as exc:
             logger.warning(f"[congling] 画像生成失败: {exc_brief(exc)}")

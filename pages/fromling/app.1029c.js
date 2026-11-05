@@ -287,6 +287,20 @@ const NIGHT_DREAM_KEYS = [
   "dream_tags",
   "dream_extra_tags",
 ];
+const NIGHT_ROLLUP_KEYS = [
+  "waking_timeout_minutes",
+  "rollup.enabled",
+  "rollup.chunk_size",
+  "rollup.chunk_window_minutes",
+  "rollup.chunk_hard_cap",
+  "rollup.hi_threshold",
+  "rollup.mid_threshold",
+  "rollup.max_replies_per_wake",
+  "rollup.mirror_livingmemory",
+  "rollup.wake_idle_minutes",
+  "rollup.idle_merge_seconds",
+  "rollup.wake_mood_pool",
+];
 
 let nightTab = "state";
 
@@ -331,6 +345,7 @@ function sliceItems(group, keys) {
 const NIGHT_NUM_RANGE = {
   wake_jitter_minutes: [0, 90, 1],
   wake_window_minutes: [1, 60, 1],
+  waking_timeout_minutes: [1, 999, 1],
   wake_start_count: [1, 10, 1],
   wake_step_count: [1, 10, 1],
   energy_max: [10, 200, 10],
@@ -395,7 +410,9 @@ function nightControl(item) {
 }
 
 function nightRowHtml(item) {
-  const hint = item.hint ? `<span class="hint">${esc(firstSentence(item.hint))}</span>` : "";
+  const text = ["waking_timeout_minutes", "rollup.wake_idle_minutes"].includes(item.key)
+    ? item.hint : firstSentence(item.hint);
+  const hint = item.hint ? `<span class="hint">${esc(text)}</span>` : "";
   return `<div class="cfg-row">
     <div class="cfg-label">${esc(item.label)}${hint}</div>
     <div>${nightControl(item)}</div>
@@ -406,7 +423,7 @@ function nightCard(title, desc, items) {
   if (!items || !items.length) return "";
   return `<section class="cfg-group">
     <div class="cfg-head">
-      <h3>${esc(title)}</h3>
+      ${title === "醒后补课" ? `<div class="rollup-help-heading"><h3>${esc(title)}</h3>${nightRollupHelpButton()}</div>` : `<h3>${esc(title)}</h3>`}
       <p>${esc(desc)}</p>
     </div>
     ${items.map((item) => nightRowHtml(item)).join("")}
@@ -702,6 +719,7 @@ function nightSettingsPage(settings) {
     ${nightCard("精力", "疲劳期里怎么掉、平时怎么回", sliceItems(night, [...NIGHT_ENERGY_KEYS, "min_turns_before_sleep"]))}
     ${nightCard("爬楼", "关掉之后睡着的记忆就直接可读了", sliceItems(night, NIGHT_MEMORY_KEYS))}
     ${nightCard("梦境", "关掉就不做梦，开着 token 消耗会明显增加", sliceItems(night, NIGHT_DREAM_KEYS))}
+    ${nightCard("醒后补课", "补课摘要与回复；静默待机只准备一次想睡文案，不会自动入睡", sliceItems(night, NIGHT_ROLLUP_KEYS))}
     ${configCard(close, { title: "收线静默", desc: "聊到晚安、拜拜这种话就真的停下来" })}
     ${pageActions("保存本页设置")}
   `;
@@ -831,6 +849,7 @@ async function renderNight() {
     ["sleep", "睡眠"],
     ["memory", "记忆"],
     ["dream", "梦境"],
+    ["log", "日志"],
     ["config", "设置"],
   ];
   if (!TABS.some(([key]) => key === nightTab)) nightTab = "state";
@@ -844,13 +863,14 @@ async function renderNight() {
   let needSettings = nightTab === "config";
   let needDreams = nightTab === "dream";
   let needUnread = nightTab === "state" || nightTab === "memory";
-  let needState = nightTab === "state" || nightTab === "sleep" || nightTab === "memory";
+  let needState = nightTab === "state" || nightTab === "sleep" || nightTab === "memory" || nightTab === "log";
 
-  const [stateData, settings, dreamData, unreadData] = await Promise.all([
+  const [stateData, settings, dreamData, unreadData, logData] = await Promise.all([
     needState ? get("night/state").catch(() => ({})) : Promise.resolve({}),
     needSettings ? loadSettings() : Promise.resolve(null),
     needDreams ? get("/night/dreams", { limit: 40 }).catch((err) => ({ __error: String((err && err.message) || err) })) : Promise.resolve(null),
     needUnread ? get("/night/unread", { limit: 40 }).catch(() => ({ items: [] })) : Promise.resolve(null),
+    nightTab === "log" ? nightLogFetch() : Promise.resolve(null),
   ]);
 
   const dreams = (dreamData && dreamData.items) || [];
@@ -861,9 +881,11 @@ async function renderNight() {
   else if (nightTab === "memory") body = nightMemoryPage(unread, stateData);
   else if (nightTab === "dream") body = nightDreamPage(dreamData);
   else if (nightTab === "config") body = nightSettingsPage(settings);
+  else if (nightTab === "log") body = nightLogPage(stateData, logData);
   else body = nightStatePage(stateData, unread);
 
   view.innerHTML = `<div class="night-page">${tabsHtml}${body}</div>`;
+  if (nightTab === "log") nightLogBind(logData);
 
   /* 子标签切换 */
   view.querySelectorAll(".sub-tab").forEach((btn) => {
@@ -1808,7 +1830,7 @@ async function renderPersona() {
     <div class="mode-picker" id="mode-picker">
       ${modeCard("builtin", "插件自带「绫」", "写在本插件里，可直接编辑", mode)}
       ${modeCard("astrbot", "AstrBot 人格", "用框架里已有的人格", mode)}
-      ${modeCard("none", "只用默认", "完全交给 AstrBot 默认人设", mode)}
+      ${modeCard("none", "无人格", "不加入任何角色身份", mode)}
     </div>
 
     <div id="persona-body"></div>
@@ -1822,6 +1844,21 @@ async function renderPersona() {
   const body = document.getElementById("persona-body");
   let currentMode = mode;
   let currentAstrId = selected;
+  let selecting = false;
+  async function persistChoice(nextMode, nextId) {
+    const msg = document.getElementById("p-saved");
+    if (selecting) return false;
+    selecting = true;
+    msg.textContent = "切换中…";
+    try {
+      await post("page/persona/save", { mode: nextMode, astrbot_persona_id: nextId });
+      msg.textContent = "已立即生效";
+      return true;
+    } catch (err) {
+      msg.textContent = "切换失败：" + (err.message || err);
+      return false;
+    } finally { selecting = false; }
+  }
 
   function drawBody() {
     if (currentMode === "builtin") {
@@ -1875,8 +1912,14 @@ async function renderPersona() {
           </div>
         </div>`;
       const select = document.getElementById("p-astr");
-      select.onchange = () => {
-        currentAstrId = select.value;
+      select.value = currentAstrId;
+      select.onchange = async () => {
+        const nextId = select.value;
+        select.disabled = true;
+        const saved = await persistChoice(currentMode, nextId);
+        select.disabled = false;
+        if (!saved) { select.value = currentAstrId; return; }
+        currentAstrId = nextId;
         const pick = personas.find((item) => item.id === currentAstrId);
         document.getElementById("astr-prompt").textContent =
           (pick && pick.prompt) || "这个人格没有写 system prompt，将使用 AstrBot 的默认设定";
@@ -1887,7 +1930,7 @@ async function renderPersona() {
           <div class="cfg-head"><h3>不用插件人设</h3><p>本插件不注入任何人设文本</p></div>
           <div class="pad">
             <p class="hint" style="margin:0 0 10px">
-              它会完全按 AstrBot 的默认人格说话。插件仍然补充「关系远近、当前状态、群聊还是私聊」这三条信息，
+              不加入内置或 AstrBot 的角色身份。插件仍然补充「关系远近、当前状态、群聊还是私聊」这三条信息，
               因为那些属于上下文，不属于人设。
             </p>
           </div>
@@ -1915,8 +1958,10 @@ async function renderPersona() {
   }
 
   view.querySelectorAll(".mode-card").forEach((card) => {
-    card.onclick = () => {
-      currentMode = card.dataset.mode;
+    card.onclick = async () => {
+      const nextMode = card.dataset.mode;
+      if (nextMode === currentMode || !await persistChoice(nextMode, currentAstrId)) return;
+      currentMode = nextMode;
       view.querySelectorAll(".mode-card").forEach((item) => {
         const on = item.dataset.mode === currentMode;
         item.classList.toggle("is-on", on);

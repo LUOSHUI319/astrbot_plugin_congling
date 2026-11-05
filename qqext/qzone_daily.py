@@ -83,6 +83,7 @@ class QzoneDaily:
             hours = sorted(random.sample(range(9, 24), min(target, 15)))
             raw = {"day": day, "target": target, "hours": hours, "posted": []}
             await self.store.kv_set(self._state_key(day), raw)
+            logger.info(f"[congling] 今日说说计划：目标 {target} 条，时段 {hours}")
         return raw
 
     # ------------------------------------------------------------ 触发
@@ -100,10 +101,14 @@ class QzoneDaily:
         if len(posted) >= int(state.get("target") or 0):
             return {"ok": False, "reason": "今天配额已满"}
         hour = time.localtime().tm_hour
-        if hour not in (state.get("hours") or []):
+        due_count = sum(1 for planned in (state.get("hours") or []) if int(planned) <= hour)
+        if len(posted) >= due_count:
             return {"ok": False, "reason": "还没到今天的时段"}
 
-        return await self.post_now(reason="auto")
+        result = await self.post_now(reason="auto")
+        if not result.get("ok"):
+            logger.warning(f"[congling] 自动说说到点但未发出：{result.get('reason') or '未知原因'}")
+        return result
 
     async def force_post(self) -> dict[str, Any]:
         bridge = self._bridge()

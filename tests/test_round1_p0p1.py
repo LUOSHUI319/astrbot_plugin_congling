@@ -55,7 +55,6 @@ class Round1(unittest.IsolatedAsyncioTestCase):
         await self.store.close()
         self.tmp.cleanup()
 
-    @unittest.skip("P5 已把人格改为跟随 AstrBot：不再有 builtin 改名/分区模型。等价断言见 tests/test_round5_p5.py 的 Persona 类")
     async def test_persona_rename_preserves_id_partition_and_memory_count(self):
         persona = PersonaService(self.p)
         old_id, key = persona.get().persona_id, persona.key
@@ -100,7 +99,6 @@ class Round1(unittest.IsolatedAsyncioTestCase):
         api.plugin = self.p
         return module, api
 
-    @unittest.skip("P5 已把人格改为跟随 AstrBot：不再有 builtin 改名/分区模型。等价断言见 tests/test_round5_p5.py 的 Persona 类")
     async def test_persona_api_returns_error_without_saving_mode(self):
         self.p.persona = PersonaService(self.p)
         module, api = self.page_api()
@@ -325,7 +323,9 @@ class Round1(unittest.IsolatedAsyncioTestCase):
     async def test_woke_request_reentry_is_temp_once_and_does_not_change_prefix(self):
         night = await self.wake()
         req = types.SimpleNamespace(system_prompt="STATIC", extra_user_content_parts=[], contexts=[])
-        event = types.SimpleNamespace(unified_msg_origin="group:G")
+        event = types.SimpleNamespace(unified_msg_origin="group:G",
+                                      get_group_id=lambda: "G", get_sender_id=lambda: "u",
+                                      get_message_id=lambda: "m")
         with patch("astrbot_plugin_congling.night.time.time", return_value=NOW):
             await self.p.persona_hook(event, req)
             await self.p.persona_hook(event, req)
@@ -503,7 +503,8 @@ class Round1(unittest.IsolatedAsyncioTestCase):
             avatar=object(),
             avatar_pool=types.SimpleNamespace(auto_change=AsyncMock(side_effect=RuntimeError("PRIVATE"))))
         with self.assertLogs("congling-offline-test", level="WARNING") as logs:
-            await self.p._qq_daily_tick()
+            await self.p._qzone_daily_tick()
+            await self.p._qq_hourly_tick()
         self.p.qqext.avatar_pool.auto_change.assert_awaited_once_with(self.p.qqext.avatar)
         self.assertIn("每日说说任务出错", "".join(logs.output))
         self.assertIn("自动换头像失败", "".join(logs.output))
@@ -555,7 +556,7 @@ class SourceGuards(unittest.TestCase):
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"), object_pairs_hook=unique)
         night = schema["night"]["items"]
         added = {"dream_mode", "dream_mention_min_level", "dream_hint_scope",
-                 "dream_recall_guard", "dream_recall_k"}
+                 "dream_recall_guard", "dream_recall_k", "rollup", "waking_timeout_minutes"}
         self.assertTrue(added <= night.keys())
         self.assertEqual(len(night.keys() - added), 47)
         for key in ("woke_hint_max_uses", "woke_hint_ttl_minutes", "dream_hint_max_uses", "dream_hint_ttl_minutes"):
@@ -579,7 +580,8 @@ class SourceGuards(unittest.TestCase):
 
     def test_background_failures_not_downgraded_and_normal_debug_retained(self):
         selected = {
-            "main.py": {"initialize", "terminate", "_housekeeping", "_beat_loop", "_dream_loop", "_qq_daily_tick"},
+            "main.py": {"initialize", "terminate", "_housekeeping", "_beat_loop", "_dream_loop",
+                        "_qzone_daily_tick", "_qq_hourly_tick"},
             "memory/service.py": {"start", "flush", "_scheduler", "_sweep", "_extract_session", "_prepare_drafts", "daily_tick", "build_profiles"},
             "humanize/proactive.py": None,
             "night/state.py": None, "night/dream.py": None, "night/__init__.py": None,
@@ -614,10 +616,10 @@ class SourceGuards(unittest.TestCase):
                 if path.name != "persona.py" and isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
                     self.assertNotEqual(node.attr, "system_prompt", str(path))
 
-    def test_metadata_and_plugin_version_unchanged(self):
+    def test_metadata_and_plugin_version_match_upstream_111(self):
         self.assertEqual(hashlib.sha256((ROOT / "metadata.yaml").read_bytes()).hexdigest(),
-                         "79dbdd355b377cb6359d36d19594a6f3f17471c283f67b7df7ad477fb7b280a3")
-        self.assertEqual(importlib.import_module("astrbot_plugin_congling.main").PLUGIN_VERSION, "1.1.0")
+                         "bf7bdf5cb340ac41e0ebc79ee3ce4208e7c6c4042770dc640ba407ba3ce0bef4")
+        self.assertEqual(importlib.import_module("astrbot_plugin_congling.main").PLUGIN_VERSION, "1.1.1")
 
     def test_all_19_page_assets_present(self):
         """P6 之外唯一允许改前端的一轮（P5 加了删除记忆按钮），

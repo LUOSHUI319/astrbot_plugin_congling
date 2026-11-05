@@ -19,7 +19,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.prompt_parts import add_temp_part
+from ..core.prompt_parts import add_temp_part, next_temp_version, request_temp_source
 from ..core.memory_guard import memory_work
 
 from ..core.budget import BudgetSlice
@@ -240,9 +240,14 @@ class MemoryService:
     # ================================================================ 注入
     @memory_work
     async def inject(self, event: Any, req: Any) -> None:
-        if self.plugin.probe.should_yield("memory") and self.config.bool("compat.yield_memory", True):
-            logger.debug("[congling] 记忆已让位给外部插件")
-            return
+        # 让位判定：探测到 livingmemory 等外部记忆插件时，记忆事实改从
+        # livingmemory 检索（统一中枢），但 congling 自己的好感度 / 画像
+        # 仍照常注入 —— 那套关系状态机不因让位而停摆。
+        use_lm = self.plugin.probe.should_yield("memory") and self.config.bool(
+            "compat.yield_memory", True
+        )
+        if use_lm:
+            logger.debug("[congling] 记忆事实让位给 livingmemory，改从统一中枢检索")
 
         # 先看事件自己带着的消息，再退回全局变量。
         # 全局变量是「最后一次被感知的消息」，两个会话并发时 A 会用 B 的话去搜。
@@ -310,10 +315,14 @@ class MemoryService:
         cross_enabled = (cs_mode != "off" and self.config.bool("memory.cross_session_recall", True)
                          and self.config.str("memory.cross_session_scope", "same_user").strip().lower() != "off")
         try:
-            hits = await self.retriever.search(
-                query, scope=scope, subject=subject, session_ref=where_ref, actor_ref=who_ref,
-                exclude=recent_ids, k=top_k, mode=cs_mode, cross_session=cross_enabled,
-            )
+            if use_lm:
+                bridge = getattr(self.plugin, "lm_bridge", None)
+                hits = await bridge.search(query, k=top_k, where_ref=where_ref) if bridge else []
+            else:
+                hits = await self.retriever.search(
+                    query, scope=scope, subject=subject, session_ref=where_ref, actor_ref=who_ref,
+                    exclude=recent_ids, k=top_k, mode=cs_mode, cross_session=cross_enabled,
+                )
         except Exception as exc:
             self._recall = {"last_hits": None, "at": int(time.time()), "error": type(exc).__name__}
             logger.warning(f"[congling] 记忆召回失败: {exc_brief(exc)}")
@@ -377,7 +386,12 @@ class MemoryService:
         ratio = self.config.float("memory.inject_budget_ratio", 0.25)
         limit = max(200, int(4000 * max(0.05, min(ratio, 0.6))))
         slices = [
-            BudgetSlice(name=f"hit:{hit.atom_id}", priority=index, text=hit.line())
+            # use_lm 时 livingmemory 的 hit.atom_id 都是 0，用索引兜底避免同名
+            BudgetSlice(
+                name=f"hit:{hit.atom_id if hit.atom_id else f'lm{index}'}",
+                priority=index,
+                text=hit.line(),
+            )
             for index, hit in enumerate(hits)
         ]
         packed = self.plugin.budget.pack(slices, limit) if hits else None
@@ -393,7 +407,14 @@ class MemoryService:
             f"{content}\n"
             "【记忆结束】"
         )
-        add_temp_part(req, block, MARKER)
+        add_temp_part(req, block, MARKER,
+            source=request_temp_source(req, event, "congling.memory",
+                version=next_temp_version(req, "congling.memory")))
+
+        # 命中标记 / 游标推进只对 congling 自己的记忆库有意义；
+        # 让位给 livingmemory 时，统一中枢那边自己维护命中统计，这里跳过。
+        if use_lm:
+            return
 
         kept_names = {item.name for item in packed.kept} if packed is not None else set()
         hit_ids = [hit.atom_id for hit in hits if f"hit:{hit.atom_id}" in kept_names]

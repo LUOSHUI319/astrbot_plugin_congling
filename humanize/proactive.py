@@ -210,8 +210,8 @@ class Proactive:
         if self.config.bool("proactive.respect_night", True) and night is not None:
             state_obj = getattr(getattr(night, "state", None), "state", None)
             mode = str(getattr(state_obj, "mode", "") or "")
-            if mode in ("asleep", "waking"):
-                return False, "她在睡/刚醒", 0.0
+            if mode == "asleep":
+                return False, "她在睡", 0.0
             try:
                 energy = float(getattr(state_obj, "energy", 100.0))
             except (TypeError, ValueError):
@@ -326,8 +326,11 @@ class Proactive:
         return text.rstrip().endswith(("?", "？", "吗", "呢"))
 
     # ================================================================ 生成
-    async def compose(self, row: dict[str, Any], *, reason: str = "idle") -> str:
+    async def compose(self, row: dict[str, Any], *, reason: str = "idle",
+                      identity: dict[str, Any] | None = None) -> str:
         session_id = str(row.get("session_id") or "")
+        umo = self._umo_of(row)
+        identity = identity or await self.plugin.persona.resolve(umo)
         length = max(10, min(120, self._cfg_int("length", 40)))
         scene_bits = [f"现在 {time.strftime('%H:%M', time.localtime())}"]
         if reason == "after_wake":
@@ -385,9 +388,10 @@ class Proactive:
         if model is None:
             return ""
         try:
-            raw = await model.chat(
+            raw = await model.character_chat(
                 prompt,
                 system="你现在想主动跟人说一句话，只输出这句话。",
+                umo=umo, identity=identity,
                 temperature=0.9,
                 max_tokens=200,
             )
@@ -432,58 +436,38 @@ class Proactive:
         if not session_id:
             return {"ok": False, "error": "没有会话号"}
         async with self._lock:
-            text = await self.compose(row, reason=reason)
+            await self.load()
+            umo = self._umo_of(row)
+            try:
+                if self.plugin.night is not None:
+                    await self.plugin.night.wake_flow.prepare(
+                        session_id, umo,
+                        lambda text, phase, identity: self.send_stage(
+                            row, text, phase, identity
+                        ),
+                    )
+                identity = await self.plugin.persona.resolve(umo)
+                epoch = await self.plugin.night.wake_flow.epoch() if self.plugin.night else None
+                activity = await self.store.scalar(
+                    "SELECT MAX(id) FROM msg_archive WHERE session_id=? AND sender_id<>'bot'",
+                    (session_id,),
+                )
+                text = await self.compose(row, reason=reason, identity=identity)
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
             if not text:
                 return {"ok": False, "error": "这次没生成出来"}
-            umo = self._umo_of(row)
-            context = getattr(self.plugin, "context", None)
-            if context is None or not hasattr(context, "send_message"):
-                return {"ok": False, "error": "拿不到发送通道"}
-
-            composer = getattr(self.plugin, "composer", None)
             try:
-                parts = composer.split(text, str(row.get("session_kind") or "private")) if composer else [text]
-            except Exception:
-                parts = [text]
-            parts = [p for p in parts if p.strip()][:3]
-            if not parts:
-                return {"ok": False, "error": "没有可发送的内容"}
-            action_id = uuid.uuid4().hex
-
-            from astrbot.api.event import MessageChain
-            from astrbot.api.message_components import Plain
-
-            sent: list[str] = []
-            for index, part in enumerate(parts):
-                if index:
-                    await asyncio.sleep(random.uniform(0.8, 2.2))
-                ok = False
-                for attempt in range(2):
-                    try:
-                        response = await context.send_message(umo, MessageChain([Plain(text=part)]))
-                        # 框架的正常 void 返回仍兼容；明确 False/失败响应不能当成功。
-                        if response is False or (isinstance(response, dict) and (
-                            response.get("ok") is False or response.get("success") is False
-                            or response.get("status") == "failed"
-                            or response.get("retcode", 0) not in (0, "0"))):
-                            raise RuntimeError("发送通道报告失败")
-                        ok = True
-                        break
-                    except Exception as exc:
-                        logger.warning(f"[congling] 主动发送失败({attempt + 1}/2): {exc_brief(exc)}")
-                        await asyncio.sleep(1.5)
-                if not ok:
-                    if sent:
-                        await self._remember_sent(row, action_id, sent)
-                    state = self._sess(session_id)
-                    state["next_ok_at"] = int(time.time() + 3600)
-                    await self.save()
-                    return {"ok": False, "error": "发送失败"}
-                sent.append(part)
+                sent = await self.send_stage(row, text, "proactive", identity,
+                                             epoch=epoch, activity=activity)
+                text = " ".join(sent)
+            except Exception as exc:
+                self._sess(session_id)["next_ok_at"] = int(time.time() + 3600)
+                await self.save()
+                return {"ok": False, "error": str(exc)}
 
             now = int(time.time())
             # 发送已完成，先留成功证据；后面的配额/归档失败不抹掉已发生的动作。
-            await self._remember_sent(row, action_id, sent)
             state = self._sess(session_id)
             state["last_at"] = now
             state["sent_today"] = int(state.get("sent_today") or 0) + 1
@@ -491,38 +475,101 @@ class Proactive:
             self._global["sent_today"] = int(self._global.get("sent_today") or 0) + 1
             await self.save()
 
-            await self._archive(session_id, umo, " ".join(sent), str(row.get("session_kind") or "private"))
-            await self._log(session_id, umo, reason, " ".join(sent))
+            await self._log(session_id, umo, reason, text, identity=identity)
             if str(row.get("session_kind") or "private") == "private":
                 await self._bump_affinity(session_id)
-            logger.info(f"[congling] 主动说了一句（{reason}）：{session_id} / {len(sent)} 段")
-            return {"ok": True, "text": " ".join(sent), "umo": umo}
+            logger.info(f"[congling] 主动说了一句（{reason}）：{session_id} "
+                        f"persona={identity['mode']}:{identity['id']}")
+            return {"ok": True, "text": text, "umo": umo, "persona": identity["id"]}
 
-    async def _remember_sent(self, row: dict[str, Any], action_id: str, sent: list[str]) -> None:
-        session_id = str(row.get("session_id") or "")
-        kind = str(row.get("session_kind") or "private")
-        await remember_action(
-            self.plugin, "proactive", action_id,
-            f"我在{time.strftime('%Y-%m-%d %H:%M')}主动向{'群' if kind == 'group' else '联系人'}"
-            f"{session_id}发了消息：{' '.join(sent)}",
-            session_id=session_id, session_kind=kind,
-            platform=self._umo_of(row).split(":", 1)[0] or "qq",
-            result={"sent_parts": len(sent)},
-        )
+    async def send_stage(self, row: dict[str, Any], text: str, phase: str,
+                         identity: dict[str, Any], *, epoch: Any = None,
+                         activity: Any = None) -> list[str]:
+        """同一通道发送醒后阶段和主动正文；每段发送前检查当前作息与人格。"""
+        from astrbot.api.event import MessageChain
+        from astrbot.api.message_components import Plain
+        from ..core.reply_mentions import MentionReply
 
-    async def _archive(self, session_id: str, umo: str, text: str, kind: str) -> None:
+        umo = self._umo_of(row)
+        session_id = str(row["session_id"])
+        night = getattr(self.plugin, "night", None)
+        epoch = epoch if epoch is not None else (await night.wake_flow.epoch() if night else None)
+        # 醒后阶段不能截断补课文本；正文仍沿用原分句上限。
+        composer = getattr(self.plugin, "composer", None)
+        # 补答与真实 @ 同条发送，避免分句截断来源占位符；主动正文仍沿用原上限。
+        parts = ([text] if phase == "reply" or composer is None else
+                 composer.split(text, str(row.get("session_kind") or "private")))
+        parts = [p for p in parts if p.strip()]
+        if phase == "proactive":
+            parts = parts[:3]
+        if not parts:
+            raise RuntimeError("待发送内容为空")
+        sent: list[str] = []
+        action_id = uuid.uuid4().hex
+        try:
+            for index, part in enumerate(parts):
+                if index:
+                    await asyncio.sleep(random.uniform(0.8, 2.2))
+                if night:
+                    await night.wake_flow.check(epoch, identity, umo)
+                elif (await self.plugin.persona.resolve(umo))["token"] != identity["token"]:
+                    raise RuntimeError("人格已切换")
+                if phase == "proactive":
+                    latest = await self.store.scalar(
+                        "SELECT MAX(id) FROM msg_archive WHERE session_id=? AND sender_id<>'bot'",
+                        (session_id,),
+                    )
+                    if latest != activity:
+                        raise RuntimeError("会话收到新消息，撤销旧主动文本")
+                # 超时不能证明未发送；不盲重试，避免同一句重复出现。
+                chain = [Plain(text=part)]
+                archived = str(part)
+                if isinstance(text, MentionReply):
+                    archived = text.readable(str(part))
+                    if phase == "reply" and text.mentions and str(row.get("session_kind") or "") == "group":
+                        from astrbot.api.message_components import At
+                        chain = [At(qq=value) if kind == "at" else Plain(text=value)
+                                 for kind, value in text.segments(str(part))]
+                    else:
+                        chain = [Plain(text=archived)]
+                result = await self.plugin.context.send_message(umo, MessageChain(chain))
+                if result is False or (isinstance(result, dict) and (
+                    result.get("ok") is False or result.get("success") is False
+                    or result.get("status") == "failed" or result.get("retcode", 0) not in (0, "0")
+                )):
+                    raise RuntimeError("平台未确认发送成功")
+                sent.append(archived)
+                await self._archive(session_id, umo, archived, str(row.get("session_kind") or "private"),
+                                    identity=identity, phase=phase)
+        finally:
+            # 中途取消/失败也保留已经成功发送的片段，沿用新版自述证据规则。
+            if sent:
+                kind = str(row.get("session_kind") or "private")
+                await remember_action(
+                    self.plugin, "proactive", action_id,
+                    f"我在{time.strftime('%Y-%m-%d %H:%M')}向"
+                    f"{'群' if kind == 'group' else '联系人'}{session_id}发了消息：{' '.join(sent)}",
+                    session_id=session_id, session_kind=kind,
+                    platform=umo.split(":", 1)[0] or "qq",
+                    result={"sent_parts": len(sent), "phase": phase},
+                )
+        return sent
+
+    async def _archive(self, session_id: str, umo: str, text: str, kind: str, *,
+                       identity: dict[str, Any] | None = None, phase: str = "proactive") -> None:
         """主动消息也要进归档，否则下一轮上下文里她不知道自己刚说过话。"""
         try:
+            identity = identity or await self.plugin.persona.resolve(umo)
             platform = umo.split(":", 1)[0] if ":" in umo else ""
             await self.store.execute(
                 "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
-                "blocks_json, expanded, umo, platform) VALUES(?,?,?,?,?,?,?,?,0,?,?)",
+                "blocks_json, expanded, umo, platform, handled) VALUES(?,?,?,?,?,?,?,?,0,?,?,1)",
                 (
-                    f"proactive-{int(time.time() * 1000)}",
+                    f"{phase}-{time.time_ns()}",
                     session_id,
                     kind,
                     "bot",
-                    self.config.persona_name,
+                    identity["name"],
                     int(time.time()),
                     text,
                     "[]",
@@ -533,13 +580,15 @@ class Proactive:
         except Exception as exc:
             logger.warning(f"[congling] 主动消息归档失败: {exc_brief(exc)}")
 
-    async def _log(self, session_id: str, umo: str, reason: str, text: str, kind: str = "text") -> None:
+    async def _log(self, session_id: str, umo: str, reason: str, text: str, kind: str = "text",
+                   *, identity: dict[str, Any] | None = None) -> None:
         try:
+            identity = identity or await self.plugin.persona.resolve(umo)
             await self.store.execute(
                 "INSERT INTO proactive_log(persona_id, session_id, umo, at, reason, text, kind) "
                 "VALUES(?,?,?,?,?,?,?)",
                 (
-                    self.config.persona_id,
+                    identity["id"],
                     session_id,
                     umo,
                     int(time.time()),
@@ -673,7 +722,7 @@ class Proactive:
         if state is None:
             return False
         try:
-            waking = int(getattr(state, "enter_waking_at", 0) or 0)
+            waking = int(getattr(state, "last_wake_at", 0) or 0)
             return bool(waking and now - waking < 3600)
         except Exception:
             return False

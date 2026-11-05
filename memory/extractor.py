@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -16,6 +17,7 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core.contracts import MemoryDraft
+from ..core.modelhub import provider_request_budget
 from .perspective import narrator_name
 from .refs import actor_ref
 from ..core.exc import exc_brief
@@ -38,6 +40,7 @@ PROMPT = """你在帮一个聊天机器人整理长期记忆。下面是一段�
 8. level 是这条该记多久：1 随口一句（今天好热、在吗）/ 2 细节小事 / 3 平常事实（工作、爱好、常去的地方）/ 4 在意的事（偏好、雷点、约定、重要日期）/ 5 关键（身份、承诺、创伤、关系里程碑）
 9. level_tags 从这几个里挑，可以多选：identity 身份信息、promise 约定承诺、user_stress 用户强调、taboo 禁区底线、emotion_high 情绪浓度高、routine 日常寒暄、transient 一次性时效、preference 明确喜好、milestone 关系里程碑
 10. level_reason 用一句话写依据，例如「用户说别忘了这件事」「只是随口一问天气」；不要写空话
+补充来源规则：只记用户明确说出的事实。evidence 只引用用户消息序号，不引用机器人消息；不要记录对机器人错话的反省或解释。没有明确依据时不要补充性别。
 11. 只从 user 的明确陈述提取事实；assistant 只用于理解指代，不能作为事实证据。问句、假设、转述的不确定内容不当成事实。
 12. 机器人本人名为 {bot_name}。只有机器人本人可在 text 中称「我」，subject 固定为 __self__。
     人类发言中的「我」指该发言者，不是机器人；记人类事实时 text 用其明确姓名（无姓名用 ID），subject 用该人的 ID。
@@ -93,7 +96,11 @@ class MemoryExtractor:
             .replace("{conversation}", conversation)
         )
         try:
-            resp = await provider.text_chat(prompt=prompt, contexts=[])
+            # 十条通常只需约 2k 输出；高条数配置相应放宽，避免截断 JSON 丢水位。
+            output_limit = max(2048, max_atoms * 256)
+            async with asyncio.timeout(90):
+                with provider_request_budget(provider, output_limit) as options:
+                    resp = await provider.text_chat(prompt=prompt, contexts=[], **options)
             raw = str(getattr(resp, "completion_text", "") or "")
         except Exception as exc:
             logger.warning(f"[congling] 记忆抽取调用失败: {exc_brief(exc)}")
@@ -112,11 +119,21 @@ class MemoryExtractor:
         except Exception:
             pass
         drafts: list[MemoryDraft] = []
+        consumed_ids = set(map(str, consumed))
+        user_ids = {str(turn.get("idx", 0)) for turn in turns
+                    if turn.get("role") == "user" and str(turn.get("idx", 0)) in consumed_ids}
         for item in payload[: max(1, max_atoms)]:
             if not isinstance(item, dict):
                 continue
             text = str(item.get("text") or "").strip()
             if len(text) < 4:
+                continue
+            raw_evidence = item.get("evidence") or []
+            if not isinstance(raw_evidence, (list, tuple)):
+                raw_evidence = [raw_evidence]
+            evidence = [str(x).strip()[:40] for x in raw_evidence]
+            # 防止机器人自己的回复被写成事实，也不接受未送入本批的消息序号。
+            if evidence and not set(evidence).issubset(user_ids):
                 continue
             try:
                 confidence = float(item.get("confidence", 0.7))
@@ -137,7 +154,7 @@ class MemoryExtractor:
                     importance=max(0.0, min(1.0, importance)),
                     confidence=max(0.0, min(1.0, confidence)),
                     time_hint=str(item.get("time_hint") or "")[:40],
-                    evidence_msg_ids=[str(x)[:40] for x in (item.get("evidence") or [])][:5],
+                    evidence_msg_ids=evidence[:5],
                     level=self._level_of(item),
                     level_reason=str(item.get("level_reason") or "")[:160],
                     level_tags=[str(t)[:20] for t in (item.get("level_tags") or []) if str(t).strip()][:6],

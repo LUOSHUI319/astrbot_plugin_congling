@@ -12,6 +12,7 @@ from typing import Any
 # 与 _conf_schema.json 保持一致的代码内兜底默认值。
 # 作用：schema 缺字段、旧配置升级、单测直接构造，都能正常跑。
 DEFAULTS: dict[str, dict[str, Any]] = {
+    "bridge_livingmemory": {"enabled": False},
     "basic": {
         "enabled": True,
         "enable_private": True,
@@ -172,6 +173,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "yield_humanize": True,
         "yield_memory": True,
         "yield_rhythm": True,
+        # 醒后补课 L3 分流：是否耦合 at_guard。true=交 at_guard 打分，false=用 congling 自己的回复阈值
+        "at_guard_coupled": False,
     },
     "night": {
         "enabled": False,
@@ -197,6 +200,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "farewell_use_llm": False,
         "crawl_enabled": True,
         "crawl_use_llm": False,
+        "waking_timeout_minutes": 5,  # 补课状态兜底，区别于醒后静默待机
         "dream_enabled": False,
         "dream_mode": "hybrid",
         "dream_mention_min_level": 4,
@@ -216,9 +220,26 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "woke_hint_ttl_minutes": 120,
         "dream_hint_max_uses": 2,
         "dream_hint_ttl_minutes": 120,
+        "rollup": {
+            # 醒后补课流水线（L2 摘要 / L3 分流 / L4 逐条回复 / 双控制待机）
+            "enabled": False,                 # 总开关，默认全关
+            "chunk_size": 45,                 # L2 分块条数
+            "chunk_window_minutes": 60,       # L2 分块时间窗（分钟）
+            "chunk_hard_cap": 80,             # L2 单块硬上限（条）
+            "hi_threshold": 80,               # L3 高分线
+            "mid_threshold": 50,              # L3 低分线
+            "max_replies_per_wake": 3,        # L4 单次醒后最多回几条
+            "mirror_livingmemory": False,     # L5 镜像开关（长线记忆）
+            "wake_idle_minutes": 10,          # 醒后静默待机时长（分钟）
+            "idle_merge_seconds": 60,         # 待机结束前并入主回复的窗口（秒）
+            "wake_mood_pool": [],             # 强制唤醒情绪池，如 ["生气","温柔","朦胧","可爱"]
+        },
     },
     "close": {
         "enabled": True,
+        # 强档结束语（晚安/我睡了…）是否触发入睡。关掉后这类话不再直接睡到起床，
+        # 避免聊天里随口一句「晚安」就一路睡到明早。中档（拜拜/回头聊）不受影响。
+        "strong_enabled": True,
         "max_closing_chars": 40,
     },
     "proactive": {

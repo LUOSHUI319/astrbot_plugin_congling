@@ -478,37 +478,38 @@ class BackupAndTransaction(Fixture):
 
 
 class Persona(Fixture):
-    async def test_defaults_legacy_modes_no_builtin_identity(self):
+    async def test_default_astrbot_and_exclusive_modes_keep_dynamic_temp(self):
         self.assertEqual(Config().str("persona.mode"), "astrbot")
         for mode in ("builtin", "none", "invalid", "astrbot"):
             self.cfg.override("persona.mode", mode)
-            self.assertEqual(self.p.persona.mode, "astrbot")
+            self.assertEqual(self.p.persona.mode, mode if mode != "invalid" else "astrbot")
             req = types.SimpleNamespace(system_prompt="FRAMEWORK", extra_user_content_parts=[])
             event = types.SimpleNamespace(get_sender_id=lambda: "123", get_group_id=lambda: "")
             await self.p.persona.inject(event, req)
-            self.assertNotIn("你叫绫", req.system_prompt)
+            self.assertEqual("你叫绫" in req.system_prompt, mode == "builtin")
+            self.assertEqual("你是洛水" in req.system_prompt, mode in ("invalid", "astrbot"))
             self.assertNotIn("当前状态", req.system_prompt)
 
-    async def test_current_framework_persona_ignores_old_selection(self):
+    async def test_selected_framework_persona_is_effective_without_changing_storage_id(self):
+        current = types.SimpleNamespace(persona_id="小雪", name="当前小雪", system_prompt="框架人设")
         manager = types.SimpleNamespace(
-            get_default_persona_v3=AsyncMock(return_value={"name": "当前小雪", "prompt": "框架人设"}),
-            get_all_personas=AsyncMock(side_effect=AssertionError("must not enumerate")))
+            default_persona="小雪", get_persona=AsyncMock(return_value=current),
+            get_all_personas=AsyncMock(return_value=[current]))
         self.p.context.persona_manager = manager
-        self.cfg.override("persona.astrbot_persona_id", "旧选择")
+        self.cfg.override("persona.astrbot_persona_id", "小雪")
         self.assertEqual(await self.p.persona.display_name(), "当前小雪")
         data = (await self.api.get_persona())["data"]
-        self.assertEqual(data["name"], "当前小雪")
-        self.assertEqual(data["identity"], "框架人设")
+        self.assertEqual(data["effective"]["name"], "当前小雪")
+        self.assertEqual(data["effective"]["id"], "小雪")
         self.assertEqual(data["persona_id"], "ling")
-        manager.get_all_personas.assert_not_called()
+        manager.get_persona.assert_awaited_with("小雪")
 
     async def test_persona_id_payload_and_settings_bypasses_rejected(self):
-        for changes in ({"persona.persona_id": "other"}, {"persona.mode": "builtin"},
-                        {"persona.astrbot_persona_id": "other"},
+        for changes in ({"persona.persona_id": "other"}, {"persona.mode": "invalid"},
                         {"persona": {"persona_id": "other"}}):
             self.body = {"changes": changes}
             self.assertFalse((await self.api.save_settings())["ok"], changes)
-        for body in ({"persona_id": "other"}, {"mode": "builtin"}, {"astrbot_persona_id": "other"}):
+        for body in ({"persona_id": "other"}, {"mode": "invalid"}):
             self.body = body.copy()
             self.assertFalse((await self.api.save_persona())["ok"])
         self.assertEqual(self.cfg.persona_id, "ling")
@@ -526,9 +527,9 @@ class Persona(Fixture):
             self.assertEqual(MEMORY_BACKUP_DIR(), Path("plugin_data/congling/backups"))
         self.assertEqual((ROOT / "pages/fromling/night.js").read_bytes(),
                          (ROOT / "pages/fromling/night.1029c.js").read_bytes())
-        # 版本号从 1.0.1 提到 1.1.0，这里的哈希随之更新；改动元数据时同步改它
+        # 与上游 1.1.1 元数据一致；适配服务器修复时不另改版本号。
         self.assertEqual(hashlib.sha256((ROOT / "metadata.yaml").read_bytes()).hexdigest(),
-                         "79dbdd355b377cb6359d36d19594a6f3f17471c283f67b7df7ad477fb7b280a3")
+                         "bf7bdf5cb340ac41e0ebc79ee3ce4208e7c6c4042770dc640ba407ba3ce0bef4")
 
 
 MEMORY_BACKUP_DIR = paths.memory_backup_dir

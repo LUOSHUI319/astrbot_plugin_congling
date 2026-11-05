@@ -29,6 +29,7 @@ class CapabilityRegistry:
         self._uses: dict[str, list[float]] = defaultdict(list)
         self._stats: dict[str, dict[str, Any]] = {}
         self._tools: dict[str, Any] = {}
+        self._inflight: dict[str, Any] = {}
 
     # ================================================================ 生命周期
     async def start(self) -> None:
@@ -89,13 +90,25 @@ class CapabilityRegistry:
         if cap.auth == "admin" and not admin:
             return CapabilityResult(ok=False, text="这个要管理员才行", error="forbidden")
 
-        if not self._allow(name, session_id):
-            return CapabilityResult(ok=False, text="问得有点勤，先让我喘口气", error="rate_limited")
-
-        cached = await self._cache_get(cap, kwargs)
+        # 不能把私聊/事件相关查询的缓存共享给其他会话、用户或人格。
+        cache_args = dict(kwargs, __scope=self._scope(event, session_id, admin))
+        cached = await self._cache_get(cap, cache_args)
         if cached is not None:
             return cached
-
+        key = self._cache_key(cap, cache_args)
+        if cap.cache_ttl > 0 and key in self._inflight:
+            return await asyncio.shield(self._inflight[key])
+        if not self._allow(name, session_id):
+            return CapabilityResult(ok=False, text="问得有点勤，先让我喘口气", error="rate_limited")
+        if cap.cache_ttl <= 0:
+            return await self._invoke_uncached(cap, kwargs, event, cache_args)
+        task = asyncio.create_task(self._invoke_uncached(cap, kwargs, event, cache_args))
+        self._inflight[key] = task
+        task.add_done_callback(lambda _: self._inflight.pop(key, None))
+        return await asyncio.shield(task)
+    # 缓存未命中后共用的受限执行路径。
+    async def _invoke_uncached(self, cap, kwargs, event, cache_args):
+        name = cap.name
         started = time.perf_counter()
         try:
             handler = cap.handler
@@ -122,8 +135,17 @@ class CapabilityRegistry:
 
         self._record(name, result)
         if result.ok and cap.cache_ttl > 0:
-            await self._cache_set(cap, kwargs, result)
+            await self._cache_set(cap, cache_args, result)
         return result
+
+    def _scope(self, event, session_id, admin):
+        try:
+            origin = str(getattr(event, "unified_msg_origin", "") or session_id)
+            sender = str(event.get_sender_id()) if event is not None else ""
+            persona = event.get_extra("congling:persona_token") if event is not None else ""
+        except Exception:
+            origin, sender, persona = session_id, "", ""
+        return repr((origin, sender, persona or self.config.persona_id, bool(admin)))
 
     def _normalize(self, data: Any, cap: Capability, elapsed: float) -> CapabilityResult:
         if isinstance(data, CapabilityResult):
@@ -131,11 +153,12 @@ class CapabilityRegistry:
             return data
         if isinstance(data, dict):
             return CapabilityResult(
-                ok=True,
+                ok=data.get("ok") is not False and not data.get("error"),
                 text=str(data.get("text") or "").strip() or cap.fallback,
                 data=data.get("data", data),
                 source=str(data.get("source") or cap.name),
                 elapsed=elapsed,
+                error=str(data.get("error") or ""),
             )
         if isinstance(data, str):
             return CapabilityResult(ok=True, text=data.strip(), source=cap.name, elapsed=elapsed)
@@ -171,7 +194,7 @@ class CapabilityRegistry:
             return None
         if not cached or not isinstance(cached, dict):
             return None
-        if int(cached.get("expires_at") or 0) < int(time.time()):
+        if int(cached.get("expires_at") or 0) <= int(time.time()):
             return None
         return CapabilityResult(
             ok=True,
@@ -201,7 +224,7 @@ class CapabilityRegistry:
 
         payload = repr(sorted((str(k), str(v)) for k, v in kwargs.items()))
         digest = hashlib.sha1(payload.encode("utf-8", "ignore")).hexdigest()[:16]
-        return f"cap:{cap.name}:{digest}"
+        return f"cap:v2:{cap.name}:{digest}"
 
     def _record(self, name: str, result: CapabilityResult) -> None:
         stat = self._stats.setdefault(name, {"calls": 0, "errors": 0, "total_ms": 0.0})

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -17,6 +18,7 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core import paths
+from ..core.modelhub import provider_request_budget
 from .forgetting import ForgettingCurve
 from ..core.exc import exc_brief
 
@@ -26,6 +28,7 @@ REFLECT_PROMPT = """你在整理对一个用户的认识。下面是关于 TA �
 1. 只写有依据的，不要推测性格标签
 2. 优先写：TA 最近在做什么、在意什么、讨厌什么、有什么约定还没兑现
 3. 用第一人称，像自己心里的判断，不要分条列点
+4. 没有明确依据时不要补充性别、身份或关系；未知性别用名字或 TA，不能擅自写“他/她”
 
 记忆条目：
 {atoms}
@@ -158,6 +161,20 @@ class Maintenance:
         return changed
 
     async def reflect(self) -> None:
+        # 小时调度仅用于补跑：到配置时间后，每人每天成功一次；重启读取已有缓存。
+        hour = max(0, min(23, self.config.int("memory.reflect_hour", 4)))
+        if time.localtime().tm_hour < hour:
+            return
+        lock = getattr(self.store, "_congling_reflect_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.store._congling_reflect_lock = lock
+        # 锁挂在 Store 上，多个 Maintenance 实例与热重载不会同时付费生成。
+        async with lock:
+            await self._reflect_daily()
+
+    async def _reflect_daily(self) -> None:
+        today = time.strftime("%Y-%m-%d", time.localtime())
         rows = await self.store.fetch_all(
             "SELECT subject_id, scope, text, importance FROM mem_atom "
             "WHERE status='active' AND scope='user' AND importance>=0.55 "
@@ -174,11 +191,32 @@ class Maintenance:
         for subject, items in grouped.items():
             if not subject:
                 continue
-            body = "\n".join(f"- {item['text']}" for item in items[:30])
+            key = f"reflect:{self.config.persona_id}:{subject}"
+            cached = await self.store.kv_get(key, {})
             try:
-                resp = await provider.text_chat(
-                    prompt=REFLECT_PROMPT.format(atoms=body), contexts=[]
-                )
+                stamp = int(cached.get("ts") or 0) if isinstance(cached, dict) else 0
+                if stamp and time.strftime("%Y-%m-%d", time.localtime(stamp)) == today:
+                    continue
+            except (TypeError, ValueError, OverflowError):
+                pass
+            # 按完整条目选择输入，不把半句话送进反思模型。
+            lines = []
+            size = 0
+            for item in items[:30]:
+                line = f"- {item['text']}"
+                if size + len(line) + 1 > 6000:
+                    break
+                lines.append(line)
+                size += len(line) + 1
+            if not lines:
+                continue
+            body = "\n".join(lines)
+            try:
+                async with asyncio.timeout(60):
+                    with provider_request_budget(provider, 512) as options:
+                        resp = await provider.text_chat(
+                            prompt=REFLECT_PROMPT.format(atoms=body), contexts=[], **options
+                        )
                 summary = str(getattr(resp, "completion_text", "") or "").strip()
             except Exception as exc:
                 logger.warning(f"[congling] 反思失败: {exc_brief(exc)}")
@@ -186,8 +224,8 @@ class Maintenance:
             if not summary:
                 continue
             await self.store.kv_set(
-                f"reflect:{self.config.persona_id}:{subject}",
-                {"text": summary, "ts": int(time.time()), "count": len(items)},
+                key,
+                {"text": summary, "ts": int(time.time()), "count": len(lines)},
             )
             await self.plugin.bus.emit(self.plugin.bus.ON_REFLECT, {"subject": subject, "text": summary})
 

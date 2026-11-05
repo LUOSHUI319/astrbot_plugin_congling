@@ -13,7 +13,11 @@
 
 from __future__ import annotations
 
+import copy
+import contextvars
+import functools
 import time
+from contextlib import contextmanager
 from typing import Any
 
 from astrbot.api import logger
@@ -31,6 +35,98 @@ USAGE = {
 
 # mmx 工具能顶替的能力
 MMX_CAPS = {"vision", "stt", "tts"}
+
+
+def _max_tokens_scope(provider: Any) -> Any:
+    """原生兼容提供商丢弃 kwargs 时，在 SDK 边界落实本次输出限制。"""
+    resource = getattr(getattr(getattr(provider, "client", None), "chat", None), "completions", None)
+    original = getattr(resource, "create", None)
+    if not callable(original):
+        return None  # API 路由等提供商直接处理 text_chat 的 max_tokens。
+    existing = getattr(original, "_congling_max_tokens_scope", None)
+    if existing is not None:
+        return existing
+    scope = contextvars.ContextVar("congling_max_tokens", default=None)
+
+    @functools.wraps(original)
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        limit = scope.get()
+        if limit is not None:
+            extra_body = dict(kwargs.get("extra_body") or {})
+            field = "max_completion_tokens" if (
+                "max_completion_tokens" in kwargs or "max_completion_tokens" in extra_body
+            ) else "max_tokens"
+            # 配置中的同名字段不能覆盖本次限制；只修改请求副本，不改提供商配置。
+            for name in ("max_tokens", "max_completion_tokens"):
+                kwargs.pop(name, None)
+                extra_body.pop(name, None)
+            kwargs[field] = limit
+            if "extra_body" in kwargs:
+                kwargs["extra_body"] = extra_body
+        return await original(*args, **kwargs)
+
+    # 保存 scope 而非 ModelHub 实例，热重载可复用；无本次限制时原样透传。
+    create._congling_max_tokens_scope = scope
+    resource.create = create
+    return scope
+
+
+def _background_scope(provider: Any) -> Any:
+    """后台任务在最终请求上关闭 DeepSeek 思考，隔离共享 provider 的主对话。"""
+    resource = getattr(getattr(getattr(provider, "client", None), "chat", None), "completions", None)
+    original = getattr(resource, "create", None)
+    if not callable(original):
+        return None
+    existing = getattr(original, "_congling_background_scope", None)
+    if existing is not None:
+        return existing
+    scope = contextvars.ContextVar("congling_background", default=False)
+
+    @functools.wraps(original)
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        config = getattr(provider, "provider_config", {})
+        model = kwargs.get("model") or (config.get("model") if isinstance(config, dict) else "")
+        if scope.get() and _supports_nonthinking(model):
+            body = dict(kwargs.get("extra_body") or {})
+            body["thinking"] = {"type": "disabled"}
+            kwargs["extra_body"] = body
+        return await original(*args, **kwargs)
+
+    create._congling_background_scope = scope
+    resource.create = create
+    return scope
+
+
+def _supports_nonthinking(model: Any) -> bool:
+    # 仅对已经使用该参数的型号生效，其他兼容提供商不追加厂商私有参数。
+    return str(model or "").lower() in {
+        "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro",
+    }
+
+
+@contextmanager
+def provider_request_budget(provider: Any, max_tokens: int, *, background: bool = True):
+    """保留原函数的 text_chat 调用位置，兼容用量采集的路由归因。"""
+    if type(max_tokens) is not int or max_tokens <= 0:
+        raise ValueError("max_tokens must be a positive integer")
+    tokens = []
+    try:
+        scope = _max_tokens_scope(provider)
+        if scope is not None:
+            tokens.append((scope, scope.set(max_tokens)))
+        options = {"max_tokens": max_tokens}
+        if background:
+            quiet = _background_scope(provider)
+            if quiet is not None:
+                tokens.append((quiet, quiet.set(True)))
+            else:
+                config = getattr(provider, "provider_config", {})
+                if isinstance(config, dict) and _supports_nonthinking(config.get("model")):
+                    options["extra_body"] = {"thinking": {"type": "disabled"}}
+        yield options
+    finally:
+        for scope, token in reversed(tokens):
+            scope.reset(token)
 
 
 class ModelHub:
@@ -103,19 +199,48 @@ class ModelHub:
         return "none"
 
     # ================================================================ 对话
-    async def chat(self, prompt: str, system: str = "", temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    async def chat(self, prompt: str, system: str = "", temperature: float = 0.7,
+                   max_tokens: int = 1024, *, background: bool = False) -> str:
         provider = self.provider_of("chat")
         if provider is None:
             return ""
         try:
-            resp = await provider.text_chat(prompt=prompt, contexts=[], system_prompt=system or None)
+            with provider_request_budget(provider, max_tokens, background=background) as options:
+                resp = await provider.text_chat(
+                    prompt=prompt, contexts=[], system_prompt=system or None, **options,
+                )
             return str(getattr(resp, "completion_text", "") or "").strip()
         except Exception as exc:
             logger.debug(f"[congling] 对话调用失败: {exc!r}")
             return ""
 
     # ================================================================ 图片
+    async def character_chat(self, prompt: str, system: str = "", *, umo: str = "",
+                             identity: dict[str, Any] | None = None,
+                             temperature: float = 0.7, max_tokens: int = 1024) -> str:
+        """角色发言使用当前唯一人格和目标会话模型；抽取任务仍使用 chat。"""
+        persona = self.plugin.persona
+        current = await persona.resolve(umo)
+        if identity is not None and identity["token"] != current["token"]:
+            raise ValueError("人格已切换，旧角色文本作废")
+        identity = identity or current
+        getter = getattr(self.context, "get_using_provider_async", None)
+        provider = await getter(umo or None) if callable(getter) else self.provider_of("chat")
+        if provider is None:
+            return ""
+        system_prompt = identity["prompt"]
+        if system:
+            system_prompt += "\n\n" + system
+        response = await provider.text_chat(
+            prompt=prompt, contexts=copy.deepcopy(identity["dialogs"]),
+            system_prompt=system_prompt or None,
+        )
+        if (await persona.resolve(umo))["token"] != identity["token"]:
+            raise ValueError("人格已切换，旧角色文本作废")
+        return str(getattr(response, "completion_text", "") or "").strip()
+
     async def describe_image(self, image: str, prompt: str) -> str:
+        # 公共版本只使用模型中心中的 vision 配置，不绑定部署实例的 provider ID。
         provider = self.provider_of("vision")
         if provider is not None:
             try:

@@ -245,6 +245,9 @@ class NightState:
     sleep_kind: str = ""
     # 进 waking 的时刻，用来做超时兜底（卡在 waking 会让状态机僵住）
     enter_waking_at: int = 0
+    # 与 waking 超时分开持久化：状态落回 awake 不代表已完成醒后补课。
+    last_wake_at: int = 0
+    last_wake_reason: str = ""
     # 醒来后还等着爬楼的会话
     pending_crawl: list[str] = field(default_factory=list)
 
@@ -260,6 +263,8 @@ class NightState:
             "dream_skip": self.dream_skip,
             "sleep_kind": self.sleep_kind,
             "enter_waking_at": self.enter_waking_at,
+            "last_wake_at": self.last_wake_at,
+            "last_wake_reason": self.last_wake_reason,
             "pending_crawl": list(self.pending_crawl or []),
         }
 
@@ -281,6 +286,8 @@ class NightState:
         state.dream_skip = bool(data.get("dream_skip"))
         state.sleep_kind = str(data.get("sleep_kind") or "")
         state.enter_waking_at = int(data.get("enter_waking_at") or 0)
+        state.last_wake_at = int(data.get("last_wake_at") or 0)
+        state.last_wake_reason = str(data.get("last_wake_reason") or "")
         raw_pending = data.get("pending_crawl") or []
         state.pending_crawl = [str(x) for x in raw_pending if str(x).strip()] if isinstance(raw_pending, list) else []
         return state

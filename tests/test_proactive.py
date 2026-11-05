@@ -17,6 +17,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -29,7 +31,7 @@ CREATE TABLE msg_archive(
   msg_id TEXT, session_id TEXT NOT NULL, session_kind TEXT DEFAULT 'private',
   sender_id TEXT, sender_name TEXT, ts INTEGER NOT NULL, text TEXT,
   blocks_json TEXT, expanded INTEGER DEFAULT 0, forward_id TEXT,
-  umo TEXT DEFAULT '', platform TEXT DEFAULT ''
+  umo TEXT DEFAULT '', platform TEXT DEFAULT '', handled INTEGER DEFAULT 0
 );
 CREATE TABLE proactive_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, persona_id TEXT DEFAULT 'ling',
@@ -89,6 +91,9 @@ class FakeModels:
         self.calls += 1
         return self.text
 
+    async def character_chat(self, prompt, system="", **kwargs):
+        return await self.chat(prompt, system)
+
 
 class FakeAffinity:
     def __init__(self, stage: int = 4) -> None:
@@ -113,6 +118,8 @@ class FakeState:
 class FakeNight:
     def __init__(self, state: FakeState) -> None:
         self.state = type("S", (), {"state": state})()
+        self.wake_flow = SimpleNamespace(
+            prepare=AsyncMock(), epoch=AsyncMock(return_value=(0, 0)), check=AsyncMock())
 
 
 class FakeComposer:
@@ -173,6 +180,10 @@ class FakePlugin:
         self.composer = FakeComposer()
         self.context = FakeContext(send_fail)
         self.context.plugin = self
+        self.persona = SimpleNamespace(resolve=AsyncMock(return_value={
+            "mode": "astrbot", "id": "demo", "name": "演示人格", "token": "demo",
+            "prompt": "演示人设", "dialogs": [],
+        }))
 
 
 def run(coro):
@@ -271,6 +282,8 @@ class ProactiveTest(unittest.TestCase):
             "SELECT COUNT(*) FROM msg_archive WHERE sender_id='bot'"
         ).fetchone()[0]
         self.assertEqual(archived, 1, "主动消息必须进归档")
+        self.assertEqual(plugin.store.conn.execute(
+            "SELECT handled FROM msg_archive WHERE sender_id='bot'").fetchone()[0], 1)
         self.assertTrue(plugin.memory.affinity.added)
 
     def test_empty_reply_sends_nothing(self) -> None:
