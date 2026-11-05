@@ -57,6 +57,13 @@ class Composer:
             self.guard.clean_chain(chain)
             return
 
+        # 长文本交给框架的 t2i：本插件只替换 event.send、不改 result.chain，
+        # 而 t2i 判定在钩子之后、读的是未拆分的原文。若不撒手，图片会被当成
+        # extras 挂到最后一条气泡，文字和图片各发一遍。
+        if self._should_yield_to_t2i(original_text):
+            logger.debug("[congling] 长文本交给 t2i，跳过分句与发送接管")
+            return
+
         session_id, session_kind = self._session_of(event)
         msg = self._message_for(event, session_id)
 
@@ -101,6 +108,29 @@ class Composer:
             )
         except Exception:
             pass
+
+    # ------------------------------------------------------------ t2i 让位
+    def _should_yield_to_t2i(self, text: str) -> bool:
+        """超长文本交给框架转图片，本插件不接管发送。
+
+        AstrBot 在 result_decorate 阶段先跑 on_decorating_result、再判 t2i。
+        插件只替换 event.send、不改 result.chain，所以 t2i 看到的是未拆分的原文：
+        超阈值时整条转图，随后 event.send 把这张图当 extras 挂到最后一条气泡上，
+        结果文字和图片各发一遍。这里提前撒手，让框架走自己的 t2i 流程，
+        换行也得以保留，图片排版更整齐。
+        """
+        try:
+            cfg = self.plugin.context.get_config() or {}
+        except Exception:
+            return False
+        if not cfg.get("t2i"):
+            return False
+        try:
+            threshold = int(cfg.get("t2i_word_threshold") or 150)
+        except (TypeError, ValueError):
+            threshold = 150
+        # 框架拼 plain_str 时每个 Plain 前会补 "\n\n"，长度按 +2 对齐
+        return len(text) + 2 > threshold
 
     # ================================================================ 分句
     def split(self, text: str, session_kind: str = "group") -> list[str]:
