@@ -98,6 +98,8 @@ class ConglingPlugin(Star):
         self.page_api: Any = None
         self.commands: Any = None
         self.lm_bridge: Any = None
+        self.classifier_recovery: Any = None
+        self._livinghello_recovery_remove: Any = None
 
         self._started_at = int(time.time())
         self._boot_errors: list[str] = []
@@ -136,10 +138,12 @@ class ConglingPlugin(Star):
         await self._safe_boot("diary", self._boot_diary)
         await self._safe_boot("proactive", self._boot_proactive)
         await self._safe_boot("night", self._boot_night)
+        await self._safe_boot("classifier_recovery", self._boot_classifier_recovery)
         await self._safe_boot("capability", self._boot_capability)
         await self._safe_boot("qqext", self._boot_qqext)
         await self._safe_boot("commands", self._boot_commands)
         await self._safe_boot("page_api", self._boot_page_api)
+        await self._bind_livinghello_recovery()
 
         self.probe.refresh(force=True)
         try:
@@ -164,6 +168,13 @@ class ConglingPlugin(Star):
             pass
 
     async def terminate(self) -> None:
+        remove = getattr(self, "_livinghello_recovery_remove", None)
+        self._livinghello_recovery_remove = None
+        if callable(remove):
+            try:
+                remove()
+            except Exception:
+                pass
         self._stopping = True
         tasks = list(self._background_tasks)
         for task in tasks:
@@ -284,6 +295,77 @@ class ConglingPlugin(Star):
                 )
         except Exception:
             pass
+
+    async def _boot_classifier_recovery(self) -> None:
+        from .humanize.recovery import ClassifierRecovery
+
+        self.classifier_recovery = ClassifierRecovery(self)
+
+    async def _bind_livinghello_recovery(self) -> None:
+        """注册恢复回调；重载时主动领取已冻结但未交接的窗口。"""
+        getter = getattr(self.context, "get_registered_star", None)
+        if not callable(getter):
+            return
+        livinghello = None
+        for name in ("astrbot_plugin_at_guard", "at_guard"):
+            try:
+                metadata = getter(name)
+            except Exception:
+                continue
+            instance = getattr(metadata, "star_cls", None)
+            if (
+                metadata is not None
+                and getattr(metadata, "activated", False)
+                and instance is not None
+            ):
+                livinghello = instance
+                break
+        register_callback = getattr(
+            livinghello, "register_classifier_recovery_callback", None
+        )
+        if not callable(register_callback):
+            return
+        self._livinghello_recovery_remove = register_callback(
+            self.recover_classifier_outage
+        )
+        resume = getattr(livinghello, "resume_classifier_recovery", None)
+        if callable(resume):
+            try:
+                await resume()
+            except Exception:
+                logger.warning("[congling] 未能继续领取已冻结的判定恢复窗口。")
+
+    async def recover_classifier_outage(self, work: Any) -> dict[str, Any]:
+        """LivingHello 的稳定恢复入口，不借用 wake flow。"""
+        recovery = self.classifier_recovery
+        if recovery is not None:
+            return await recovery.recover(work)
+        sessions = (
+            work.get("sessions", ())
+            if isinstance(work, dict)
+            else getattr(work, "sessions", ())
+        )
+        event_id = (
+            work.get("event_id", "")
+            if isinstance(work, dict)
+            else getattr(work, "event_id", "")
+        )
+        return {
+            "contract": "congling.classifier-recovery.v1",
+            "event_id": str(event_id or ""),
+            "sessions": [
+                {
+                    "session_id": str(
+                        item.get("session_id", "")
+                        if isinstance(item, dict)
+                        else getattr(item, "session_id", "")
+                    ),
+                    "status": "unavailable",
+                    "dedupe_key": "",
+                }
+                for item in sessions or ()
+            ],
+        }
 
     async def _boot_diary(self) -> None:
         """日记：数据表在 store 里已经有了，这里只建服务 + 补写昨天。"""
@@ -909,6 +991,7 @@ class ConglingPlugin(Star):
                 "models": self.models is not None,
                 "qqext": self.qqext is not None,
                 "page_api": self.page_api is not None,
+                "classifier_recovery": self.classifier_recovery is not None,
             },
             "compat": self.probe.matrix(),
             "boot_errors": list(self._boot_errors),

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import time
 import uuid
 from typing import Any
@@ -29,6 +30,20 @@ from ..core.exc import exc_brief
 KV_SESSIONS = "proactive.sessions"
 KV_GLOBAL = "proactive.global"
 KV_STATE = "proactive.state"
+RECOVERY_DELIVERY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS classifier_recovery_delivery(
+    dedupe_key TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    session_umo TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)
+"""
+RECOVERY_DELIVERY_STATUSES = frozenset(
+    {"sending", "sent", "failed", "unknown"}
+)
 
 TEXT_PROMPT = """现在没人跟你说话，你想主动找对方说一句。
 
@@ -80,6 +95,8 @@ class Proactive:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._global: dict[str, Any] = {}
         self._loaded = False
+        self._recovery_delivery_schema_ready = False
+        self._recovery_delivery_schema_lock = asyncio.Lock()
 
     # ================================================================ 状态
     async def load(self) -> None:
@@ -428,6 +445,219 @@ class Proactive:
         platform = str(row.get("platform") or "").strip() or self._cfg_str("platform", "aiocqhttp")
         kind = "GroupMessage" if str(row.get("session_kind") or "") == "group" else "FriendMessage"
         return f"{platform}:{kind}:{row.get('session_id')}"
+
+    @staticmethod
+    def _valid_recovery_key(value: str) -> bool:
+        return re.fullmatch(r"[0-9a-f]{64}", str(value or "")) is not None
+
+    async def _ensure_recovery_delivery_schema(self) -> None:
+        if self._recovery_delivery_schema_ready:
+            return
+        async with self._recovery_delivery_schema_lock:
+            if self._recovery_delivery_schema_ready:
+                return
+            await self.store.execute(RECOVERY_DELIVERY_SCHEMA)
+            self._recovery_delivery_schema_ready = True
+
+    async def recovery_delivery_status(self, dedupe_key: str) -> str:
+        """返回持久投递结论；中途退出的 sending 必须按未知处理。"""
+        if not self._valid_recovery_key(dedupe_key):
+            return ""
+        await self._ensure_recovery_delivery_schema()
+        row = await self.store.fetch_one(
+            "SELECT status FROM classifier_recovery_delivery WHERE dedupe_key=?",
+            (dedupe_key,),
+        )
+        status = str((row or {}).get("status") or "")
+        if status not in RECOVERY_DELIVERY_STATUSES:
+            return ""
+        return "unknown" if status == "sending" else status
+
+    async def _claim_recovery_delivery(
+        self,
+        dedupe_key: str,
+        event_id: str,
+        session_umo: str,
+    ) -> str:
+        """原子占位；跨实例并发也只有一个调用方能触达平台。"""
+        await self._ensure_recovery_delivery_schema()
+        now = int(time.time())
+
+        def claim(conn):
+            row = conn.execute(
+                "SELECT status FROM classifier_recovery_delivery WHERE dedupe_key=?",
+                (dedupe_key,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO classifier_recovery_delivery("
+                    "dedupe_key,event_id,session_umo,status,attempts,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?)",
+                    (dedupe_key, event_id, session_umo, "sending", 1, now, now),
+                )
+                return "claimed"
+            status = str(row[0] or "")
+            if status == "sent":
+                return "sent"
+            if status in {"sending", "unknown"}:
+                return "unknown"
+            if status != "failed":
+                return "unknown"
+            conn.execute(
+                "UPDATE classifier_recovery_delivery SET status='sending',"
+                "attempts=attempts+1,updated_at=? WHERE dedupe_key=?",
+                (now, dedupe_key),
+            )
+            return "claimed"
+
+        return str(await self.store.transaction(claim) or "unknown")
+
+    async def _finish_recovery_delivery(
+        self,
+        dedupe_key: str,
+        status: str,
+    ) -> str:
+        if status not in {"sent", "failed", "unknown"}:
+            raise ValueError("invalid recovery delivery status")
+        now = int(time.time())
+
+        def finish(conn):
+            row = conn.execute(
+                "SELECT status FROM classifier_recovery_delivery WHERE dedupe_key=?",
+                (dedupe_key,),
+            ).fetchone()
+            current = str(row[0] or "") if row else ""
+            if current == "sending":
+                conn.execute(
+                    "UPDATE classifier_recovery_delivery SET status=?,updated_at=? "
+                    "WHERE dedupe_key=?",
+                    (status, now, dedupe_key),
+                )
+                return status
+            return current
+
+        result = str(await self.store.transaction(finish) or "")
+        return "unknown" if result == "sending" else result
+
+    async def send_recovery(self, delivery: Any) -> dict[str, str]:
+        """按故障事件和会话持久去重，只发送完整的一组恢复补答。"""
+        from astrbot.api.event import MessageChain
+        from astrbot.api.message_components import At, Plain
+        from ..core.reply_mentions import MentionReply
+
+        event_id = str(getattr(delivery, "event_id", "") or "")
+        umo = str(getattr(delivery, "session_umo", "") or "")
+        session_id = str(getattr(delivery, "archive_session_id", "") or "")
+        kind = str(getattr(delivery, "session_kind", "") or "")
+        dedupe_key = str(getattr(delivery, "dedupe_key", "") or "")
+        text = getattr(delivery, "text", "")
+        identity = getattr(delivery, "identity", None)
+        if (
+            not umo
+            or not session_id
+            or kind not in {"group", "private"}
+            or not re.fullmatch(r"[0-9a-f]{32}", event_id)
+            or not self._valid_recovery_key(dedupe_key)
+            or not str(text).strip()
+            or not isinstance(identity, dict)
+        ):
+            return {"status": "failed", "dedupe_key": dedupe_key}
+        prior = await self.recovery_delivery_status(dedupe_key)
+        if prior == "sent":
+            return {"status": "sent", "dedupe_key": dedupe_key}
+        if prior == "unknown":
+            return {"status": "unknown", "dedupe_key": dedupe_key}
+        try:
+            current = await self.plugin.persona.resolve(umo)
+        except Exception:
+            return {"status": "failed", "dedupe_key": dedupe_key}
+        if current.get("token") != identity.get("token"):
+            return {"status": "failed", "dedupe_key": dedupe_key}
+
+        claim = await self._claim_recovery_delivery(
+            dedupe_key, event_id, umo
+        )
+        if claim == "sent":
+            return {"status": "sent", "dedupe_key": dedupe_key}
+        if claim != "claimed":
+            return {"status": "unknown", "dedupe_key": dedupe_key}
+
+        archived = str(text)
+        if isinstance(text, MentionReply):
+            archived = text.readable(str(text))
+            if kind == "group":
+                chain = [
+                    At(qq=value) if part_kind == "at" else Plain(text=value)
+                    for part_kind, value in text.segments(str(text))
+                ]
+            else:
+                chain = [Plain(text=archived)]
+        else:
+            chain = [Plain(text=archived)]
+        try:
+            result = await self.plugin.context.send_message(umo, MessageChain(chain))
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(
+                    self._finish_recovery_delivery(dedupe_key, "unknown")
+                )
+            except Exception:
+                pass
+            raise
+        except Exception:
+            try:
+                await self._finish_recovery_delivery(dedupe_key, "unknown")
+            except Exception:
+                pass
+            return {"status": "unknown", "dedupe_key": dedupe_key}
+        if result is False or (
+            isinstance(result, dict)
+            and (
+                result.get("ok") is False
+                or result.get("success") is False
+                or result.get("status") == "failed"
+                or result.get("retcode", 0) not in (0, "0")
+            )
+        ):
+            try:
+                saved = await self._finish_recovery_delivery(
+                    dedupe_key, "failed"
+                )
+            except Exception:
+                saved = "unknown"
+            return {
+                "status": "failed" if saved == "failed" else "unknown",
+                "dedupe_key": dedupe_key,
+            }
+
+        try:
+            saved = await self._finish_recovery_delivery(dedupe_key, "sent")
+        except Exception:
+            saved = "unknown"
+        if saved != "sent":
+            return {"status": "unknown", "dedupe_key": dedupe_key}
+
+        try:
+            await self._archive(
+                session_id,
+                umo,
+                archived,
+                kind,
+                identity=identity,
+                phase="classifier-recovery",
+            )
+            await self._log(
+                session_id,
+                umo,
+                "classifier_recovery",
+                archived,
+                identity=identity,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[congling] 恢复补答已发送，归档收尾失败: {type(exc).__name__}"
+            )
+        return {"status": "sent", "dedupe_key": dedupe_key}
 
     @memory_work
     async def send_one(self, row: dict[str, Any], *, reason: str = "manual") -> dict[str, Any]:
