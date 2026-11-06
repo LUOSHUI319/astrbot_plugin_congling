@@ -65,6 +65,22 @@ class MediaInterpreter:
             pass
         return result
 
+    async def cached_image(self, url: str) -> str:
+        """只读缓存，不碰模型。
+
+        归档路径不能等视觉模型：那边 6 秒超时一到，图片就只剩占位符。
+        描述要是后来算出来了，这里能把它捞回来，回复速度不受影响。
+        """
+        url = str(url or "").strip()
+        if not url:
+            return ""
+        key = "img:" + hashlib.sha1(url.encode("utf-8", "ignore")).hexdigest()[:20]
+        try:
+            cached = await self.store.kv_get(key)
+        except Exception:
+            return ""
+        return str(cached) if isinstance(cached, str) and cached else ""
+
     # ------------------------------------------------------------ 诊断
     async def _trace(self, key: str, payload: dict[str, Any]) -> None:
         try:
