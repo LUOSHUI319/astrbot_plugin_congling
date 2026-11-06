@@ -1,4 +1,7 @@
 /* 从绫开始 · 插件页面
+ * ⚠ index.html 实际加载的是 app.1029c.js（带版本后缀的那份）。
+ *   改完本文件必须同步：Copy-Item app.js app.1029c.js
+ *   否则页面还是旧的 —— 2026-11-06 踩过这个坑。
  * 原则：每个板块的设置在它自己的页面里，不堆在最后。
  * 每张配置卡只摆核心几项，其余收进「高级」。
  */
@@ -117,10 +120,26 @@ function ensureBridge() {
     while (!window.AstrBotPluginPage && Date.now() - started < 4000) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    const waited = Date.now() - started;
+    if (waited > 200) {
+      // 这里等多久，所有页面就慢多久 —— 留个记号，别让它默默吃掉几秒
+      console.warn(`[congling] 页面桥接就绪用了 ${waited}ms`);
+    }
     const api = window.AstrBotPluginPage;
     if (!api) throw new Error("页面桥接未加载，请刷新页面");
     try {
-      if (typeof api.ready === "function") await api.ready();
+      if (typeof api.ready === "function") {
+        const t = performance.now();
+        // ready() 要等父窗口把 context 推过来，而 dashboard 自己还在初始化，
+        // 没有超时的话这一句能白等好几秒 —— 实测是「加载 8 秒」的主因。
+        // apiGet/apiPost 不依赖 context，等不到就走。
+        await Promise.race([
+          api.ready(),
+          new Promise((resolve) => setTimeout(resolve, 600)),
+        ]);
+        const cost = performance.now() - t;
+        if (cost > 200) console.warn(`[congling] bridge.ready() 用了 ${Math.round(cost)}ms`);
+      }
     } catch (err) {
       /* ready 失败不阻塞请求 */
     }
@@ -198,14 +217,119 @@ function apiPath(path) {
   return p;
 }
 
-async function get(path, params) {
+/* 只能走 bridge：AstrBot 的 asset_token 被写死成「仅 bridge-sdk.js 可用」
+   （plugin_page_auth.is_scope_valid 里 return cls.is_protected_path(path)），
+   拿它直连任何接口都是 401。试过、确认走不通，所以这里不再尝试。 */
+async function rawGet(path, params) {
   const api = await ensureBridge();
   return unwrap(await api.apiGet(apiPath(path), params || {}));
 }
 
-async function post(path, body) {
+async function rawPost(path, body) {
   const api = await ensureBridge();
   return unwrap(await api.apiPost(apiPath(path), body || {}));
+}
+
+/* ------------------------------------------------ 数据缓存（跨 iframe 存活） */
+/* 面板跑在 iframe 里，页面一关内存缓存就跟着没了，所以放 localStorage：
+   下次打开同一个板块先拿上次的数据立刻画出来，同时后台取新的；
+   新的和旧的确实不一样，再重绘一次（用户正在输入时不抢焦点）。 */
+const DATA_TTL_MS = 180000;      // 3 分钟内直接用缓存，过期就等新数据
+const DATA_MAX_KEYS = 60;        // 防止把 localStorage 塞爆
+const DATA_NO_CACHE = /^page\/(settings|providers)(\/|$)/;   // 配置类必须实时
+
+function dataKeyOf(path, params) {
+  let suffix = "";
+  try {
+    const keys = Object.keys(params || {}).sort();
+    suffix = keys.length ? "?" + keys.map((k) => `${k}=${params[k]}`).join("&") : "";
+  } catch (err) {
+    suffix = "";
+  }
+  return `congling.data.${apiPath(path)}${suffix}`;
+}
+
+function cacheRead(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const box = JSON.parse(raw);
+    if (!box || typeof box.at !== "number") return null;
+    if (Date.now() - box.at > DATA_TTL_MS) return null;
+    return box.data;
+  } catch (err) {
+    return null;
+  }
+}
+
+function cacheWrite(key, data) {
+  try {
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith("congling.data."));
+    if (keys.length > DATA_MAX_KEYS) {
+      keys.slice(0, keys.length - DATA_MAX_KEYS).forEach((k) => localStorage.removeItem(k));
+    }
+    localStorage.setItem(key, JSON.stringify({ at: Date.now(), data }));
+  } catch (err) {}
+}
+
+let repaintTimer = 0;
+function scheduleRepaint() {
+  if (repaintTimer) return;
+  repaintTimer = setTimeout(() => {
+    repaintTimer = 0;
+    const el = document.activeElement;
+    if (el && /INPUT|TEXTAREA|SELECT/.test(el.tagName)) return;
+    try {
+      render();
+    } catch (err) {}
+  }, 600);
+}
+
+async function get(path, params) {
+  const p = apiPath(path);
+  if (DATA_NO_CACHE.test(p)) return timedGet(path, params);
+  const key = dataKeyOf(path, params);
+  const hit = cacheRead(key);
+  // 无论有没有命中缓存，都发一次真请求：命中时不 await，回来后对比再决定要不要重绘
+  const request = (async () => {
+    const data = await timedGet(path, params);
+    const before = hit === null ? "" : JSON.stringify(hit);
+    cacheWrite(key, data);
+    if (before && before !== JSON.stringify(data)) scheduleRepaint();
+    return data;
+  })();
+  if (hit !== null) {
+    request.catch(() => {});   // 后台刷新失败不影响已经画出来的旧数据
+    return hit;
+  }
+  return request;
+}
+
+/* 每个请求记一笔：超过 400ms 就在控制台点出来，谁慢一目了然 */
+const REQ_TIMES = [];
+async function timedGet(path, params) {
+  const started = performance.now();
+  try {
+    return await rawGet(path, params);
+  } finally {
+    const cost = performance.now() - started;
+    REQ_TIMES.push({ path: apiPath(path), ms: Math.round(cost) });
+    if (REQ_TIMES.length > 80) REQ_TIMES.shift();
+    if (cost > 400) {
+      console.warn(`[congling] 慢请求 ${apiPath(path)} ${Math.round(cost)}ms`);
+    }
+  }
+}
+
+async function post(path, body) {
+  const data = await rawPost(path, body || {});
+  // 写操作之后，相关缓存整体作废，避免面板显示旧状态
+  try {
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith("congling.data."))
+      .forEach((k) => localStorage.removeItem(k));
+  } catch (err) {}
+  return data;
 }
 
 /* ------------------------------------------------------------------ 工具 */
@@ -274,9 +398,10 @@ const NIGHT_ENERGY_KEYS = [
   "energy_per_message",
   "energy_per_minute",
   "energy_recover_per_minute",
-  "energy_after_wake",
+  "wake_recover_per_minute",
+  "fatigue_can_recover",
 ];
-const NIGHT_MEMORY_KEYS = ["crawl_enabled", "crawl_use_llm"];
+const NIGHT_MEMORY_KEYS = ["catchup_enabled"];
 const NIGHT_DREAM_KEYS = [
   "dream_enabled",
   "dream_start_after_minutes",
@@ -433,12 +558,12 @@ function nightHero(s) {
   }
 
   const asleep = mode === "asleep";
-  const waking = mode === "waking";
-  const title = asleep ? "睡着中" : waking ? "刚醒，还没爬起来" : s.fatigue ? "醒着 · 疲劳期" : "醒着";
+  const recovering = !!s.wake_recovering;
+  const title = asleep ? "睡着中" : recovering ? "醒着 · 恢复中" : s.fatigue ? "醒着 · 疲劳期" : "醒着";
   const sub = asleep
     ? `还剩 ${esc(s.remaining_text || "—")}，预计 ${esc((s.wake_day_label || "") + (s.wake_label || s.wake_window || ""))} 醒`
-    : waking
-      ? `正在翻没收的消息（${esc(s.pending_crawl || 0)} 个会话）`
+    : recovering
+      ? `精力正在回到 ${esc(s.energy_max || 100)}（+${esc(s.wake_recover_rate || 0)}/分钟）`
       : `起床点 ${esc(s.wake_time || "08:00")}，浮动 ±${esc(s.wake_jitter || 0)} 分钟`;
 
   return `
@@ -496,16 +621,20 @@ function unreadRow(item) {
 }
 
 /* ---- 各页内容 ---- */
-function nightStatePage(data, unread) {
+function nightStatePage(data, unread, catchup) {
+  const cu = catchup || {};
+  const cuNote = cu.active
+    ? `补读 ${cu.done || 0}/${cu.total || 0}`
+    : "";
   return `
     ${nightHero(data)}
     <div class="night-block">
       <div class="block-head">
-        <span class="block-title">未曾爬楼</span>
-        <span class="block-note">${unread.length} 条没看</span>
-        ${unread.length ? '<button class="mini" id="night-crawl">标记已爬</button>' : ""}
+        <span class="block-title">还没读</span>
+        <span class="block-note">${unread.length} 条${cuNote ? " · " + esc(cuNote) : ""}</span>
+        ${unread.length ? '<button class="mini" id="night-crawl">立即补完</button>' : ""}
       </div>
-      ${unread.length ? `<div class="unread-list">${unread.slice(0, 6).map(unreadRow).join("")}</div>` : '<div class="night-empty">没有没爬的消息</div>'}
+      ${unread.length ? `<div class="unread-list">${unread.slice(0, 6).map(unreadRow).join("")}</div>` : '<div class="night-empty">没有还没读的记忆</div>'}
     </div>`;
 }
 
@@ -542,7 +671,7 @@ function nightSleepPage(state) {
       ${infoRow("唤醒档位", s.wake_mode === "both" ? "私聊和群聊都能叫" : s.wake_mode === "never" ? "叫不醒" : "只在私聊里能叫", s.wake_window ? `叫醒窗口 ${s.wake_window}` : "")}
       ${infoRow("睡前道别", s.farewell_on ? "会道别" : "不说，直接睡")}
       ${infoRow("做梦", s.dream_on ? "开着" : "关着")}
-      ${infoRow("爬楼", s.crawl_on ? "开着" : "关着")}
+      ${infoRow("后台补读", s.catchup_on === false ? "关着" : "开着", "睡着的记忆醒来后在后台按进度放行")}
       ${infoRow("真的会睡", s.allow_sleep === false ? "不会，只是累" : "会", s.allow_sleep === false ? "「设置」里关掉了允许入睡" : "")}
     </div>
     ${!enabled ? '<div class="night-empty">长夜如梦没开，这些设置都不生效</div>' : ""}
@@ -556,21 +685,24 @@ function nightSleepPage(state) {
 }
 
 
-function nightMemoryPage(unread, state) {
+function nightMemoryPage(unread, state, catchup) {
   const s = state || {};
+  const cu = catchup || {};
+  const cuNote = cu.active ? `补读中 ${cu.done || 0}/${cu.total || 0}（剩 ${Math.ceil((cu.left_seconds || 0) / 60)} 分钟）` : "";
   return `
-    <div class="settings-intro">睡着期间进记忆的话会打上「未曾爬楼」，醒来先翻一遍才算真的看过。</div>
+    <div class="settings-intro">睡着期间的记忆会先记为「还没读」，醒来后在后台按进度自动放行，不用先说话。</div>
     <div class="info-card">
-      ${infoRow("爬楼机制", s.crawl_on ? "开着" : "关着")}
+      ${infoRow("后台补读", s.catchup_on === false ? "关着" : "开着")}
       ${infoRow("没看的条数", `${unread.length} 条`)}
+      ${cu.active ? infoRow("补读进度", cuNote) : ""}
     </div>
     <div class="night-block">
       <div class="block-head">
-        <span class="block-title">未曾爬楼</span>
+        <span class="block-title">还没读</span>
         <span class="block-note">${unread.length} 条</span>
-        ${unread.length ? '<button class="mini" id="night-crawl">标记已爬</button>' : ""}
+        ${unread.length ? '<button class="mini" id="night-crawl">立即补完</button>' : ""}
       </div>
-      ${unread.length ? `<div class="unread-list">${unread.map(unreadRow).join("")}</div>` : '<div class="night-empty">没有没爬的消息</div>'}
+      ${unread.length ? `<div class="unread-list">${unread.map(unreadRow).join("")}</div>` : '<div class="night-empty">没有还没读的记忆</div>'}
     </div>
   `;
 }
@@ -700,7 +832,7 @@ function nightSettingsPage(settings) {
     ${nightCard("唤醒", "睡着之后有多难叫醒。y 到 y+n 之间概率平分 100%", sliceItems(night, ["wake_mode", "wake_window_minutes", "wake_start_count", "wake_step_count"]))}
     ${nightCard("入睡前的道别", "多个会话一起道别时，要不要说同一句", sliceItems(night, ["farewell_before_sleep", "farewell_same", "farewell_random", "farewell_use_llm"]))}
     ${nightCard("精力", "疲劳期里怎么掉、平时怎么回", sliceItems(night, [...NIGHT_ENERGY_KEYS, "min_turns_before_sleep"]))}
-    ${nightCard("爬楼", "关掉之后睡着的记忆就直接可读了", sliceItems(night, NIGHT_MEMORY_KEYS))}
+    ${nightCard("后台补读", "关掉之后，睡着的记忆醒来就直接可读，不再分 10 分钟慢慢想起", sliceItems(night, NIGHT_MEMORY_KEYS))}
     ${nightCard("梦境", "关掉就不做梦，开着 token 消耗会明显增加", sliceItems(night, NIGHT_DREAM_KEYS))}
     ${configCard(close, { title: "收线静默", desc: "聊到晚安、拜拜这种话就真的停下来" })}
     ${pageActions("保存本页设置")}
@@ -824,6 +956,126 @@ async function renderProactive() {
   });
 }
 
+async function renderStarMap() {
+  const port = 6186;
+  const state = await get("page/star-map/state").catch(() => null);
+  const dbPath = (state && state.db_path) || "";
+
+  if (!document.getElementById("starmap-page-style")) {
+    const style = document.createElement("style");
+    style.id = "starmap-page-style";
+    style.textContent = `
+.starmap-hero{position:relative;overflow:hidden;border-radius:16px;padding:26px 26px 22px;
+  background:linear-gradient(135deg,rgba(24,40,34,.92),rgba(14,20,18,.96));
+  border:1px solid rgba(155,196,177,.28);margin-bottom:18px}
+.starmap-hero::after{content:"";position:absolute;right:-60px;top:-70px;width:240px;height:240px;border-radius:50%;
+  background:radial-gradient(circle,rgba(155,196,177,.20),transparent 68%);pointer-events:none}
+.starmap-kicker{display:inline-block;padding:4px 11px;border-radius:99px;font-size:11.5px;letter-spacing:.12em;
+  color:#0f1613;background:linear-gradient(100deg,#c8f0dc,#9ecdb6);font-weight:700;margin-bottom:12px}
+.starmap-title{font-size:27px;font-weight:800;letter-spacing:.08em;line-height:1.2;margin:0 0 6px;
+  background:linear-gradient(100deg,#e6fff4,#9ecdb6 55%,#e6fff4);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.starmap-hero p{margin:0;color:#9db3a6;font-size:13px}
+.starmap-groups{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.starmap-groups span{font:700 21px/1 ui-monospace,Consolas,monospace;letter-spacing:.10em;color:#dff0e6;
+  padding:8px 14px;border-radius:10px;background:rgba(155,196,177,.13);
+  border:1px solid rgba(155,196,177,.3);text-shadow:0 0 14px rgba(180,230,205,.45)}
+.starmap-groups em{font-style:normal;color:#7d958a;font-size:12px;letter-spacing:.06em}
+.starmap-shot{border-radius:12px;overflow:hidden;border:1px solid rgba(0,0,0,.10);margin-bottom:16px}
+.starmap-shot img{width:100%;display:block}
+`;
+    document.head.appendChild(style);
+  }
+
+  view.innerHTML = `
+    <section class="starmap-hero">
+      <span class="starmap-kicker">需要单独安装</span>
+      <h1 class="starmap-title">从绫开始 · 记忆星图</h1>
+      <p>它不是本插件自带的页面，是一个独立的 AstrBot 插件。装好后打开下面的地址即可查看。</p>
+      <div class="starmap-groups">
+        <em>加入官方群获取</em>
+        <span>577084969</span>
+        <span>951213204</span>
+      </div>
+    </section>
+
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>它长什么样</h3><p>每一段记忆都是一颗星</p></div>
+      <div class="pad">
+        <div class="starmap-shot">
+          <img src="./starmap-preview.png" alt="记忆星图预览" />
+        </div>
+        <p class="hint" style="margin:0 0 14px">
+          同会话、同实体、文字相近的记忆会连成星座，越重要的星越大越亮。
+          可以搜一段记忆、按分类或时间筛选，点开一颗星能看到它的来源会话、
+          重要度、衰减曲线和关联记忆。只读直连本插件的记忆库，不写不改。
+        </p>
+        <div class="row">
+          <button class="primary" id="starmap-open">打开星图</button>
+          <span class="saved" id="starmap-open-msg"></span>
+        </div>
+        <p class="hint" style="margin:14px 0 0">
+          默认地址 http://127.0.0.1:${port}/ ，端口在「记忆星图」插件的配置里可以改。
+        </p>
+      </div>
+    </section>
+
+    <section class="cfg-group">
+      <div class="cfg-head"><h3>接不上记忆库怎么办</h3><p>手动绑定</p></div>
+      <div class="pad">
+        <p class="hint" style="margin:0 0 10px">
+          星图会自动找本插件的数据库。如果它说找不到，把下面这个路径复制过去，
+          在星图页面右下角「注入记忆库」里粘贴、扫描、注入即可。
+        </p>
+        <div class="row">
+          <button class="ghost" id="starmap-db-copy">复制记忆库路径</button>
+          <span class="saved" id="starmap-db-msg"></span>
+        </div>
+        <input id="starmap-db-box" class="mono" readonly hidden
+          style="width:100%;box-sizing:border-box;margin-top:10px;padding:8px 10px;font-size:12px" />
+      </div>
+    </section>`;
+
+  const openBtn = document.getElementById("starmap-open");
+  if (openBtn) {
+    openBtn.onclick = () => {
+      const msg = document.getElementById("starmap-open-msg");
+      const url = `http://127.0.0.1:${port}/`;
+      let opened = null;
+      try {
+        opened = window.open(url, "_blank");
+      } catch (err) {
+        opened = null;
+      }
+      if (!opened && msg) msg.textContent = `被浏览器拦了，手动开 ${url}`;
+    };
+  }
+
+  const copyBtn = document.getElementById("starmap-db-copy");
+  const dbBox = document.getElementById("starmap-db-box");
+  if (copyBtn && dbBox) {
+    copyBtn.onclick = async () => {
+      const msg = document.getElementById("starmap-db-msg");
+      if (!dbPath) {
+        if (msg) msg.textContent = "没拿到路径（星图模块没启用？）";
+        return;
+      }
+      dbBox.hidden = false;
+      dbBox.value = dbPath;
+      dbBox.focus();
+      dbBox.select();
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(dbPath);
+        copied = true;
+      } catch (err) {
+        copied = false;
+      }
+      if (msg) msg.textContent = copied ? "已复制" : "路径已选中，Ctrl+C 复制";
+    };
+  }
+}
+
 async function renderNight() {
   if (isNightUI() && typeof njNight === "function") return njNight();
   const TABS = [
@@ -856,12 +1108,13 @@ async function renderNight() {
   const dreams = (dreamData && dreamData.items) || [];
   const stats = (dreamData && dreamData.stats) || {};
   const unread = (unreadData && unreadData.items) || [];
+  const catchup = (unreadData && unreadData.catchup) || {};
 
   if (nightTab === "sleep") body = nightSleepPage(stateData);
-  else if (nightTab === "memory") body = nightMemoryPage(unread, stateData);
+  else if (nightTab === "memory") body = nightMemoryPage(unread, stateData, catchup);
   else if (nightTab === "dream") body = nightDreamPage(dreamData);
   else if (nightTab === "config") body = nightSettingsPage(settings);
-  else body = nightStatePage(stateData, unread);
+  else body = nightStatePage(stateData, unread, catchup);
 
   view.innerHTML = `<div class="night-page">${tabsHtml}${body}</div>`;
 
@@ -958,6 +1211,7 @@ const VIEWS = {
   persona: { title: "人格", render: renderPersona },
   behavior: { title: "行为", render: renderBehavior },
   memory: { title: "记忆", render: renderMemory },
+  starmap: { title: "记忆星图", render: renderStarMap },
   night: { title: "长夜", render: renderNight },
   diary: { title: "日记", render: renderDiary },
   tools: { title: "工具", render: renderTools },
@@ -982,7 +1236,9 @@ const SUBTABS = {
     { key: "summary", title: "记忆总览", render: renderM3Overview },
     /* 0.7.0：「按用户分」取消，认识的人合并进好感度页 */
     { key: "sessions", title: "按会话分", render: renderM3Sessions },
-    { key: "library", title: "记忆库", render: () => renderMemory() },
+    { key: "library", title: "记忆设置", render: () => renderMemory() },
+    /* 0.7.1：时间轴单独一栏，不再挤在「记忆设置」底下跟设置抢高度 */
+    { key: "timeline", title: "记忆时间轴", render: () => renderMemoryTimeline() },
     { key: "levels", title: "等级与遗忘", render: renderMemoryLevels },
     { key: "affinity", title: "好感度", render: renderAffinityPage },
     { key: "merge", title: "主体合并", render: renderSubjectMerge },
@@ -1120,9 +1376,44 @@ function parseHash() {
 
 const viewCache = new Map();
 
+/* 读取中：桥是 RPC，一个请求只有「等」和「回来」两个状态，中间没有可度量的进度。
+   所以不编百分比，只显示已经等了多久 —— 这条信息是真的，而且比进度条有用。 */
+let elapsedTimer = 0;
+let elapsedStart = 0;
+
+function elapsedPaint() {
+  const host = typeof view !== "undefined" ? view : document;
+  const text = host.querySelector(".sk-text");
+  if (!text) return;
+  const sec = Math.max(0, (Date.now() - elapsedStart) / 1000);
+  text.textContent = `正在读取 · 已等 ${sec.toFixed(1)}s`;
+}
+
+function startProgress() {
+  elapsedStart = Date.now();
+  elapsedPaint();
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(elapsedPaint, 100);
+}
+
+function stopProgress() {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = 0;
+  }
+}
+
+function loadingHtml() {
+  return `<div class="sk-wrap">
+    <span class="sk-spin"></span>
+    <span class="sk-text">正在读取 · 已等 0.0s</span>
+  </div>`;
+}
+
 async function render() {
   const jobView = currentView;
   const jobSub = currentSub;
+  const bootAt = performance.now();
   const subs = subsOf(jobView);
   const active = subs.length ? subs.find((sub) => sub.key === jobSub) || subs[0] : null;
   if (active) currentSub = active.key;
@@ -1133,15 +1424,17 @@ async function render() {
   } catch (err) {}
 
   /* 页面缓存：切回已经看过的板块时先放上次的内容，再在后台刷新。
-     接口一趟几百毫秒，每次都从「读取中…」开始等，来回切几次很烦。
-     缓存只在同一个会话里、30 秒内有效，过期就不用了。 */
+     真正的秒开靠 get() 里的数据缓存（跨 iframe 存活）；这层只是数据没命中时的兜底，
+     所以寿命放宽到 2 分钟——30 秒太短，看两眼就过期了。 */
   const cacheKey = `${jobView}/${currentSub}`;
   const hit = viewCache.get(cacheKey);
-  const fresh = hit && Date.now() - hit.at < 30000;
+  const fresh = hit && Date.now() - hit.at < 120000;
   if (fresh) {
     view.innerHTML = hit.html;
+    stopProgress();
   } else {
-    view.innerHTML = '<div class="empty">读取中…</div>';
+    view.innerHTML = loadingHtml();
+    startProgress();
   }
 
   try {
@@ -1159,6 +1452,39 @@ async function render() {
       view.innerHTML = `<div class="empty">出错了：${esc(err.message)}</div>`;
     }
   } finally {
+    stopProgress();
+    // 本次页面渲染耗时：直接写在页脚，不用开控制台也知道多慢
+    const cost = ((performance.now() - bootAt) / 1000).toFixed(1);
+    try {
+      let badge = document.getElementById("load-cost");
+      if (!badge) {
+        // 挂 body 底部会被夜间界面盖住，改成顶部正中 + 底色，一定看得见
+        badge = document.createElement("span");
+        badge.id = "load-cost";
+        badge.style.cssText = [
+          "position:fixed", "top:4px", "left:50%", "transform:translateX(-50%)",
+          "z-index:2147483647",
+          "padding:3px 10px", "border-radius:0 0 8px 8px",
+          "font:11px/1.5 ui-monospace,Consolas,monospace",
+          "color:#0e1512", "background:#c8f0dc",
+          "box-shadow:0 2px 8px rgba(0,0,0,.35)",
+          "pointer-events:none", "white-space:nowrap",
+        ].join(";");
+        document.documentElement.appendChild(badge);
+      }
+      if (badge) {
+        const slow = REQ_TIMES.reduce(
+          (acc, item) => (item.ms > (acc ? acc.ms : 0) ? item : acc),
+          null
+        );
+        const tail = slow
+          ? ` · 最慢 ${String(slow.path).replace(/^page\//, "")} ${slow.ms}ms`
+          : "";
+        badge.textContent = `加载 ${cost}s${tail}`;
+        badge.title = "如果最慢是几十毫秒，说明慢在渲染而不是接口";
+      }
+      console.info(`[congling] ${jobView} 渲染 ${cost}s`, REQ_TIMES.slice(-8));
+    } catch (err) {}
     /* 自检：如果这个任务跑完时用户已经切到别的视图，说明它的写入最多只能算「迟到」，
        而 innerHTML 守卫分不清是谁在写（dataset 是共享的），所以这里直接重画一次当前视图。
        代价是一次闪烁，换的是「点哪个看到哪个」。 */
@@ -1185,8 +1511,56 @@ const CORE_KEYS = {
   debug: ["decision_log", "verbose"],
 };
 
+/* ---- 模型下拉：AstrBot 自带的 select_provider 只会列对话模型，向量模型得自己取 ---- */
+let PROVIDERS = { chat: [], embedding: [] };
+
+function providerKind(path) {
+  const p = String(path || "");
+  if (!/provider_id$/.test(p)) return "";
+  return /embedding/i.test(p) ? "embedding" : "chat";
+}
+
+async function loadProviders(force) {
+  if (!force && (PROVIDERS.chat.length || PROVIDERS.embedding.length || PROVIDERS.__loaded)) {
+    return PROVIDERS;
+  }
+  try {
+    const data = await get("page/providers");
+    PROVIDERS = {
+      chat: data.chat || [],
+      embedding: data.embedding || [],
+      __loaded: true,
+    };
+  } catch (err) {
+    PROVIDERS = { chat: [], embedding: [], __loaded: true };
+  }
+  return PROVIDERS;
+}
+
+function providerSelectHtml(item) {
+  const kind = providerKind(item.path);
+  const list = PROVIDERS[kind] || [];
+  const value = String(item.value == null ? "" : item.value);
+  const head = `<option value=""${value ? "" : " selected"}>${
+    kind === "embedding" ? "（不走向量检索）" : "（用默认模型）"
+  }</option>`;
+  const body = list
+    .map(
+      (p) =>
+        `<option value="${esc(p.id)}" ${p.id === value ? "selected" : ""}>${esc(p.name || p.id)}</option>`
+    )
+    .join("");
+  // 配置里存着、但当前环境已经删掉的那个 ID，也要让它显示出来，别静默清空
+  const extra =
+    value && !list.some((p) => p.id === value)
+      ? `<option value="${esc(value)}" selected>${esc(value)}（当前已配置）</option>`
+      : "";
+  return `<select data-path="${esc(item.path)}" data-type="string">${head}${body}${extra}</select>`;
+}
+
 async function loadSettings(force) {
   if (settingsCache && !force) return settingsCache;
+  await loadProviders(force);
   settingsCache = await get("page/settings");
   return settingsCache;
 }
@@ -1198,6 +1572,9 @@ function pickGroup(data, name) {
 function controlHtml(item) {
   const path = esc(item.path);
   const value = item.value;
+  if (providerKind(item.path)) {
+    return providerSelectHtml(item);
+  }
   if (item.type === "bool") {
     const on = value === true || value === "true" || value === 1;
     return `<label class="switch">
@@ -1402,9 +1779,9 @@ function changelogHtml(key) {
     },
     {
       name: "跨会话检索分档",
-      path: "记忆 → 记忆库 → 记忆设置",
+      path: "记忆 → 记忆设置",
       intro: "控制「除了当前会话，还能去哪些会话里找记忆」。",
-      how: "在「记忆库」页拉到底，展开「记忆设置」，共四项：允许跨会话检索（总开关）、普通用户档、管理员档、白名单。三档含义：off 只查当前会话；same_user / self 只查这个人自己说过的话；all 查全库。",
+      how: "在「记忆设置」页第一块就是记忆设置卡片，不用再展开，共四项：允许跨会话检索（总开关）、普通用户档、管理员档、白名单。三档含义：off 只查当前会话；same_user / self 只查这个人自己说过的话；all 查全库。",
       note: "默认收在最保守一档：管理员也看不到别人的私聊。选 all 时面板会提示模型可能复述他人私密内容。",
     },
     {
@@ -1564,8 +1941,52 @@ function changelogHtml(key) {
       "可点区域 ≥ 44px、100dvh 加安全区、底部弹层、自绘下拉刷新、输入框字号 ≥ 16px；避开 color-mix 和可选链，X5 与微信内置浏览器也能开。"),
   ]);
 
+  /* ---------------- 1.2.0 · 2026-11-07 · 修复 ---------------- */
+  const v120 = ul([
+    item("好感度页卡住九秒",
+      "排行榜的过滤条件要对四百多个主体逐个反查「这个 id 是不是群号」，而 msg_archive 有五万三千行却没有对应索引，等于四百多次全表扫。补上 (session_kind, session_id) 索引后，同一条查询 9000ms → 1ms。"),
+    item("记忆总览打开要等",
+      "统计、未读数、会话列表、注入档位是四条独立查询串行执行。合并成一条聚合查询，并给 (status, created_at) 建索引，单次 22ms → 0ms。"),
+    item("好友动态一直读不到内容",
+      "该接口返回的不是 JSON：键没有引号、字符串用单引号、HTML 里的尖括号写成 \\x3C，标准解析必然失败，异常又被上层兜住，表现成「最近没什么动静」。改为字符串感知的逐字符扫描，能正确切出每条动态。"),
+    item("动态正文混着昵称、浏览数、点赞人",
+      "原来整段 HTML 去标签，把渲染层的所有文字都卷了进来。改为只取正文容器 f-info，图片只从 img-box 里找，并按 appid、typeid、图床域名过滤广点通广告。"),
+    item("头像库存不进图片",
+      "接口只有信任、取消信任、删除、改标签四个动作，压根没有入库分支，add_bytes 从上线起没被调用过一次。补上上传动作，顺带把两套皮肤都加上「存一张」按钮。"),
+    item("空间点赞接口返回 500",
+      "常见实现里的 emotion_cgi_like 已经不可用。真正可用的是 internal_dolike_app，参数还要求 unikey 与 curkey —— 它们不在任何 JSON 字段里，藏在动态 HTML 的 data 属性上。"),
+    item("文章里说点赞能用，但拿不到老说说的 unikey",
+      "unikey 只在好友动态流里给。指定某人的历史说说走的是另一条接口，不返回这个字段，所以「给某条老说说点赞」目前做不到，已把点赞开关默认关闭。"),
+    item("面板接口出问题只能靠猜",
+      "新增计时中间件，每个接口的耗时写进 diag:timing。这次的九秒就是靠它直接定位到具体接口，而不是逐个怀疑缓存、桥接、资源体积。"),
+  ]);
+
+  /* ---------------- 1.2.0 · 2026-11-07 · 新增 ---------------- */
+  const v120news = ul([
+    item("QQ 空间发说说可以带图",
+      "先传到空间图床拿回 richval 与 pic_bo，再随正文一起提交，单条最多九张。参数全部来自实测：上传走 base64 加 urlencoded（不是 multipart）、richval 固定十段且首尾为空、多张之间 richval 用制表符而 pic_bo 用逗号。"),
+    item("好友动态重新可读",
+      "正文、时间、配图、来源会话都能取到，纯图说说也会保留。顺手把访客上限压到每天一次 —— 刷了谁的动态，对方在最近访客里是看得见的。"),
+    item("空间评论",
+      "支持在说说下留言。返回被 frameElement.callback 包裹，解析器已经能剥这种外壳。"),
+    item("刷到的动态会写进记忆",
+      "按「看到了但没参与」的权重入库：重要度 0.42、等级 2、不计作自身经历。短于八个字又没有配图的直接跳过，避免稀释真正重要的记忆。"),
+    item("空间互动三个开关",
+      "主动浏览、随机评论、随机点赞各自独立，全部默认关闭，并且各有每日上限。评论比点赞克制，点赞比浏览克制 —— 越公开的行为，配额越紧。"),
+    item("记忆星图",
+      "把每一段记忆画成一颗星：同会话、同实体、文字相近的会连成星座，越重要的星越大越亮。可搜索、可按分类和时间筛选，点开一颗星能看到来源会话、重要度、衰减曲线和关联记忆。只读直连数据库，不写不改。"),
+    item("记忆星图已上架，但要进群拿",
+      "它是一个独立插件，不随本体分发。面板侧边栏新增「记忆星图」一页：预览图、功能说明、一键打开、以及复制记忆库路径。安装包与后续版本都在官方群里。"),
+  ]);
+
   /* ---------------- 下次更新计划 ---------------- */
   const vNext = ul([
+    item("说说配图的图源",
+      "现在能带图发，但图还得外面准备好。计划接三路：表情包库按文案检索、生图模型按语义现画、以及一个收集图库。两条通路都开时随机抽，单通路时上限三张，抽到三张以上则两路各出至少一张。"),
+    item("收集图库",
+      "给记忆配图，有图的记忆进统一图库，说说内容也能从图库里索引。这一版只留了表结构和接口位，没有入口，属于下个版本的主要工作量。"),
+    item("说说内容去同质化",
+      "现在的去重只防「同一句话发两遍」，防不住「每天都是同一种腔调」。计划三件事：素材按类型分层抽样、写作前抽一张风格卡（观察 / 碎碎念 / 物件视角 / 自嘲 / 反问）、把最近三条的开头喂回去当反向提示。"),
     item("记忆人称整理（P7）",
       "历史记忆里有三类需要分开处理：主体是她自己却写成第三人称的（例如「洛水曾表示……」）、主体是泛称的（用户、聊天机器人等）、以及别人提到她的（这类不能动）。计划做成先预览再执行、默认只处理前两类、被提及的那类必须人工勾选，每五十条一批并写修复日志，随时可回滚。"),
     item("真实环境验收",
@@ -1580,12 +2001,20 @@ function changelogHtml(key) {
   if (key === "fixes") {
     return `
       ${ver(
+        "1.1.1 → 1.2.0",
+        "空间与星图",
+        "2026-11-07",
+        "这一版把 QQ 空间从「只能发纯文字」补到「能带图、能读别人的、能互动」，同时挖出两个一直在静默失效的地方：好友动态从来没读通过，头像库从来没存进过图。",
+        v120,
+        true
+      )}
+      ${ver(
         "1.1.0 → 1.1.1",
         "移动端",
         "2026-11-03",
         "这一版只做了一件大事：给手机做一套真正的界面，顺手把原来的移动端适配摘干净。",
         v111,
-        true
+        false
       )}
       ${ver(
         "1.0.1 → 1.1.0",
@@ -1624,12 +2053,20 @@ function changelogHtml(key) {
   if (key === "news") {
     return `
       ${ver(
+        "1.1.1 → 1.2.0",
+        "空间配图与记忆星图",
+        "2026-11-07",
+        "空间能带图发了，好友动态能读了，刷到的东西会记下来。另外有一个独立插件「记忆星图」上架 —— 它不随本体分发，进官方群获取。",
+        v120news,
+        true
+      )}
+      ${ver(
         "1.1.0 → 1.1.1",
         "新增",
         "2026-11-03",
         "这一版新增的就是手机端那套独立界面。",
         v111news,
-        true
+        false
       )}
       ${ver(
         "1.0.1 → 1.1.0",
@@ -2037,9 +2474,110 @@ function memCard(row) {
   </article>`;
 }
 
+/* 记忆设置：0.7.1 之后是「管理页」——开关、归档、清空。
+   时间轴和两侧的构成 / 将忘搬去「记忆时间轴」那一栏了。 */
 async function renderMemory(keyword, sessionId, kind) {
   if (isNightUI() && typeof njMemory === "function") return njMemory(keyword, sessionId, kind);
+  return renderMemoryCards(keyword, sessionId, kind);
+}
+
+/* 记忆时间轴：三栏（来源会话 / 时间轴 / 构成与将忘）单独占一整页 */
+async function renderMemoryTimeline(keyword, sessionId, kind) {
+  if (isNightUI() && typeof njMemoryTimeline === "function") return njMemoryTimeline(keyword, sessionId, kind);
+  return renderMemoryCards(keyword, sessionId, kind);
+}
+
+function starmapCardHtml(state) {
+  const st = state || {};
+  const last = st.last || {};
+  const lastText = last.at
+    ? `${fmtTime(last.at)}　${esc(last.count || 0)} 条${last.ok === false ? "（上次失败）" : ""}`
+    : "还没同步过";
+  const ready = !!st.configured;
+  const why = !ready
+    ? "还没配目录，去上面「记忆设置」里把 star_map_dir 填上"
+    : st.node
+      ? "同步会把当前记忆导出并重新编译星图数据"
+      : "没找到 node，装了 Node.js 才能编译";
+  return `<section class="cfg-group">
+    <div class="cfg-head"><h3>记忆星图</h3><p>${ready ? "目录已配置" : "未配置"}</p></div>
+    <div class="pad">
+      <p class="hint" style="margin:0 0 10px">上次同步：${lastText}。${esc(why)}</p>
+      <div class="row">
+        <button class="primary" id="starmap-sync" ${ready ? "" : "disabled"}>同步星图</button>
+        <button class="ghost" id="db-path-copy">复制记忆库路径</button>
+        <span class="saved" id="starmap-msg"></span>
+      </div>
+      <input id="db-path-box" class="mono" readonly hidden
+        style="width:100%;box-sizing:border-box;margin-top:10px;padding:8px 10px;font-size:12px" />
+    </div>
+  </section>`;
+}
+
+function bindStarmapSync(starmap) {
+  const btn = document.getElementById("starmap-sync");
+  if (btn) {
+    btn.onclick = async () => {
+      const msg = document.getElementById("starmap-msg");
+      btn.disabled = true;
+      btn.textContent = "同步中…";
+      if (msg) msg.textContent = "";
+      try {
+        const r = await post("page/star-map/sync", {});
+        if (msg) msg.textContent = `好了，${r && r.count ? r.count : 0} 条`;
+      } catch (err) {
+        if (msg) msg.textContent = err.message || "同步失败";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "同步星图";
+      }
+    };
+  }
+
+  /* 复制记忆库路径：路径直接来自 star-map/state，不依赖额外路由。
+     iframe 里 navigator.clipboard 常常被拦，所以退而求其次：
+     把路径摊开在只读框里并选中，用户 Ctrl+C 即可。 */
+  const copyBtn = document.getElementById("db-path-copy");
+  const box = document.getElementById("db-path-box");
+  if (copyBtn && box) {
+    copyBtn.onclick = async () => {
+      const msg = document.getElementById("starmap-msg");
+      let path = (starmap && starmap.db_path) || "";
+      // 兜底 1：state 里没带（旧代码 / 模块没起来）就问专用接口
+      if (!path) {
+        try {
+          const r = await get("page/memory/db-path");
+          path = (r && r.path) || "";
+        } catch (err) {
+          path = "";
+        }
+      }
+      if (!path) {
+        // 兜底 2：连接口都没有，就给出目录让用户自己找
+        if (msg) {
+          msg.textContent = "拿不到路径，去 data\\plugin_data\\astrbot_plugin_congling 里找 congling.db";
+        }
+        return;
+      }
+      box.hidden = false;
+      box.value = path;
+      box.focus();
+      box.select();
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(path);
+        copied = true;
+      } catch (err) {
+        copied = false;
+      }
+      if (msg) msg.textContent = copied ? "已复制" : "路径已选中，Ctrl+C 复制";
+    };
+  }
+}
+
+async function renderMemoryCards(keyword, sessionId, kind) {
   const settings = await loadSettings();
+  const starmap = await get("page/star-map/state").catch(() => null);
   // 一次拉 500 条会让「记忆库」铺 500 张卡，滑动必卡。
   // 先取 150，底部给「再看一些」按需追加。
   const shown = Number(window.__memShown || 150);
@@ -2103,6 +2641,7 @@ async function renderMemory(keyword, sessionId, kind) {
           title: "记忆设置",
           desc: "注入条数决定它一次想起多少；向量那项留空就只用关键词检索",
         })}
+        ${starmapCardHtml(starmap)}
         ${pageActions()}
       </div>
     </details>
@@ -2115,6 +2654,7 @@ async function renderMemory(keyword, sessionId, kind) {
 
   bindConfigCards(view);
   bindPageSave();
+  bindStarmapSync(starmap);
 
   const current = () => document.getElementById("m-key").value.trim();
   const currentKind = () => document.getElementById("m-kind").value;
@@ -2347,7 +2887,7 @@ async function renderQQ() {
 
   document.getElementById("qz-read").onclick = async () => {
     msg.textContent = "读取中…";
-    feedBox.innerHTML = '<div class="empty">读取中…</div>';
+    feedBox.innerHTML = loadingHtml(4);
     try {
       const target = document.getElementById("qz-target").value.trim();
       const data = await get("page/qzone/feed", target ? { target } : {});
@@ -3273,7 +3813,11 @@ async function renderAvatarPage() {
       </div>
     </section>
     <section class="cfg-group">
-      <div class="cfg-head"><h3>可信库（${items.length}）</h3><p>能被自动换用到的图</p></div>
+      <div class="cfg-head">
+        <h3>可信库（${items.length}）</h3><p>能被自动换用到的图</p>
+        <button class="primary tiny" id="avatar-upload">存一张</button>
+        <input type="file" id="avatar-file" accept="image/*" hidden />
+      </div>
       <div class="pad"><div class="avatar-grid">${
         items.map((item) => card(item, false)).join("") || '<p class="hint">库里还是空的，先把喜欢的图存进来</p>'
       }</div></div>
@@ -3296,6 +3840,35 @@ async function renderAvatarPage() {
       }
     };
   });
+
+  /* 存图：读成 dataURL 传给后端入库 */
+  const uploadBtn = document.getElementById("avatar-upload");
+  const fileInput = document.getElementById("avatar-file");
+  if (uploadBtn && fileInput) {
+    uploadBtn.onclick = () => fileInput.click();
+    fileInput.onchange = async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = "上传中…";
+      try {
+        if (file.size > 8 * 1024 * 1024) throw new Error("图片超过 8MB，先压一下");
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("读文件失败"));
+          reader.readAsDataURL(file);
+        });
+        const suffix = (file.name.split(".").pop() || "jpg").toLowerCase();
+        await post("page/avatar/pool", { action: "add", data: dataUrl, suffix });
+        render();
+      } catch (err) {
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = "存一张";
+        window.alert(err.message || "存不进去");
+      }
+    };
+  }
   document.querySelectorAll("[data-trust]").forEach((btn) => {
     btn.onclick = async () => {
       await post("page/avatar/pool", { action: "trust", id: Number(btn.dataset.trust) });
@@ -3404,7 +3977,8 @@ function m3When(ts) {
   return m3Day(ts);
 }
 function m3Remain(atom) {
-  if (atom.expire_at == null || Number(atom.expire_at) === 0) return "永久";
+  if (atom.expire_at == null) return "未设置";
+  if (Number(atom.expire_at) === 0) return "永久";
   const left = Math.round((Number(atom.expire_at) - Date.now() / 1000) / 86400);
   if (left <= 0) return "已过期";
   return `剩 ${left} 天`;
@@ -3787,3 +4361,10 @@ function isNightUI() {
     pinned = null;
   });
 })();
+
+/* 预热桥接：脚本一落地就去握手，别等第一次 get() 才开始等那 4 秒 */
+setTimeout(() => {
+  try {
+    ensureBridge().catch(() => {});
+  } catch (err) {}
+}, 0);

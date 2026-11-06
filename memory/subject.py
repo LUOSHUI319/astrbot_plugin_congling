@@ -263,20 +263,32 @@ class SubjectBook:
         self,
         subject_key: str,
         *,
-        status: str = "active",
+        status: str | None = "active",
         limit: int = 200,
     ) -> list[dict[str, Any]]:
+        """取某个主体名下的记忆。
+
+        status:
+          "active" / "archived" / "forgotten" -> 只取该状态
+          None 或 ""                           -> 不过滤，全部状态
+
+        以前是把 status 直接绑进 `status=?`，传空串就变成 `status=''`，
+        一条也查不到 —— 「不过滤」和「查空」在结果上长得一样，很容易误判。
+        """
+        where = ["persona_id=?", "(unread IS NULL OR unread=0)"]
+        args: list[Any] = [self.config.persona_id]
+        if status:
+            where.append("status=?")
+            args.append(str(status))
+        where.append(
+            "(subject_id=? OR id IN (SELECT atom_id FROM mem_atom_tag WHERE subject_key=?))"
+        )
+        args.extend([str(subject_key), str(subject_key)])
+        args.append(max(1, min(1000, limit)))
         rows = await self.store.fetch_all(
-            "SELECT * FROM mem_atom WHERE persona_id=? AND status=? AND (unread IS NULL OR unread=0) "
-            "AND (subject_id=? OR id IN (SELECT atom_id FROM mem_atom_tag WHERE subject_key=?)) "
-            "ORDER BY (COALESCE(decay,1.0) * (1.0 + COALESCE(mem_level,3) * 0.2)) DESC, id DESC LIMIT ?",
-            (
-                self.config.persona_id,
-                status,
-                str(subject_key),
-                str(subject_key),
-                max(1, min(1000, limit)),
-            ),
+            "SELECT * FROM mem_atom WHERE " + " AND ".join(where) +
+            " ORDER BY (COALESCE(decay,1.0) * (1.0 + COALESCE(mem_level,3) * 0.2)) DESC, id DESC LIMIT ?",
+            tuple(args),
         )
         return rows
 

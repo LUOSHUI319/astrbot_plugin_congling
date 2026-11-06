@@ -7,7 +7,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib
-import logging
 import sys
 import tempfile
 import types
@@ -29,7 +28,42 @@ def module(name):
 
 module("astrbot")
 api = module("astrbot.api")
-api.logger = logging.getLogger("congling-offline-test")
+class _ShimLogger:
+    """测试用最小 logger。
+
+    不 import 标准库 logging —— 插件规范要求日志一律走 astrbot.api.logger，
+    离线测试脚本也不破这个规矩，这里只把消息打到 stdout。
+    """
+
+    def _emit(self, level, msg, *args):
+        text = str(msg)
+        if args:
+            try:
+                text = text % args
+            except Exception:
+                text = f"{text} {' '.join(str(a) for a in args)}"
+        print(f"[{level}] {text}")
+
+    def debug(self, msg, *a):
+        self._emit("DEBUG", msg, *a)
+
+    def info(self, msg, *a):
+        self._emit("INFO", msg, *a)
+
+    def warning(self, msg, *a):
+        self._emit("WARN", msg, *a)
+
+    def error(self, msg, *a):
+        self._emit("ERROR", msg, *a)
+
+    def exception(self, msg, *a):
+        self._emit("ERROR", msg, *a)
+
+    def critical(self, msg, *a):
+        self._emit("CRIT", msg, *a)
+
+
+api.logger = _ShimLogger()
 api.AstrBotConfig = dict
 events = module("astrbot.api.event")
 events.AstrMessageEvent = object

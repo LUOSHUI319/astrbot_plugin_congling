@@ -2669,6 +2669,50 @@
   background: rgba(236, 226, 205, .16);
   border-radius: 3px;
 }
+
+/* ==================================================================
+   0.7.1 · 记忆拆成两页
+   · 记忆时间轴：状态栏 + 工具条 + 三栏，底下什么都没有，高度全给三栏
+   · 记忆库：设置 / 归档 / 清空，一列摊开，不再叠 details
+   ================================================================== */
+/* 时间轴自己一页了，两侧收窄点，中间那条轴能喘气 */
+:root[data-ui="night"] .nj-page-body.is-mem-tl .nj-mem-body {
+  grid-template-columns: minmax(0, 212px) minmax(0, 1fr) minmax(0, 272px);
+}
+:root[data-ui="night"] .nj-page-body.is-mem-tl .nj-mem-card {
+  min-height: 0;
+}
+:root[data-ui="night"] .nj-page-body.is-mem-tl > .nj-toolbar { flex: 0 0 auto; }
+
+/* 记忆设置：一列往下长，整页滚。
+   关键是 flex: 0 0 auto —— 这层是 flex column，子项默认会被压缩，
+   而 .cfg-group 带着 overflow: hidden，一压就把「高级设置」那截直接吃掉，
+   看起来就是三级目录被谁盖住了。不许压，宁可整页滚。 */
+:root[data-ui="night"] .nj-page-body.is-lib {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-bottom: 28px;
+}
+:root[data-ui="night"] .nj-page-body.is-lib > * { flex: 0 0 auto; }
+:root[data-ui="night"] .nj-page-body.is-lib .cfg-group {
+  margin-bottom: 0;
+  overflow: visible;
+}
+:root[data-ui="night"] .nj-page-body.is-lib details.adv[open] { margin-bottom: 6px; }
+:root[data-ui="night"] .nj-page-body.is-lib .nj-card-head + .hint { margin-top: -2px; }
+:root[data-ui="night"] .nj-page-body.is-lib .nj-lib-inbox {
+  max-height: clamp(200px, 40vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 226, 205, .18) transparent;
+}
+:root[data-ui="night"] .nj-page-body.is-lib .nj-lib-inbox::-webkit-scrollbar { width: 6px; }
+:root[data-ui="night"] .nj-page-body.is-lib .nj-lib-inbox::-webkit-scrollbar-thumb {
+  background: rgba(236, 226, 205, .16);
+  border-radius: 3px;
+}
 /* 可视高度太小时（笔记本半屏那种），别死撑，退回自然高度由外层滚 */
 
 :root[data-ui="night"] .nj-mem-card .nj-scroll { min-height: 0; }
@@ -3246,4 +3290,68 @@
   color: var(--accent, #c8a86a);
   opacity: .85;
   white-space: nowrap;
+}
+
+
+/* ---- 读取中：骨架流光（夜间深底配色） ---- */
+.sk-bar {
+  background: linear-gradient(100deg, rgba(255,255,255,.045) 20%, rgba(255,255,255,.13) 42%, rgba(255,255,255,.045) 64%);
+  background-size: 300% 100%;
+}
+
+
+/* ---- 读取中：细进度条（夜间深底） ---- */
+.sk-wrap {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 64px 0;
+}
+.sk-track {
+  position: relative; width: 168px; height: 3px; border-radius: 2px;
+  background: rgba(255,255,255,.10); overflow: hidden;
+}
+.sk-track > i {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 44%; border-radius: 2px;
+  background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.65), rgba(255,255,255,0));
+  animation: cgSkRun 1.15s ease-in-out infinite;
+}
+.sk-text { font-size: 12px; letter-spacing: .05em; opacity: .55; }
+@keyframes cgSkRun {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(330%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-track > i { animation: none; width: 100%; opacity: .35; }
+}
+
+
+/* ---- 读取中：带百分比的进度条（夜间深底） ---- */
+.sk-track > .sk-fill {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(155,196,177,.45), rgba(155,196,177,.9));
+  animation: none;
+  transition: width .18s ease-out;
+}
+.sk-track > i { animation: none; }
+
+
+/* ---- 读取中：转圈 + 已等秒数（夜间深底） ---- */
+.sk-wrap {
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px; padding: 64px 0;
+}
+.sk-spin {
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,.14);
+  border-top-color: rgba(255,255,255,.66);
+  animation: cgSkSpin .85s linear infinite;
+  flex: none;
+}
+@keyframes cgSkSpin { to { transform: rotate(360deg); } }
+.sk-text {
+  font-size: 12px; letter-spacing: .04em; opacity: .58;
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-spin { animation-duration: 2.4s; }
 }

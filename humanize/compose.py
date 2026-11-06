@@ -23,7 +23,10 @@ from astrbot.api.message_components import Plain, Reply
 from ..core.contracts import PerceivedMessage, RhythmPlan
 
 _SENTENCE_RE = re.compile(r"(?<=[。！？!?…～~])")
-_CLAUSE_RE = re.compile(r"(?<=[，,、])")
+_CLAUSE_RE = re.compile(r"(?<=[，,])")
+# 换行、分号是作者自己划的段落边界：这是硬分隔，先按它断段，段内再按句末标点分句。
+# 以前把它压平成空格再按逗号乱切，模型写好的段落意图全被搅碎。
+_BLOCK_RE = re.compile(r"(?:\r?\n)+|[;；]")
 
 # 配置缺失时的兜底值
 QUOTE_COOLDOWN = 30.0
@@ -112,23 +115,80 @@ class Composer:
         if len(text) <= 14:
             return [self.guard.clean(text)]
 
-        raw_parts = [part.strip() for part in _SENTENCE_RE.split(text) if part.strip()]
-        parts = self._merge_short(raw_parts)
-        parts = self._split_long(parts)
-        parts = self._random_regroup(parts)
+        # 1) 按换行/分号断段（作者自己划的段落，优先级最高）
+        # 2) 段内按句末标点断句 → 3) 合并碎句 → 4) 超长句再按逗号切
+        groups: list[list[str]] = []
+        for block in _BLOCK_RE.split(text):
+            block = block.strip()
+            if not block:
+                continue
+            pieces = [item.strip() for item in _SENTENCE_RE.split(block) if item.strip()]
+            pieces = self._merge_short(pieces)
+            pieces = self._split_long(pieces)
+            # 长句切完再合一次：别留「哦这个，」这种 3~5 字的孤立气泡
+            pieces = self._merge_short(pieces)
+            if pieces:
+                groups.append(pieces)
+
+        if not groups:
+            return [self.guard.clean(text)]
 
         max_bubbles = self.config.int(
             "humanize.max_bubbles_private" if session_kind == "private" else "humanize.max_bubbles_group",
             3 if session_kind == "private" else 2,
         )
+        # 按段分桶：段数没超标就一段一条，超标了才按顺序并桶，尽量不把一段拆开
+        parts = [self._join_parts(bucket) for bucket in self._bucket(groups, max_bubbles)]
+        parts = self._random_regroup(parts)
+        # 随机扰动会改变条数，上限得再兜一次
         if len(parts) > max_bubbles:
-            head = parts[: max_bubbles - 1]
-            tail = " ".join(parts[max_bubbles - 1 :])
-            parts = head + [tail]
+            parts = parts[: max_bubbles - 1] + [self._join_parts(parts[max_bubbles - 1 :])]
 
         cleaned = [self.guard.clean(part) for part in parts]
         cleaned = [item for item in cleaned if item]
         return cleaned or [self.guard.clean(text)]
+
+    @staticmethod
+    def _bucket(groups: list[list[str]], limit: int) -> list[list[str]]:
+        """把若干段合并成不超过 limit 个气泡，顺序不变、按字数尽量均衡。
+
+        以前是按「组数」均分，结果是一桶塞两段、另一桶只剩一小截，
+        发出来一条巨长一条极短，很怪。
+        """
+        limit = max(1, limit)
+        if len(groups) <= limit:
+            return [list(group) for group in groups]
+        total = sum(sum(len(item) for item in group) for group in groups)
+        target = total / limit
+        buckets: list[list[str]] = []
+        current: list[str] = []
+        current_len = 0
+        remaining = limit
+        for group in groups:
+            group_len = sum(len(item) for item in group)
+            if current and remaining > 1 and current_len + group_len / 2 > target:
+                buckets.append(current)
+                current = []
+                current_len = 0
+                remaining -= 1
+            current.extend(group)
+            current_len += group_len
+        if current:
+            buckets.append(current)
+        return buckets
+
+    @staticmethod
+    def _join_parts(parts: list[str]) -> str:
+        """拼回一条消息：中文不加空格（中英混排处会挤出怪空格），缺口补个句号。"""
+        buffer = ""
+        for part in parts:
+            part = (part or "").strip()
+            if not part:
+                continue
+            if buffer and buffer[-1] not in "。！？!?…～~，,、；;：:":
+                buffer += "。"
+            buffer += part
+        return buffer
 
     @staticmethod
     def _merge_short(parts: list[str]) -> list[str]:
@@ -138,6 +198,10 @@ class Composer:
                 result[-1] = result[-1] + part
             else:
                 result.append(part)
+        # 开头就三五字的碎片也别单独占一条气泡，往后并
+        if len(result) > 1 and len(result[0]) < 6:
+            result[1] = result[0] + result[1]
+            result.pop(0)
         return result
 
     @staticmethod
@@ -164,21 +228,20 @@ class Composer:
 
     @staticmethod
     def _random_regroup(parts: list[str]) -> list[str]:
-        """人有的时候一口气说完，有的时候一句一句来——轻微扰动就够了。"""
+        """人有的时候一口气说完，有的时候一句一句来——轻微扰动就够了。
+
+        只做「合并相邻两条」这一种扰动。以前还带一个「拆长句」分支，
+        但兜底会按条数上限再合回去，一拆一合等于把第一条削短、第二条塞长，
+        越扰动越难看，索性去掉。
+        """
         if len(parts) <= 1:
             return parts
         if random.random() < 0.2:
-            # 合并相邻两条
             index = random.randrange(len(parts) - 1)
-            parts = parts[:index] + [parts[index] + parts[index + 1]] + parts[index + 2 :]
-        elif random.random() < 0.15 and len(parts) >= 2:
-            # 把一个长句拆成两截
-            index = max(range(len(parts)), key=lambda i: len(parts[i]))
-            target = parts[index]
-            if len(target) > 18:
-                cut = target.rfind("，", 0, len(target) // 2 + 6)
-                if cut > 4:
-                    parts = parts[:index] + [target[: cut + 1], target[cut + 1 :]] + parts[index + 1 :]
+            merged = parts[index] + parts[index + 1]
+            # 合并完几百字一条，比不合并还假，那就别合
+            if len(merged) <= 90:
+                parts = parts[:index] + [merged] + parts[index + 2 :]
         return parts
 
     # ================================================================ 去重

@@ -111,15 +111,19 @@ class Maintenance:
             )
             await self.store.execute(
                 "UPDATE mem_atom SET status='forgotten' "
-                "WHERE status IN ('active','archived') AND protect=0 "
+                "WHERE status='active' AND protect=0 "
                 "AND ((last_hit_at=0 AND created_at<?) OR (last_hit_at>0 AND last_hit_at<?))",
                 (now - forget_days * 86400, now - forget_days * 86400),
             )
+            # 以前这里直接 return 0，绕过了末尾的日标记写入：
+            # off 档下每小时的 housekeeping 都会把 decay_factor 再乘一遍，
+            # 一天乘 24 次。走统一出口落标才算修好。
+            await self._mark_done(mark_key)
             return 0
 
         rows = await self.store.fetch_all(
             "SELECT id, mem_level, created_at, last_hit_at, hit_count, decay, status, protect "
-            "FROM mem_atom WHERE status IN ('active','archived')"
+            "FROM mem_atom WHERE status='active'"
         )
         updates: list[tuple[Any, ...]] = []
         changed = 0
@@ -134,11 +138,9 @@ class Maintenance:
             days = (now - last) / 86400 if last else 0.0
             hits = int(row.get("hit_count") or 0)
             value = curve.decay_at(level, days, hits)
-            status = str(row.get("status") or "active")
-            if status == "active":
-                status = curve.status_for(value)
-            elif status == "archived" and value < curve.forget_ratio:
-                status = "forgotten"
+            # 只处理 active：归档等于冻住时间，要恢复就捞出来还是原来那个分。
+            # 以前这里会把 archived 一路衰减到 forgotten，「归档可恢复」名不副实。
+            status = curve.status_for(value)
             old_decay = float(row.get("decay") or 1.0)
             review = now + curve.next_review_days(level, hits) * 86400 if level else 0
             if abs(old_decay - value) < 0.002 and status == str(row.get("status") or "active"):
@@ -151,29 +153,65 @@ class Maintenance:
                 "UPDATE mem_atom SET decay=?, status=?, next_review_at=? WHERE id=?", updates
             )
         # 跑完才落标：中途抛异常不会写，下次还会重试
-        try:
-            await self.store.kv_set(mark_key, "done")
-        except Exception:
-            pass
+        await self._mark_done(mark_key)
         return changed
 
     async def reflect(self) -> None:
+        # 默认关：reflect 的产出目前没有任何消费者（面板预览还没上线），
+        # 开着就是每小时给每个主体烧一次模型调用。等面板接上再默认打开。
+        if not self.config.bool("memory.reflect_enabled", False):
+            return
+
+        now = int(time.time())
+        lt = time.localtime(now)
+        hour = max(0, min(23, self.config.int("memory.reflect_hour", 4)))
+        # 「到点之后」而不是「整点相等」：_housekeeping 每小时醒一次，
+        # 一旦那一跳因为重启/长耗时被错过，按相等判断当天就永远不反思了。
+        if lt.tm_hour < hour:
+            return
+        day_key = time.strftime("%Y-%m-%d", lt)
+        mark_key = f"maintenance:reflect:{self.config.persona_id}:{day_key}"
+        try:
+            if await self.store.kv_get(mark_key, "") == "done":
+                return
+        except Exception:
+            pass
+
+        # subject_ref 是写入时就建好的身份键：真实 QQ 号的都是 user:...，
+        # 而「QQ用户」「望山的插件」、文件名这类脏主体一律为空。
+        # 拿文件名去问「你对 TA 的新认识」只会产出噪声，还占一次调用。
         rows = await self.store.fetch_all(
-            "SELECT subject_id, scope, text, importance FROM mem_atom "
+            "SELECT subject_id, subject_ref, text, importance FROM mem_atom "
             "WHERE status='active' AND scope='user' AND importance>=0.55 "
-            "ORDER BY importance DESC, id DESC LIMIT 60"
+            "AND (unread IS NULL OR unread=0) AND subject_ref LIKE 'user:%' "
+            "ORDER BY importance DESC, id DESC LIMIT 200"
         )
-        if len(rows) < 4:
+        if not rows:
+            await self._mark_done(mark_key)
             return
         provider = self._provider()
         if provider is None:
             return
+
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
-            grouped.setdefault(str(row.get("subject_id") or ""), []).append(row)
-        for subject, items in grouped.items():
-            if not subject:
+            ref = str(row.get("subject_ref") or "")
+            if not ref.startswith("user:"):
                 continue
+            grouped.setdefault(ref, []).append(row)
+        if not grouped:
+            await self._mark_done(mark_key)
+            return
+
+        # 一轮最多反思 N 个主体，防止库涨大之后一次维护变成火灾
+        limit = max(1, self.config.int("memory.reflect_subjects_max", 8))
+        picked = sorted(grouped.items(), key=lambda kv: len(kv[1]), reverse=True)[:limit]
+        done = 0
+        for ref, items in picked:
+            # 单主体门槛：一条记忆也要模型概括人格，只是噪声
+            if len(items) < 4:
+                continue
+            subject = str(items[0].get("subject_id") or "")
             body = "\n".join(f"- {item['text']}" for item in items[:30])
             try:
                 resp = await provider.text_chat(
@@ -186,10 +224,24 @@ class Maintenance:
             if not summary:
                 continue
             await self.store.kv_set(
-                f"reflect:{self.config.persona_id}:{subject}",
-                {"text": summary, "ts": int(time.time()), "count": len(items)},
+                f"reflect:{self.config.persona_id}:{ref}",
+                {"text": summary, "ts": int(time.time()), "count": len(items),
+                 "subject": subject},
             )
-            await self.plugin.bus.emit(self.plugin.bus.ON_REFLECT, {"subject": subject, "text": summary})
+            await self.plugin.bus.emit(
+                self.plugin.bus.ON_REFLECT, {"subject": subject, "ref": ref, "text": summary}
+            )
+            done += 1
+        # 跑完才落标：中途抛异常不写，下次还能重试（和 decay 一个做法）
+        await self._mark_done(mark_key)
+        if done:
+            logger.info(f"[congling] 反思完成：{done} 个主体（{day_key}）")
+
+    async def _mark_done(self, mark_key: str) -> None:
+        try:
+            await self.store.kv_set(mark_key, "done")
+        except Exception:
+            pass
 
     # ================================================================ 备份
     async def backup(self) -> None:

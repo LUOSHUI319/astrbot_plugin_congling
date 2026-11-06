@@ -247,6 +247,11 @@ class NightState:
     enter_waking_at: int = 0
     # 醒来后还等着爬楼的会话
     pending_crawl: list[str] = field(default_factory=list)
+    # 醒来时刻（面板「醒来多久」、主动找人的冷却都用它）
+    last_wake_at: int = 0
+    # 醒来回满期：(开始时刻, 醒来那一刻的精力下限)。None 表示不在恢复期。
+    # 用一个可空元组而不是 bool+float 两个字段，避免「布尔说在恢复、值已经满了」这种矛盾。
+    wake_recovery: tuple[int, float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -261,6 +266,8 @@ class NightState:
             "sleep_kind": self.sleep_kind,
             "enter_waking_at": self.enter_waking_at,
             "pending_crawl": list(self.pending_crawl or []),
+            "last_wake_at": self.last_wake_at,
+            "wake_recovery": list(self.wake_recovery) if self.wake_recovery else None,
         }
 
     @classmethod
@@ -283,6 +290,19 @@ class NightState:
         state.enter_waking_at = int(data.get("enter_waking_at") or 0)
         raw_pending = data.get("pending_crawl") or []
         state.pending_crawl = [str(x) for x in raw_pending if str(x).strip()] if isinstance(raw_pending, list) else []
+        state.last_wake_at = int(data.get("last_wake_at") or 0)
+        # 恢复期记录要校验：老档缺字段、时钟回拨、手改存档都可能给出脏值。
+        # 脏值一律当 None，绝不在加载时补成「现在」——否则每次重启都白送一轮恢复期。
+        state.wake_recovery = None
+        raw_rec = data.get("wake_recovery")
+        if isinstance(raw_rec, (list, tuple)) and len(raw_rec) == 2:
+            try:
+                began = int(raw_rec[0])
+                floor = float(raw_rec[1])
+            except (TypeError, ValueError):
+                began, floor = 0, -1.0
+            if began > 0 and began <= int(time.time()) and 0.0 <= floor <= 100.0:
+                state.wake_recovery = (began, floor)
         return state
 
     def is_asleep(self) -> bool:

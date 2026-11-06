@@ -3368,3 +3368,77 @@ html[data-theme="dark"] .lv-4 { background: #2f2820; }
   opacity: .5;
   transition: color .18s ease, opacity .18s ease;
 }
+
+
+/* ---- 读取中：骨架流光 ---- */
+.sk-wrap { padding: 12px 4px; }
+.sk-bar {
+  height: 13px;
+  border-radius: 7px;
+  margin-bottom: 12px;
+  background: linear-gradient(100deg, rgba(84,78,64,.06) 20%, rgba(84,78,64,.15) 42%, rgba(84,78,64,.06) 64%);
+  background-size: 300% 100%;
+  animation: cgSkFlow 1.5s ease-in-out infinite;
+}
+@keyframes cgSkFlow {
+  0% { background-position: 130% 0; }
+  100% { background-position: -30% 0; }
+}
+@media (prefers-reduced-motion: reduce) { .sk-bar { animation: none; } }
+
+
+/* ---- 读取中：细进度条（覆盖之前的骨架条） ---- */
+.sk-wrap {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 64px 0;
+}
+.sk-track {
+  position: relative; width: 168px; height: 3px; border-radius: 2px;
+  background: rgba(84,78,64,.10); overflow: hidden;
+}
+.sk-track > i {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 44%; border-radius: 2px;
+  background: linear-gradient(90deg, rgba(84,78,64,0), rgba(84,78,64,.55), rgba(84,78,64,0));
+  animation: cgSkRun 1.15s ease-in-out infinite;
+}
+.sk-text { font-size: 12px; letter-spacing: .05em; opacity: .55; }
+@keyframes cgSkRun {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(330%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-track > i { animation: none; width: 100%; opacity: .35; }
+}
+
+
+/* ---- 读取中：带百分比的进度条（覆盖前面的扫描动画） ---- */
+.sk-track > .sk-fill {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(120,140,110,.45), rgba(120,140,110,.85));
+  animation: none;
+  transition: width .18s ease-out;
+}
+.sk-track > i { animation: none; }
+
+
+/* ---- 读取中：转圈 + 已等秒数（不编进度） ---- */
+.sk-wrap {
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px; padding: 64px 0;
+}
+.sk-spin {
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid rgba(84,78,64,.14);
+  border-top-color: rgba(84,78,64,.62);
+  animation: cgSkSpin .85s linear infinite;
+  flex: none;
+}
+@keyframes cgSkSpin { to { transform: rotate(360deg); } }
+.sk-text {
+  font-size: 12px; letter-spacing: .04em; opacity: .58;
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-spin { animation-duration: 2.4s; }
+}

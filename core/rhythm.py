@@ -54,7 +54,8 @@ class RhythmController:
         )
         if len(cleaned) > max_bubbles:
             head = cleaned[: max_bubbles - 1]
-            tail = " ".join(cleaned[max_bubbles - 1 :])
+            # 中文别用空格拼：中英混排处会挤出一堆多余空格
+            tail = "".join(cleaned[max_bubbles - 1 :])
             cleaned = head + [tail]
 
         delays: list[float] = []

@@ -1896,3 +1896,38 @@ img {
     max-width: none;
   }
 }
+
+
+/* ---- 读取中：带百分比的进度条 ---- */
+.m-load {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 26px 0 22px;
+}
+.m-load-track {
+  position: relative; width: 148px; height: 3px; border-radius: 2px;
+  background: var(--m-surface-3); overflow: hidden;
+}
+.m-load-track > i {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 0;
+  border-radius: 2px; background: var(--m-accent, #8fae9d);
+  transition: width .18s ease-out;
+}
+.m-load-text { font-size: 12px; opacity: .55; letter-spacing: .04em; }
+
+
+/* ---- 读取中：转圈 + 已等秒数 ---- */
+.m-load {
+  display: flex; align-items: center; justify-content: center; gap: 9px;
+  padding: 26px 0 22px;
+}
+.m-load-spin {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--m-surface-3);
+  border-top-color: var(--m-accent, #8fae9d);
+  animation: mSpin .85s linear infinite;
+  flex: none;
+}
+@keyframes mSpin { to { transform: rotate(360deg); } }
+.m-load-text {
+  font-size: 12px; opacity: .58; font-variant-numeric: tabular-nums;
+}

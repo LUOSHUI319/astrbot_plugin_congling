@@ -586,6 +586,35 @@ class MemoryV2Mixin:
                 tags = [str(x)[:12] for x in (body.get("tags") or [])][:6]
                 await pool.set_tags(item_id, tags)
                 return _ok({"id": item_id, "tags": tags})
+            if action == "add":
+                # 面板「存一张」：前端把文件读成 dataURL 传上来。
+                # 之前只有 trust/untrust/delete/tags 四个动作，根本没有入库分支，
+                # 所以库里永远是空的 —— 页面上那句「先把喜欢的图存进来」一直无处可存。
+                raw = str(body.get("data") or "")
+                if not raw:
+                    return _err("没有图片数据")
+                if raw.startswith("data:") and "," in raw:
+                    raw = raw.split(",", 1)[1]
+                import base64
+
+                try:
+                    blob = base64.b64decode(raw)
+                except Exception:
+                    return _err("图片数据解不开")
+                suffix = str(body.get("suffix") or ".jpg").strip().lower()
+                if not suffix.startswith("."):
+                    suffix = "." + suffix
+                if suffix not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+                    suffix = ".jpg"
+                tags = [str(x)[:12] for x in (body.get("tags") or [])][:6]
+                result = await pool.add_bytes(
+                    blob,
+                    suffix=suffix,
+                    source="user_upload",
+                    added_by="page",
+                    tags=tags,
+                )
+                return _ok(result) if result.get("ok") else _err(str(result.get("reason") or "存不进去"))
             return _err("不认识的动作")
         except Exception as exc:
             return _err(repr(exc)[:200])

@@ -33,7 +33,7 @@ from .core.store import Store
 from .humanize.delay import ReplyDelayer
 from .core.exc import exc_brief
 
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.2.0"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -137,6 +137,7 @@ class ConglingPlugin(Star):
         await self._safe_boot("qqext", self._boot_qqext)
         await self._safe_boot("commands", self._boot_commands)
         await self._safe_boot("page_api", self._boot_page_api)
+        await self._safe_boot("starmap", self._boot_starmap)
 
         self.probe.refresh(force=True)
         logger.info(
@@ -283,6 +284,32 @@ class ConglingPlugin(Star):
         self.page_api = PageApi(self)
         self.page_api.register_routes()
 
+    async def _boot_starmap(self) -> None:
+        """记忆星图同步。
+
+        星图是 file:// 打开的静态页面，读的是 data/memory-data.js，
+        所以「接口」= 导出快照 + 调它自己的 build-data.js 重新编译。
+        没配目录就什么都不做。
+        """
+        from .core.starmap import StarMapSync
+
+        self.starmap = StarMapSync(self)
+        if self.starmap.root() is None:
+            return
+        # 不阻塞启动：等记忆模块和几个循环都跑起来再干活
+        self._starmap_task = asyncio.create_task(self._starmap_first_sync())
+
+    async def _starmap_first_sync(self) -> None:
+        await asyncio.sleep(8)
+        try:
+            result = await self.starmap.sync()
+            if result.get("ok"):
+                logger.info(f"[congling] 记忆星图已同步：{result.get('count')} 条")
+            else:
+                logger.warning(f"[congling] 记忆星图同步失败：{result.get('reason')}")
+        except Exception as exc:
+            logger.warning(f"[congling] 记忆星图同步出错: {exc_brief(exc)}")
+
     async def _housekeeping(self) -> None:
         """每日维护：衰减、反思、日志清理、过期缓存。"""
         await asyncio.sleep(30)
@@ -296,6 +323,14 @@ class ConglingPlugin(Star):
                 await self.decision.purge()
                 await self._purge_cache()
                 await self._qq_daily_tick()
+                # 记忆星图：每小时最多重编译一次（导出 + node 构建约 1~3 秒）
+                starmap = getattr(self, "starmap", None)
+                if starmap is not None and starmap.root() is not None:
+                    last = await starmap.last_sync()
+                    if time.time() - int(last.get("at") or 0) > 1800:
+                        result = await starmap.sync()
+                        if not result.get("ok"):
+                            logger.warning(f"[congling] 记忆星图同步失败：{result.get('reason')}")
             except asyncio.CancelledError:
                 return
             except Exception as exc:

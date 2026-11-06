@@ -188,16 +188,89 @@
     return resp;
   }
 
+  /* 数据缓存：面板是 iframe，关掉内存就没了，所以放 localStorage。
+     3 分钟内直接用上次的，页面立刻出来；后台请求回来的新数据下次进页面就生效。 */
+  var DATA_TTL_MS = 180000;
+  var DATA_MAX_KEYS = 60;
+
+  function dataKeyOf(path, params) {
+    var suffix = "";
+    try {
+      var keys = Object.keys(params || {}).sort();
+      suffix = keys.length
+        ? "?" + keys.map(function (k) { return k + "=" + params[k]; }).join("&")
+        : "";
+    } catch (err) {
+      suffix = "";
+    }
+    return "congling.data." + apiPath(path) + suffix;
+  }
+
+  function cacheRead(key) {
+    try {
+      var raw = localStorage.getItem(key);
+      if (!raw) return null;
+      var box = JSON.parse(raw);
+      if (!box || typeof box.at !== "number") return null;
+      if (Date.now() - box.at > DATA_TTL_MS) return null;
+      return box.data;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function cacheWrite(key, data) {
+    try {
+      var keys = Object.keys(localStorage).filter(function (k) {
+        return k.indexOf("congling.data.") === 0;
+      });
+      if (keys.length > DATA_MAX_KEYS) {
+        keys.slice(0, keys.length - DATA_MAX_KEYS).forEach(function (k) {
+          localStorage.removeItem(k);
+        });
+      }
+      localStorage.setItem(key, JSON.stringify({ at: Date.now(), data: data }));
+    } catch (err) {}
+  }
+
+  function clearDataCache() {
+    try {
+      Object.keys(localStorage)
+        .filter(function (k) { return k.indexOf("congling.data.") === 0; })
+        .forEach(function (k) { localStorage.removeItem(k); });
+    } catch (err) {}
+  }
+
   function apiGet(path, params) {
-    return ensureBridge().then(function (api) {
-      return api.apiGet(apiPath(path), params || {});
-    }).then(unwrap);
+    var p = apiPath(path);
+    if (/^page\/(settings|providers)(\/|$)/.test(p)) {
+      return ensureBridge()
+        .then(function (api) { return api.apiGet(p, params || {}); })
+        .then(unwrap);
+    }
+    var key = dataKeyOf(path, params);
+    var hit = cacheRead(key);
+    var request = ensureBridge()
+      .then(function (api) { return api.apiGet(p, params || {}); })
+      .then(function (resp) {
+        var data = unwrap(resp);
+        cacheWrite(key, data);
+        return data;
+      });
+    if (hit !== null) {
+      request.catch(function () {});   // 后台刷新失败不影响旧数据
+      return Promise.resolve(hit);
+    }
+    return request;
   }
 
   function apiPost(path, body) {
-    return ensureBridge().then(function (api) {
-      return api.apiPost(apiPath(path), body || {});
-    }).then(unwrap);
+    return ensureBridge()
+      .then(function (api) { return api.apiPost(apiPath(path), body || {}); })
+      .then(function (resp) {
+        clearDataCache();   // 写操作之后旧缓存全部作废
+        return unwrap(resp);
+      });
   }
 
   /* ------------------------------------------------------------------ 提示 / 弹层 */
@@ -315,9 +388,38 @@
   }
 
   /* ------------------------------------------------------------------ 骨架 / 错误 */
+  /* 读取中：桥是 RPC，没有真实进度可言，只显示已经等了多久 */
+  var elapsedTimer = 0;
+  var elapsedStart = 0;
+
+  function elapsedPaint() {
+    var text = dom.main.querySelector(".m-load-text");
+    if (!text) return;
+    var sec = Math.max(0, (Date.now() - elapsedStart) / 1000);
+    text.textContent = "正在读取 · 已等 " + sec.toFixed(1) + "s";
+  }
+
+  function startProgress() {
+    elapsedStart = Date.now();
+    elapsedPaint();
+    if (elapsedTimer) clearInterval(elapsedTimer);
+    elapsedTimer = setInterval(elapsedPaint, 100);
+  }
+
+  function stopProgress() {
+    if (elapsedTimer) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = 0;
+    }
+  }
+
   function skeletonHTML(count) {
-    var body = "";
-    for (var i = 0; i < (count || 3); i++) {
+    var body =
+      '<div class="m-card m-card-pad" style="margin-bottom:12px">' +
+      '<div class="m-load"><span class="m-load-spin"></span>' +
+      '<span class="m-load-text">正在读取 · 已等 0.0s</span></div>' +
+      "</div>";
+    for (var i = 0; i < Math.max(0, (count || 3) - 1); i++) {
       body +=
         '<div class="m-card m-card-pad" style="margin-bottom:12px">' +
         '<div class="m-sk m-sk-line" style="width:46%"></div>' +
@@ -345,6 +447,8 @@
     });
   }
 
+  var TAB_HTML_CACHE = {};
+
   function goTab(tab, force) {
     if (TABS.indexOf(tab) < 0) return;
     if (!force && nav.tab === tab && nav.stack.length === 0) {
@@ -358,7 +462,13 @@
     paintDirty();
     paintTabs();
     paintTopbar();
-    dom.main.innerHTML = skeletonHTML(tab === "home" ? 2 : 3);
+    /* 切回看过的页签时先放上次的画面，别又闪一遍骨架。
+       force（主动刷新）才强制从骨架开始。 */
+    var cachedPage = TAB_HTML_CACHE[tab];
+    var freshPage = !force && cachedPage && Date.now() - cachedPage.at < 120000 ? cachedPage.html : "";
+    dom.main.innerHTML = freshPage || skeletonHTML(tab === "home" ? 2 : 3);
+    if (freshPage) stopProgress();
+    else startProgress();
     dom.main.scrollTop = 0;
     var render = VIEWS[tab];
     Promise.resolve()
@@ -366,12 +476,15 @@
       .then(function (html) {
         if (nav.tab !== tab || nav.stack.length) return;
         dom.main.innerHTML = html;
+        stopProgress();
+        TAB_HTML_CACHE[tab] = { html: html, at: Date.now() };
         if (force && nav.scroll[tab]) {
           dom.main.scrollTop = 0;
         }
         paintTabs();
       })
       .catch(function (err) {
+        stopProgress();
         if (nav.tab !== tab || nav.stack.length) return;
         dom.main.innerHTML = errorHTML(err);
       });
@@ -717,7 +830,7 @@
   function nightModeText(snapshot) {
     var mode = String(snapshot.mode || "");
     if (mode === "asleep") return "睡着了";
-    if (mode === "waking") return "刚要醒";
+    if (snapshot.wake_recovering) return "醒着，精力在回来";
     return "醒着";
   }
 
@@ -726,7 +839,7 @@
     if (!s.enabled) {
       return (
         '<div class="m-page"><div class="m-empty"><b>长夜如梦没开</b>' +
-        "开了之后她会累、会困、会睡，睡着期间的消息要「爬楼」才能看到。<br>梦里只留 REM 期那几段。" +
+        "开了之后她会累、会困、会睡。睡着期间攒下的记忆，醒来会在后台按十分钟的进度慢慢放行，不用先说话。<br>梦里只留 REM 期那几段。" +
         '<div style="margin-top:16px"><button class="m-btn is-primary" type="button" data-act="open" data-page="settings-group" data-group="night">去打开</button></div>' +
         "</div>" + footHTML() + "</div>"
       );
@@ -784,7 +897,7 @@
         '<div class="m-kv"><span class="m-kv-k">作息</span><span class="m-kv-v">' + esc(String(s.wake_time || "08:00")) + " 起 · " + esc(String(s.latest_sleep_time || "02:30")) + " 最晚睡</span></div>" +
         '<div class="m-kv"><span class="m-kv-k">疲劳时段</span><span class="m-kv-v">' + esc(String(s.night_fatigue || "—")) + (s.noon_fatigue ? " / " + esc(String(s.noon_fatigue)) : "") + "</span></div>" +
         '<div class="m-kv"><span class="m-kv-k">做梦</span><span class="m-kv-v">' + (s.dream_on ? "开着 · 每 " + esc(String(num(s.dream_interval_minutes, 60))) + " 分钟一段" : "关着") + "</span></div>" +
-        '<div class="m-kv"><span class="m-kv-k">爬楼</span><span class="m-kv-v">' + (s.crawl_on ? "开着" : "关着") + (num(s.pending_crawl) ? " · 待爬 " + esc(String(num(s.pending_crawl))) + " 个会话" : "") + "</span></div>" +
+        '<div class="m-kv"><span class="m-kv-k">补读</span><span class="m-kv-v">' + (s.catchup_on === false ? "关着" : "开着") + "</span></div>" +
         '<div class="m-kv"><span class="m-kv-k">叫醒档位</span><span class="m-kv-v">' + esc(String(s.wake_mode || "—")) + "</span></div>" +
       "</div>";
 
@@ -828,7 +941,7 @@
                 '<span class="m-item-sub">睡着期间攒了 ' + esc(String(num(g.count))) + " 条" +
                   (g.since ? " · 从 " + esc(agoOf(g.since)) : "") + "</span>" +
               "</span>" +
-              '<span class="m-tag is-rose">去爬</span>' +
+              '<span class="m-tag is-rose">补完</span>' +
             "</button>"
           );
         }).join("")
@@ -1608,7 +1721,7 @@
         return;
       case "night-crawl":
         apiPost("night/crawl", { session_id: node.dataset.session }).then(function (data) {
-          toast("爬完了，清掉 " + num(data.removed) + " 条", "ok");
+          toast("补完了，放行 " + num(data.removed) + " 条", "ok");
           goTab("night", true);
         }).catch(function (err) { toast(err.message, "err"); });
         return;

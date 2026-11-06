@@ -1,10 +1,12 @@
 /* 夜航手账渲染层 · 由 night-part1/2/3 合成，勿分开改 */
+/* ⚠ index.html 实际加载的是 night.1029c.js。改完本文件必须同步：
+      Copy-Item night.js night.1029c.js */
 /* ==================================================================
    从绫开始 · 夜航手账 —— 渲染层（全量接管）
    载入顺序：night.js → app.js。这里只定义函数，不执行任何东西，
    等 app.js 的 render 分发过来再跑。
    对外入口（app.js 里 if (isNightUI()) 调这些）：
-     njOverview / njPersona / njBehavior / njMemory / njNight / njTools / njQQ / njSystem
+     njOverview / njPersona / njBehavior / njMemory / njMemoryTimeline / njNight / njTools / njQQ / njSystem
      njM3Overview / njM3Users / njM3Sessions / njMemoryLevels / njAffinityPage / njAvatarPage
    ================================================================== */
 
@@ -845,11 +847,13 @@ function njSprite() {
   document.body.appendChild(box);
 }
 
-/* ------------------------------------------------------------ 记忆库 */
-async function njMemory(keyword, sessionId, kind) {
+/* ------------------------------------------------------- 记忆时间轴 */
+/* 0.7.1：时间轴从「记忆库」里拆出来，单独占一页。
+   以前三栏底下还压着「记忆设置」「归档消息」两条 details，一展开就得靠 minHeight
+   死锁高度，三栏被挤到只剩半屏。这页现在只有状态栏 + 工具条 + 三栏，地方全给它。 */
+async function njMemoryTimeline(keyword, sessionId, kind) {
   njShell();
   njTitle("04");
-  const settings = await loadSettings();
   // 和 app.js 那版一样：500 张卡滑起来必卡，先取 150
   const shown = Number(window.__memShown || 150);
   const params = { limit: shown, status: "active" };
@@ -1021,70 +1025,23 @@ async function njMemory(keyword, sessionId, kind) {
         </section>
       </aside>
     </div>
-
-    <div class="nj-mem-extra">
-      <section class="nj-card" aria-label="记忆清除">
-        <div class="nj-card-head"><h3>删除所有记忆</h3><span class="note">仅管理员</span></div>
-        <p class="hint">清空记忆、主体、画像、好感、日记、梦、账本和排产。不可恢复；必须先生成备份并完成四重确认。</p>
-        <button type="button" class="nj-btn" id="nj-memory-reset">删除所有记忆</button>
-      </section>
-      <details class="nj-details" id="nj-mem-settings">
-        <summary>记忆设置</summary>
-        <div class="body">
-          ${configCard(pickGroup(settings, "memory"), { title: "记忆设置", desc: "注入条数决定它一次想起多少；向量那项留空就只用关键词检索" })}
-          ${pageActions("保存记忆设置")}
-        </div>
-      </details>
-      <details class="nj-details" id="nj-inbox">
-        <summary>归档消息（收到过的原文）</summary>
-        <div class="body" id="nj-inbox-body"><div class="hint">展开后自动加载</div></div>
-      </details>
-    </div>
-  `, { plain: true, bodyClass: "is-mem" });
-
-  document.getElementById("nj-memory-reset").onclick = () =>
-    njDeleteAllMemories(() => njMemory("", "", ""));
-
-  /* 底下那两条展开时，把三栏的高度就地锁住：
-     宁可整页往下滚，也不让三栏被压小、更不许互相盖住 */
-  const memBody = view.querySelector(".nj-mem-body");
-  view.querySelectorAll(".nj-mem-extra .nj-details > summary").forEach((sum) => {
-    sum.addEventListener(
-      "click",
-      () => {
-        if (memBody && !memBody.dataset.lockH) memBody.dataset.lockH = String(memBody.offsetHeight);
-      },
-      true
-    );
-  });
-  view.querySelectorAll(".nj-mem-extra .nj-details").forEach((node) => {
-    node.addEventListener("toggle", () => {
-      if (!memBody) return;
-      const anyOpen = Array.from(view.querySelectorAll(".nj-mem-extra .nj-details")).some((d) => d.open);
-      if (anyOpen && memBody.dataset.lockH) {
-        memBody.style.minHeight = `${memBody.dataset.lockH}px`;
-      } else {
-        memBody.style.minHeight = "";
-        delete memBody.dataset.lockH;
-      }
-    });
-  });
+  `, { plain: true, bodyClass: "is-mem is-mem-tl" });
 
   const jump = document.getElementById("nj-unread-jump");
   if (jump) jump.onclick = () => setView("night");
 
   const current = () => (document.getElementById("nj-m-key") || {}).value || "";
-  const go = () => njMemory(current().trim(), sessionId || "", kind || "");
+  const go = () => njMemoryTimeline(current().trim(), sessionId || "", kind || "");
   document.getElementById("nj-m-go").onclick = go;
   const keyInput = document.getElementById("nj-m-key");
   keyInput.onkeydown = (ev) => {
     if (ev.key === "Enter") go();
   };
   view.querySelectorAll("#nj-m-kind [data-kind]").forEach((btn) => {
-    btn.onclick = () => njMemory(current().trim(), sessionId || "", btn.dataset.kind || "");
+    btn.onclick = () => njMemoryTimeline(current().trim(), sessionId || "", btn.dataset.kind || "");
   });
   view.querySelectorAll("[data-session]").forEach((btn) => {
-    btn.onclick = () => njMemory(current().trim(), btn.dataset.session || "", kind || "");
+    btn.onclick = () => njMemoryTimeline(current().trim(), btn.dataset.session || "", kind || "");
   });
   view.querySelectorAll(".nj-ev").forEach((card) => {
     card.onclick = () => card.classList.toggle("is-open");
@@ -1095,39 +1052,84 @@ async function njMemory(keyword, sessionId, kind) {
       if (!(await njConfirm("让它忘掉这一条？"))) return;
       try {
         await post("page/memory/delete", { id: Number(btn.dataset.forget) });
-        njMemory(current().trim(), sessionId || "", kind || "");
+        njMemoryTimeline(current().trim(), sessionId || "", kind || "");
       } catch (err) {
         njToast(err.message, "err");
       }
     };
   });
+}
+
+/* ----------------------------------------------------- 记忆设置（管理页） */
+/* 时间轴搬走之后，这页只管「管」：开关、原文归档、清空。
+   都直接摊开，不再叠两条 details——这页底下没有三栏等着被压。 */
+async function njMemory() {
+  njShell();
+  njTitle("04");
+  const [settings, data] = await Promise.all([
+    loadSettings(),
+    get("page/memory/list", { limit: 1, status: "active" }).catch(() => ({})),
+  ]);
+  const starmap = await get("page/star-map/state").catch(() => null);
+  const sessions = data.sessions || [];
+  const total = data.total == null ? "—" : data.total;
+
+  view.innerHTML = njPage(
+    njHeroBar({
+      eyebrow: "04 / SETTINGS",
+      art: "memory",
+      title: "记忆设置",
+      note: "记忆的开关、原文归档和清空都在这页；时间轴、来源会话和构成在旁边的「记忆时间轴」。",
+      stats: [
+        { label: "记忆总数", value: total, unit: "条" },
+        { label: "来源会话", value: sessions.length, unit: "个" },
+        { label: "检索档位", value: data.tier || "—" },
+      ],
+    }),
+    `
+    ${configCard(pickGroup(settings, "memory"), {
+      title: "记忆设置",
+      desc: "注入条数决定它一次想起多少；向量那项留空就只用关键词检索",
+    })}
+    ${starmapCardHtml(starmap)}
+    ${pageActions("保存记忆设置")}
+
+    <section class="nj-card" id="nj-lib-inbox">
+      <div class="nj-card-head"><h3>归档消息</h3><span class="note">收到过的原文 · 最近 20 条</span></div>
+      <div class="nj-lib-inbox" id="nj-inbox-body"><div class="nj-empty">读取中…</div></div>
+    </section>
+
+    <section class="nj-card" id="nj-lib-reset">
+      <div class="nj-card-head"><h3>删除所有记忆</h3><span class="note">仅管理员</span></div>
+      <p class="hint">清空记忆、主体、画像、好感、日记、梦、账本和排产。不可恢复；必须先生成备份并完成四重确认。</p>
+      <button type="button" class="nj-btn" id="nj-memory-reset">删除所有记忆</button>
+    </section>`,
+    { plain: true, bodyClass: "is-lib" }
+  );
 
   njBindSettings(view);
+  bindStarmapSync(starmap);
+  document.getElementById("nj-memory-reset").onclick = () => njDeleteAllMemories(() => njMemory());
 
-  const inbox = document.getElementById("nj-inbox");
-  let loaded = false;
-  if (inbox)
-    inbox.addEventListener("toggle", async () => {
-      if (!inbox.open || loaded) return;
-      loaded = true;
-      const box = document.getElementById("nj-inbox-body");
-      try {
-        const res = await get("page/inbox", { limit: 20 });
-        const rows = res.items || [];
-        box.innerHTML = rows.length
-          ? `<table class="nj-table"><thead><tr><th>时间</th><th>来源</th><th>内容</th></tr></thead><tbody>
-              ${rows
-                .map(
-                  (row) => `<tr><td class="num">${esc(row.time || "")}</td><td class="num">${esc(row.sender_name || row.session_id || "")}</td>
-                    <td class="txt">${esc(row.text || "")}</td></tr>`
-                )
-                .join("")}
-            </tbody></table>`
-          : '<div class="nj-empty">还没有归档消息</div>';
-      } catch (err) {
-        box.innerHTML = `<div class="nj-empty">${esc(err.message)}</div>`;
-      }
-    });
+  const box = document.getElementById("nj-inbox-body");
+  if (box) {
+    try {
+      const res = await get("page/inbox", { limit: 20 });
+      const rows = res.items || [];
+      box.innerHTML = rows.length
+        ? `<table class="nj-table"><thead><tr><th>时间</th><th>来源</th><th>内容</th></tr></thead><tbody>
+            ${rows
+              .map(
+                (row) => `<tr><td class="num">${esc(row.time || "")}</td><td class="num">${esc(row.sender_name || row.session_id || "")}</td>
+                  <td class="txt">${esc(row.text || "")}</td></tr>`
+              )
+              .join("")}
+          </tbody></table>`
+        : '<div class="nj-empty">还没有归档消息</div>';
+    } catch (err) {
+      box.innerHTML = `<div class="nj-empty">${esc(err.message)}</div>`;
+    }
+  }
 }
 
 /* P5：四重确认仅是操作引导；权限、阶段、备份和计时全部由接口再次校验。 */
@@ -1304,7 +1306,7 @@ function njMemEvent(row) {
     </div>
     <p>${esc(row.text || "")}</p>
     <div class="nj-ev-extra">
-      <span class="nj-hint">重要度 ${esc((Number(row.importance) || 0).toFixed(2))}　${row.expire_at ? "会淡" : "永久"}${
+      <span class="nj-hint">重要度 ${esc((Number(row.importance) || 0).toFixed(2))}　${row.expire_at == null ? "未设置" : Number(row.expire_at) === 0 ? "永久" : "会淡"}${
         row.strength != null ? `　强度 ${(Number(row.strength) * 100).toFixed(0)}%` : ""
       }</span>
       <span class="nj-ev-acts"><button class="nj-btn tiny danger" data-forget="${esc(row.id)}">忘记</button></span>
@@ -1322,6 +1324,7 @@ async function njM3Overview() {
   const maxKind = Math.max(1, ...kinds.map((k) => Number(k.count || 0)));
   const heat = data.heatmap || {};
   const recent = data.recent || [];
+  const reflectItems = data.reflect || [];
 
   /* 26 周 × 7 天聚成格子 */
   const cells = [];
@@ -1374,13 +1377,30 @@ async function njM3Overview() {
       <div class="nj-ms"><span class="nj-ms-label">记忆总条数</span><b>${esc(total)}</b><span class="unit">条</span><span class="note">近 30 天 +${esc(data.month_new || 0)}</span></div>
       <div class="nj-ms"><span class="nj-ms-label">永久记忆</span><b>${esc(data.permanent || 0)}</b><span class="unit">条</span><span class="note">${esc(data.permanent_pct || 0)}% 不会淡</span></div>
       <div class="nj-ms"><span class="nj-ms-label">快忘掉的</span><b>${esc(data.fading || 0)}</b><span class="unit">条</span><span class="note">7 天内</span></div>
-      <div class="nj-ms"><span class="nj-ms-label">人 / 会话</span><b>${esc(data.people || 0)}<small> / ${esc(data.sessions || 0)}</small></b><span class="note">${data.pending ? "待确认 " + esc(data.pending) : "无待确认"}${Number(data.unread || 0) > 0 ? ` · <em class="unread">未爬 ${esc(data.unread)}</em>` : ""}</span></div>
+      <div class="nj-ms"><span class="nj-ms-label">人 / 会话</span><b>${esc(data.people || 0)}<small> / ${esc(data.sessions || 0)}</small></b><span class="note">${data.pending ? "待确认 " + esc(data.pending) : "无待确认"}${Number(data.unread || 0) > 0 ? ` · <em class="unread">没读 ${esc(data.unread)}</em>` : ""}</span></div>
     </div>
 
     <div class="nj-cols" style="margin-top:18px">
       <div>
         <div class="nj-head" style="margin-top:0"><h2>记忆类型</h2><span>按条数</span></div>
         <div class="nj-bar-rows">${kindBars}</div>
+
+        ${
+          reflectItems.length
+            ? `<div class="nj-head"><h2>它现在怎么看你</h2><span>每日反思 · 最近 ${reflectItems.length} 条</span></div>
+               <section class="nj-card" style="padding:6px 16px">
+                 ${reflectItems
+                   .slice(0, 4)
+                   .map(
+                     (it) => `<div style="padding:10px 0;border-bottom:1px solid rgba(0,0,0,.06)">
+                       <div style="font-size:12px;opacity:.55">${esc(it.subject)} · ${esc(njWhen(it.ts))}${it.count ? ` · ${esc(it.count)} 条依据` : ""}</div>
+                       <p style="margin:5px 0 0;line-height:1.65">${esc(it.text)}</p>
+                     </div>`
+                   )
+                   .join("")}
+               </section>`
+            : ""
+        }
 
         <div class="nj-head"><h2>记过话的日子</h2><span>近 26 周 · 颜色越深越多</span></div>
         <div class="nj-heat">${heatHtml}</div>
@@ -1927,7 +1947,7 @@ function njNightHero(st, opts) {
   const enabled = st.enabled !== false;
   const mode = String(st.mode || "awake");
   const asleep = mode === "asleep" || mode === "sleeping";
-  const waking = mode === "waking";
+  const recovering = !!st.wake_recovering;
   const energy = Number(st.energy != null ? st.energy : 0);
   const max = Number(st.energy_max || 100) || 100;
   const pct = Math.max(0, Math.min(100, Math.round((energy / max) * 100)));
@@ -1952,15 +1972,15 @@ function njNightHero(st, opts) {
   const fatigueText = st.fatigue === "night" ? "夜间疲劳期" : st.fatigue === "noon" ? "午间疲劳期" : "不在疲劳期";
   const title = asleep
     ? `睡着中${st.remain_text ? `，还有 ${esc(st.remain_text)}` : ""}`
-    : waking
-      ? "刚醒，还没爬起来"
+    : recovering
+      ? "醒着，精力在回来"
       : st.fatigue
         ? "醒着，进入疲劳期"
         : "还醒着";
   const sub = asleep
     ? `预计 ${esc((st.wake_day_label || "") + (st.wake_label || st.wake_window || st.wake_time || "08:00"))} 醒；叫醒她会先缓一会儿，刚醒的话语气会松一点`
-    : waking
-      ? `正在翻没收的消息（${esc(st.pending_crawl || 0)} 个会话），翻完才算真的醒`
+    : recovering
+      ? `精力正在回到 ${esc(st.energy_max || 100)}（+${esc(st.wake_recover_rate || 0)}/分钟），睡着那段记忆也在后台慢慢想起`
       : `起床点 ${esc(st.wake_time || "08:00")} ± ${esc(st.wake_jitter || 0)} 分钟；累了会自己睡，不用催`;
 
   const stage = st.stage || null;
@@ -1979,14 +1999,14 @@ function njNightHero(st, opts) {
     ["夜间疲劳", st.night_fatigue || "—"],
     ["唤醒", st.wake_mode === "both" ? "私聊 + 群聊" : st.wake_mode === "never" ? "叫不醒" : "只在私聊"],
     ["做梦", st.dream_on ? "开着" : "关着"],
-    ["爬楼", st.crawl_on ? "开着" : "关着"],
+    ["后台补读", st.catchup_on === false ? "关着" : "开着"],
   ]
     .map(([k, v]) => `<span class="nj-chip">${esc(k)}<b>${esc(v)}</b></span>`)
     .join("");
 
   return `<section class="nj-night-hero">
     <div class="nj-night-main">
-      <div class="nj-eyebrow"><i></i><b>${asleep ? "睡着中" : waking ? "刚醒" : "清醒中"}</b><span class="sep">·</span>第 ${esc(st.day_count || 1)} 夜<span class="sep">·</span>${esc(fatigueText)}</div>
+      <div class="nj-eyebrow"><i></i><b>${asleep ? "睡着中" : recovering ? "刚醒，在缓" : "清醒中"}</b><span class="sep">·</span>第 ${esc(st.day_count || 1)} 夜<span class="sep">·</span>${esc(fatigueText)}</div>
       <h2 class="nj-h1">${asleep ? title : `${esc(title)}，精力 <span>${pct}%</span>`}</h2>
       <p class="nj-night-sub">${sub}</p>
       ${stageRow}
@@ -2094,7 +2114,7 @@ async function njNight() {
     };
   });
 
-  /* 标记已爬 */
+  /* 立即补完 */
   view.querySelectorAll("[data-night-crawl]").forEach((btn) => {
     btn.onclick = async () => {
       btn.disabled = true;
@@ -2207,12 +2227,12 @@ function njNightState(st, unread, heat, dreams) {
       </section>
 
       <section class="nj-night-card">
-        <div class="nj-card-head"><h3>未曾爬楼</h3><span class="note">${unread.length} 条没看</span></div>
+        <div class="nj-card-head"><h3>还没读</h3><span class="note">${unread.length} 条</span></div>
         <div class="nj-unread">${unreadRows}</div>
         ${
           unread.length
             ? `<div class="nj-card-foot" style="margin-top:auto;padding-top:10px;justify-content:space-between">
-                 <button class="nj-btn tiny" data-night-crawl>标记已爬</button>
+                 <button class="nj-btn tiny" data-night-crawl>立即补完</button>
                  <button class="nj-btn tiny" data-night-tab="memory">全部 ${unread.length} 条</button>
                </div>`
             : ""
@@ -2445,16 +2465,16 @@ function njNightMemory(st, unread) {
     .join("");
   return `
     ${njNightHero(st)}
-    <div class="nj-head"><h2>睡着期间记下的</h2><span>${unread.length} 条没爬</span></div>
+    <div class="nj-head"><h2>睡着期间记下的</h2><span>${unread.length} 条还没读</span></div>
     <section class="nj-card" style="padding:14px 18px">
-      <p class="hint" style="margin:0 0 12px">睡着期间进记忆的话会打上「未曾爬楼」，醒来先翻一遍才算真的看过。</p>
+      <p class="hint" style="margin:0 0 12px">睡着期间的记忆会先记为「还没读」，醒来后在后台按进度自动放行，不用先说话。</p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-        <span class="nj-chip ${st.crawl_on ? "on" : "off"}">爬楼机制 ${st.crawl_on ? "开着" : "关着"}</span>
-        ${unread.length ? '<button class="nj-btn sm" data-night-crawl>全部标记已爬</button>' : ""}
+        <span class="nj-chip ${st.catchup_on === false ? "off" : "on"}">后台补读 ${st.catchup_on === false ? "关着" : "开着"}</span>
+        ${unread.length ? '<button class="nj-btn sm" data-night-crawl>立即补完</button>' : ""}
       </div>
       <div class="nj-scroll nj-list-scroll nj-night-scroll">
         <div class="nj-timeline" style="padding-left:22px">
-          ${rows || '<div class="nj-empty">没有没爬的消息</div>'}
+          ${rows || '<div class="nj-empty">没有还没读的记忆</div>'}
         </div>
       </div>
     </section>
@@ -2966,7 +2986,7 @@ function njNightSettings(settings) {
     ${card("唤醒", "睡着之后有多难叫醒。y 到 y+n 之间概率平分 100%", ["wake_mode", "wake_window_minutes", "wake_start_count", "wake_step_count"])}
     ${card("入睡前的道别", "多个会话一起道别时，要不要说同一句", ["farewell_before_sleep", "farewell_same", "farewell_random", "farewell_use_llm"])}
     ${card("精力", "疲劳期里怎么掉、平时怎么回", [...NIGHT_ENERGY_KEYS, "min_turns_before_sleep"])}
-    ${card("爬楼", "关掉之后睡着的记忆就直接可读了", NIGHT_MEMORY_KEYS)}
+    ${card("后台补读", "关掉之后，睡着的记忆醒来就直接可读，不再分 10 分钟慢慢想起", NIGHT_MEMORY_KEYS)}
     ${card("梦境", "关掉就不做梦，开着 token 消耗会明显增加", NIGHT_DREAM_KEYS)}
     ${configCard(close, { title: "收线静默", desc: "聊到晚安、拜拜这种话就真的停下来" })}
     ${pageActions("保存本页设置")}
@@ -3241,7 +3261,7 @@ async function njAvatarPage() {
       <p class="hint" style="margin:12px 0 0">自动换只用「可信」库里的图：你主动存进来的，或者你点过「允许」的。她自己扒到的图只会待在待审区</p>
     </section>
 
-    <div class="nj-head"><h2>可信库</h2><span>${items.length} 张</span></div>
+    <div class="nj-head"><h2>可信库</h2><span>${items.length} 张</span><button class="nj-btn tiny" id="avatar-upload">存一张</button><input type="file" id="avatar-file" accept="image/*" hidden /></div>
     <div class="nj-avatar-grid">${items.map((item) => card(item, false)).join("") || '<div class="nj-empty">库里还是空的，先把喜欢的图存进来</div>'}</div>
 
     <div class="nj-head"><h2>待审</h2><span>${pending.length} 张</span></div>
@@ -3285,6 +3305,35 @@ async function njAvatarPage() {
         if (msg) msg.textContent = err.message;
       }
     };
+
+  /* 存图：读成 dataURL 传给后端入库 */
+  const uploadBtn = document.getElementById("avatar-upload");
+  const fileInput = document.getElementById("avatar-file");
+  if (uploadBtn && fileInput) {
+    uploadBtn.onclick = () => fileInput.click();
+    fileInput.onchange = async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = "上传中…";
+      try {
+        if (file.size > 8 * 1024 * 1024) throw new Error("图片超过 8MB，先压一下");
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("读文件失败"));
+          reader.readAsDataURL(file);
+        });
+        const suffix = (file.name.split(".").pop() || "jpg").toLowerCase();
+        await post("page/avatar/pool", { action: "add", data: dataUrl, suffix });
+        njAvatarPage();
+      } catch (err) {
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = "存一张";
+        window.alert(err.message || "存不进去");
+      }
+    };
+  }
 }
 
 /* ------------------------------------------------------------ 系统 */

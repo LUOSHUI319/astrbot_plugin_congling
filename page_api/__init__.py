@@ -231,6 +231,38 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self.cfg = plugin.cfg
+        # 面板接口计时：定位「页面打开慢」到底慢在哪个请求上
+        self._timings: list[dict[str, Any]] = []
+
+    def _timed(self, path: str, handler):
+        """给每个接口套一层计时，结果落库（前端看不到日志时也能查）。"""
+        import time as _t
+
+        async def wrapped(*args, **kwargs):
+            started = _t.perf_counter()
+            try:
+                return await handler(*args, **kwargs)
+            finally:
+                cost = (_t.perf_counter() - started) * 1000
+                self._timings.append({
+                    "path": path,
+                    "ms": round(cost, 1),
+                    "at": int(_t.time()),
+                })
+                if len(self._timings) > 200:
+                    del self._timings[:-200]
+                try:
+                    store = getattr(self.plugin, "store", None)
+                    if store is not None:
+                        rows = await store.kv_get("diag:timing", []) or []
+                        if not isinstance(rows, list):
+                            rows = []
+                        rows.append({"path": path, "ms": round(cost, 1), "at": int(_t.time())})
+                        await store.kv_set("diag:timing", rows[-80:])
+                except Exception:
+                    pass
+
+        return wrapped
 
     @staticmethod
     def _deep_merge(target: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -272,12 +304,12 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
     # ================================================================ 注册
     def register_routes(self) -> None:
         register = self.plugin.context.register_web_api
-        routes = [
-            ("/overview", self.overview, ["GET"]),
+        routes = [            ("/overview", self.overview, ["GET"]),
             ("/persona", self.get_persona, ["GET"]),
             ("/persona/save", self.save_persona, ["POST"]),
             ("/persona/rollback", self.rollback_persona, ["POST"]),
             ("/settings", self.get_settings, ["GET"]),
+            ("/providers", self.get_providers, ["GET"]),
             ("/settings/save", self.save_settings, ["POST"]),
             ("/memory/list", self.memory_list, ["GET"]),
             ("/memory/search", self.memory_search, ["POST"]),
@@ -342,6 +374,10 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
             ("/affinity/remove", self.affinity_remove, ["POST"]),
             # ---- 0.5.0 头像
             ("/avatar", self.avatar_state, ["GET"]),
+            ("/star-map/state", self.starmap_state, ["GET"]),
+            ("/star-map/sync", self.starmap_sync, ["POST"]),
+            ("/memory/db-path", self.memory_db_path, ["GET"]),
+            ("/timing", self.timing, ["GET"]),
             ("/avatar/set", self.avatar_set, ["POST"]),
             ("/avatar/pool", self.avatar_pool_save, ["POST"]),
         ]
@@ -350,6 +386,7 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
                 if path != "/memory/reset":
                     # 页面操作也必须参与清除闸门；不能与删除事务交叉回写。
                     handler = memory_work(handler.__func__).__get__(self)
+                handler = self._timed(path, handler)
                 register(f"{PAGE_API_PREFIX}{path}", handler, methods, f"从绫开始 {path}")
             except Exception as exc:
                 logger.warning(f"[congling] 注册页面接口失败 {path}: {exc!r}")
@@ -453,6 +490,114 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
                     "compat": self.plugin.probe.matrix(),
                 }
             )
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def timing(self) -> dict[str, Any]:
+        """面板接口耗时。打开一次页面后调这个，就知道慢在哪个请求上。"""
+        rows = list(self._timings)[-120:]
+        agg: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            path = str(row.get("path") or "")
+            item = agg.setdefault(path, {"path": path, "n": 0, "total": 0.0, "max": 0.0})
+            item["n"] += 1
+            item["total"] += float(row.get("ms") or 0)
+            item["max"] = max(item["max"], float(row.get("ms") or 0))
+        for item in agg.values():
+            item["avg"] = round(item["total"] / max(1, item["n"]), 1)
+            item["total"] = round(item["total"], 1)
+            item["max"] = round(item["max"], 1)
+        return _ok({
+            "summary": sorted(agg.values(), key=lambda x: -x["total"]),
+            "recent": rows[-40:],
+        })
+
+    async def memory_db_path(self) -> dict[str, Any]:
+        """记忆库的绝对路径。星图插件要手动绑定时，用户从这里复制。"""
+        try:
+            from ..core import paths
+
+            db = paths.data_dir() / "congling.db"
+            return _ok({"path": str(db), "exists": db.is_file()})
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def starmap_state(self) -> dict[str, Any]:
+        try:
+            sync = getattr(self.plugin, "starmap", None)
+            if sync is None:
+                return _err("星图同步没启用")
+            state = await sync.state()
+            # 顺带把自己的库路径带上：星图插件要手动绑定时要用，
+            # 这样前端不用再单开一个路由（少一条可能注册失败的路径）
+            try:
+                from ..core import paths
+
+                db = paths.data_dir() / "congling.db"
+                state["db_path"] = str(db)
+                state["db_exists"] = db.is_file()
+            except Exception:
+                state["db_path"] = ""
+                state["db_exists"] = False
+            return _ok(state)
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def starmap_sync(self) -> dict[str, Any]:
+        try:
+            sync = getattr(self.plugin, "starmap", None)
+            if sync is None:
+                return _err("星图同步没启用")
+            result = await sync.sync(force=True)
+            return _ok(result) if result.get("ok") else _err(str(result.get("reason") or "同步失败"))
+        except Exception as exc:
+            return _err(repr(exc)[:200])
+
+    async def get_providers(self) -> dict[str, Any]:
+        """给设置页挑模型用：分别列出对话模型和向量模型。
+
+        AstrBot 自带的插件配置面板把 `_special: select_provider` 写死成 chat_completion，
+        向量模型永远选不到。所以插件自己的面板必须单独给一份列表。
+        """
+        try:
+            ctx = getattr(self.plugin, "context", None)
+
+            def collect(objs: Any) -> list[dict[str, str]]:
+                out: list[dict[str, str]] = []
+                for provider in list(objs or []):
+                    cfg = getattr(provider, "provider_config", None) or {}
+                    pid = str(cfg.get("id") or "")
+                    if not pid:
+                        continue
+                    model = str(cfg.get("model") or "")
+                    if not model:
+                        try:
+                            model = str(provider.get_model() or "")
+                        except Exception:
+                            model = ""
+                    meta = getattr(provider, "meta", None)
+                    name = ""
+                    if callable(meta):
+                        try:
+                            name = str(getattr(meta(), "name", "") or "")
+                        except Exception:
+                            name = ""
+                    label = " · ".join(x for x in (name or pid, model) if x)
+                    out.append({"id": pid, "name": label})
+                return out
+
+            chat: list[dict[str, str]] = []
+            embedding: list[dict[str, str]] = []
+            if ctx is not None:
+                try:
+                    chat = collect(ctx.get_all_providers())
+                except Exception as exc:
+                    logger.debug(f"[congling] 列对话模型失败: {exc!r}")
+                try:
+                    embedding = collect(ctx.get_all_embedding_providers())
+                except Exception as exc:
+                    logger.debug(f"[congling] 列向量模型失败: {exc!r}")
+            return _ok({"chat": chat, "embedding": embedding})
         except Exception as exc:
             return _err(repr(exc)[:200])
 
@@ -985,7 +1130,14 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
                 logger.debug(f"[congling] 未爬分组失败: {exc!r}")
             if not total:
                 total = len(items)
-            return _ok({"items": items, "groups": groups, "count": len(items), "total": total})
+            # 补读进度：醒来后后台按 10 分钟线性放行未读，面板要显示走到哪了
+            progress: dict[str, Any] = {}
+            try:
+                progress = await night.state.catchup.progress()
+            except Exception:
+                progress = {}
+            return _ok({"items": items, "groups": groups, "count": len(items),
+                        "total": total, "catchup": progress})
         except Exception as exc:
             return _err(repr(exc)[:200])
 

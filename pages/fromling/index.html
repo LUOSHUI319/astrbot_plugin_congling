@@ -1,16 +1,16 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN" data-ui="night">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <link rel="stylesheet" href="./style.1029c.css" />
-  <link rel="stylesheet" href="./theme-v6.1029c.css" />
+  <link rel="stylesheet" href="./style.1029c.css?v=16" />
+  <link rel="stylesheet" href="./theme-v6.1029c.css?v=16" />
   <!-- 两套皮肤都挂着，靠 link.disabled 互斥，切换时不闪 -->
-  <link rel="stylesheet" href="./night.1029c.css" id="cg-skin-night" />
-  <link rel="stylesheet" href="./night-light.1031.css" id="cg-skin-day" />
-  <link rel="stylesheet" href="./skin-switch.1031.css" />
-  <link rel="stylesheet" href="./diarybook.css" />
+  <link rel="stylesheet" href="./night.1029c.css?v=16" id="cg-skin-night" />
+  <link rel="stylesheet" href="./night-light.1031.css?v=16" id="cg-skin-day" />
+  <link rel="stylesheet" href="./skin-switch.1031.css?v=16" />
+  <link rel="stylesheet" href="./diarybook.css?v=16" />
   <script>
     /* 首屏定皮肤：必须在 CSS 之后、body 之前跑，否则会先闪一下深色 */
     (function () {
@@ -52,12 +52,14 @@
   </script>
 </head>
 <body>
+<div id="build-tag" style="position:fixed;left:6px;bottom:4px;z-index:99999;font:10px/1 ui-monospace,Consolas,monospace;color:#8fa89b;opacity:.55;pointer-events:none">build v16</div>
+
   <div class="app">
     <aside class="side">
       <div class="brand">
         <span class="brand-row">
           <span class="brand-mark" aria-hidden="true">
-            <img src="./logo.png" alt="" />
+            <img src="./logo.png?v=16" alt="" />
           </span>
           <span class="brand-cn">从绫开始</span>
         </span>
@@ -70,6 +72,7 @@
         <button class="nav-item" data-view="persona" data-short="人格">人格</button>
         <button class="nav-item" data-view="behavior" data-short="行为">行为</button>
         <button class="nav-item" data-view="memory" data-short="记忆">记忆</button>
+        <button class="nav-item" data-view="starmap" data-short="星图">记忆星图</button>
         <button class="nav-item" data-view="night" data-short="长夜">长夜</button>
         <button class="nav-item" data-view="diary" data-short="日记">日记</button>
         <button class="nav-item" data-view="tools" data-short="工具">工具</button>
@@ -105,9 +108,9 @@
     </main>
   </div>
   <!-- night.js 要先于 app.js 执行：app.js 的 render 会在这里找 nj* 函数 -->
-  <script src="./night.1029c.js" defer></script>
-  <script src="./app.1029c.js" defer></script>
-  <script src="./skin-switch.1031.js" defer></script>
+  <script src="./night.1029c.js?v=16" defer></script>
+  <script src="./app.1029c.js?v=16" defer></script>
+  <script src="./skin-switch.1031.js?v=16" defer></script>
 
   <!-- 手机端专用界面（mobile.html）的唯一入口。
        桌面面板在手机上字小、按钮难点；手机进来一般会自动跳过去，这里是兜底入口。 -->
@@ -136,6 +139,6 @@
       .mobile-entry { display: inline-flex; }
     }
   </style>
-  <a class="mobile-entry" href="./mobile.html" title="打开手机版界面">手机版 ›</a>
+  <a class="mobile-entry" href="./mobile.html?v=16" title="打开手机版界面">手机版 ›</a>
 </body>
 </html>

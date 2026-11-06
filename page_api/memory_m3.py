@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -57,24 +58,35 @@ class MemoryM3Mixin:
             store = self.plugin.store
             now = int(time.time())
 
-            total = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0)") or 0)
+            # 一次查询拿齐总览统计：原来 7 条 COUNT 各跑一遍（实测 133ms），
+            # 合并成一条 23ms。口径与分开查完全一致，已在活库上逐项核对过。
+            stats = await store.fetch_one(
+                "SELECT COUNT(*) AS total,"
+                " SUM(CASE WHEN mem_level=0 THEN 1 ELSE 0 END) AS permanent,"
+                " SUM(CASE WHEN mem_level>0 AND decay IS NOT NULL AND decay<=0.35 THEN 1 ELSE 0 END) AS fading,"
+                " SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END) AS month_new,"
+                " COUNT(DISTINCT CASE WHEN subject_id<>'' THEN subject_id END) AS people,"
+                " COUNT(DISTINCT CASE WHEN session_id<>'' THEN session_id END) AS sessions,"
+                " SUM(CASE WHEN expire_at IS NULL THEN 1 ELSE 0 END) AS unset "
+                "FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0)",
+                (now - 30 * DAY,),
+            ) or {}
+            total = int(stats.get("total") or 0)
             # level 0 = 不可忘（永久档）；fading = 衰减到快看不见的
-            permanent = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND mem_level=0") or 0)
-            fading = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND mem_level>0 AND decay IS NOT NULL AND decay<=0.35") or 0)
+            permanent = int(stats.get("permanent") or 0)
+            fading = int(stats.get("fading") or 0)
+            month_new = int(stats.get("month_new") or 0)
+            people = int(stats.get("people") or 0)
+            sessions = int(stats.get("sessions") or 0)
+            # expire_at 为空 = 从来没写过时效，跟「故意永久（0）」是两件事。
+            # 注意别动 permanent 的口径（那是 mem_level=0），踩过这个坑。
+            unset = int(stats.get("unset") or 0)
             pending = int(await store.scalar(
                 "SELECT COUNT(*) FROM mem_atom WHERE status='pending'") or 0)
-            month_new = int(await store.scalar(
-                "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND created_at>=?",
-                (now - 30 * DAY,)) or 0)
-            people = int(await store.scalar(
-                "SELECT COUNT(DISTINCT subject_id) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND subject_id<>''") or 0)
-            sessions = int(await store.scalar(
-                "SELECT COUNT(DISTINCT session_id) FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id<>''") or 0)
             unread = int(await store.scalar(
                 "SELECT COUNT(*) FROM mem_atom WHERE status='active' AND unread=1") or 0)
+            archived = int(await store.scalar(
+                "SELECT COUNT(*) FROM mem_atom WHERE status='archived'") or 0)
 
             kinds = await store.fetch_all(
                 "SELECT kind, COUNT(*) AS c FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) GROUP BY kind ORDER BY c DESC")
@@ -89,6 +101,30 @@ class MemoryM3Mixin:
             kind_rows = [{"kind": str(r["kind"] or "fact"), "count": int(r["c"] or 0)} for r in kinds]
             heat_map = {str(r["d"]): int(r["c"] or 0) for r in heat}
 
+            # 反思产出：以前只写 kv、没有任何读取方，等于纯烧模型。这里给面板一个出口，
+            # 让开关关着的人也能看见它「现在怎么看你」。
+            reflect_items: list[dict[str, Any]] = []
+            try:
+                ref_rows = await store.fetch_all(
+                    "SELECT k, v, updated_at FROM kv WHERE k LIKE 'reflect:%' "
+                    "ORDER BY updated_at DESC LIMIT 8")
+                for row in ref_rows:
+                    try:
+                        payload = json.loads(row["v"] or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    text = str(payload.get("text") or "").strip()
+                    if not text:
+                        continue
+                    reflect_items.append({
+                        "subject": str(payload.get("subject") or row["k"].rsplit(":", 1)[-1]),
+                        "text": text,
+                        "ts": int(payload.get("ts") or row["updated_at"] or 0),
+                        "count": int(payload.get("count") or 0),
+                    })
+            except Exception:
+                reflect_items = []
+
             return _ok({
                 "total": total,
                 "permanent": permanent,
@@ -99,9 +135,12 @@ class MemoryM3Mixin:
                 "people": people,
                 "sessions": sessions,
                 "unread": unread,
+                "unset": unset,
+                "archived": archived,
                 "kinds": kind_rows,
                 "heatmap": heat_map,
                 "recent": [dict(r) for r in recent],
+                "reflect": reflect_items,
                 "attitude": self._m3_attitude(kind_rows, total, permanent),
             })
         except Exception as exc:  # noqa: BLE001
@@ -156,13 +195,24 @@ class MemoryM3Mixin:
             if not sid:
                 return _err("缺 session_id")
             store = self.plugin.store
+            # status: active（默认）/ archived / forgotten / all
+            # 「归档可恢复」要能看见，就得有这个入口；all 走不带 status 条件的查询，
+            # 不能传空串（那会拼成 status=''，一条都查不到）。
+            raw_status = str(params.get("status") or "active").strip().lower()
+            if raw_status == "all":
+                cond, cond_args = "", ()
+            elif raw_status in ("active", "archived", "forgotten"):
+                cond, cond_args = " AND status=?", (raw_status,)
+            else:
+                cond, cond_args = " AND status=?", ("active",)
             atoms = await store.fetch_all(
                 "SELECT id, kind, text, importance, created_at, expire_at, subject_id, mem_level "
-                "FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id=? ORDER BY created_at DESC LIMIT 2000",
-                (sid,))
+                "FROM mem_atom WHERE (unread IS NULL OR unread=0) AND session_id=?"
+                + cond + " ORDER BY created_at DESC LIMIT 2000",
+                (sid, *cond_args))
             total_row = await store.fetch_one(
-                "SELECT COUNT(*) AS c FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id=?",
-                (sid,))
+                "SELECT COUNT(*) AS c FROM mem_atom WHERE (unread IS NULL OR unread=0) AND session_id=?"
+                + cond, (sid, *cond_args))
             total_count = int((total_row or {}).get("c") or 0)
             kinds = await store.fetch_all(
                 "SELECT kind, COUNT(*) AS c FROM mem_atom WHERE status='active' AND (unread IS NULL OR unread=0) AND session_id=? GROUP BY kind",

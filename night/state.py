@@ -29,6 +29,7 @@ from ..core.contracts import (
 from ..core.transient_hints import TransientHints
 from . import energy as energy_mod
 from . import stages as stages_mod
+from .catchup import Catchup
 from .lullaby import Lullaby
 from .wake import Waker
 from ..core.exc import exc_brief
@@ -41,6 +42,9 @@ SLEEP_WINDOW_KEY = "night.last_sleep_window"
 # 疲劳期内的下限保护：至少还能撑这么多条消息才允许睡着
 DEFAULT_MIN_TURNS = 8
 
+# 醒来回满期最多持续多久（分钟）。防止 return 速率被填成 0.1 时恢复期挂一整天。
+WAKE_RECOVER_MAX_MINUTES = 30
+
 
 class NightService:
     def __init__(self, plugin: Any) -> None:
@@ -50,6 +54,8 @@ class NightService:
         self.state = NightState()
         self.lullaby = Lullaby(plugin)
         self.waker = Waker(plugin)
+        # 醒来后台补读：把睡着期间打了 unread 的记忆按进度放行
+        self.catchup = Catchup(plugin)
 
         self._lock = asyncio.Lock()
         self._fatigue_turns = 0      # 本轮疲劳期内已经处理过多少条消息
@@ -184,8 +190,14 @@ class NightService:
     async def _tick(self, now: float | None = None) -> list[str]:
         now = now or time.time()
         if not self.enabled:
-            # 只有「收线静默」在跑：不管精力，只管到点自然醒
+            # 只有「收线静默」在跑：不管精力，只管到点自然醒。
+            # 补读仍要跑一次：长夜关掉之后，历史上打了未读的记忆也得能靠 24h 兜底放行，
+            # 否则它们会永久卡在「看得见、想不起来」。
             self.state.last_tick = int(now)
+            try:
+                await self.catchup.step(now)
+            except Exception:
+                pass
             if self.state.is_asleep() and self.state.wake_at and now >= self.state.wake_at:
                 await self._do_wake(reason="natural")
                 return ["wake_natural"]
@@ -193,17 +205,12 @@ class NightService:
             return []
         events: list[str] = []
 
-        # waking 不能一直挂着：叫醒之后那句没说成、或者用户就此不说话，
-        # 状态机会永远停在「正醒着，还没爬起来」，面板和记忆都被冻住。
-        if self.state.mode == NIGHT_WAKING and not self.state.enter_waking_at:
-            # 兜底：将来若又有入口只改 mode 不设起点，别让它永久挂着
-            await self.finish_waking()
-            events.append("wake_orphan")
-        if self.state.mode == NIGHT_WAKING and self.state.enter_waking_at:
-            limit = max(1, self.config.int("night.waking_timeout_minutes", 5)) * 60
-            if now - self.state.enter_waking_at >= limit:
-                await self.finish_waking()
-                events.append("wake_timeout")
+        # 醒来后的后台补读：按进度把睡着期间打了 unread 的记忆逐批放行。
+        # 开关关着时 step() 直接返回 0，不影响还没删的爬楼老路径。
+        try:
+            await self.catchup.step(now)
+        except Exception as exc:
+            logger.warning(f"[congling] 补读推进失败: {exc_brief(exc)}")
 
         if self.state.last_tick <= 0:
             self.state.last_tick = int(now)
@@ -236,11 +243,15 @@ class NightService:
                 await self._do_wake(reason="natural")
                 events.append("wake_natural")
         else:
+            cap = float(self.config.int("night.energy_max", 100))
             start_ts = float(now - elapsed_minutes * 60)
+            # 醒来回满期先结算，结算完把剩余区间交还给下面那套分段逻辑
+            start_ts = self._advance_wake_recovery(start_ts, float(now), cap)
             segments = self._awake_segments(start_ts, float(now))
             if not segments:
                 segments = [(start_ts, float(now), energy_mod.fatigue_kind(self.config, now))]
             last_kind = energy_mod.fatigue_kind(self.config, now)
+            can_recover_in_fatigue = self.config.bool("night.fatigue_can_recover", False)
             for seg_start, seg_end, kind in segments:
                 minutes = (seg_end - seg_start) / 60.0
                 if minutes <= 0:
@@ -250,21 +261,29 @@ class NightService:
                     if not self._fatigue_entered:
                         self._fatigue_entered = int(seg_start)
                         self._fatigue_turns = 0
-                    # 精力按段消耗（消息消耗在 on_message 里另算）
-                    self.state.energy = energy_mod.drain(
-                        self.state.energy,
-                        minutes=minutes,
-                        messages=0,
-                        per_minute=self.config.float("night.energy_per_minute", 0.8),
-                        per_message=0.0,
-                    )
+                    if can_recover_in_fatigue:
+                        # 可降可升：按净利率一次钳位。
+                        # 先 drain 再 recover 会把下限吃掉（从 1 起算十分钟，先扣再补得 15，净算得 8）。
+                        net = (self.config.float("night.energy_recover_per_minute", 1.5)
+                               - self.config.float("night.energy_per_minute", 0.8))
+                        self.state.energy = energy_mod.clamp(
+                            self.state.energy + net * minutes, 0.0, cap)
+                    else:
+                        # 精力按段消耗（消息消耗在 on_message 里另算）
+                        self.state.energy = energy_mod.drain(
+                            self.state.energy,
+                            minutes=minutes,
+                            messages=0,
+                            per_minute=self.config.float("night.energy_per_minute", 0.8),
+                            per_message=0.0,
+                        )
                 else:
                     self._fatigue_entered = 0
                     self._fatigue_turns = 0
-                    self.state.energy = energy_mod.recover(
-                        self.state.energy,
-                        minutes=minutes,
-                        per_minute=self.config.float("night.energy_recover_per_minute", 1.5),
+                    self.state.energy = energy_mod.clamp(
+                        self.state.energy
+                        + self.config.float("night.energy_recover_per_minute", 1.5) * minutes,
+                        0.0, cap,
                     )
             if not last_kind:
                 self._fatigue_entered = 0
@@ -281,7 +300,61 @@ class NightService:
         await self.save()
         return events
 
+    # ================================================================ 醒来回满
+    def _recovering(self, now: float | None = None) -> bool:
+        """是否还在醒来回满期。脏记录一律视为不在恢复期。"""
+        rec = self.state.wake_recovery
+        if not rec:
+            return False
+        try:
+            began = int(rec[0])
+        except (TypeError, ValueError):
+            return False
+        stamp = float(now if now is not None else time.time())
+        cap = float(self.config.int("night.energy_max", 100))
+        if began <= 0 or began > stamp:
+            return False
+        return stamp < began + WAKE_RECOVER_MAX_MINUTES * 60 and self.state.energy < cap
+
+    def _advance_wake_recovery(self, start_ts: float, now: float, cap: float) -> float:
+        """结算 [start_ts, now] 里的回满区间，返回还没结算的起点。
+
+        回满期优先于疲劳判定：刚被硬叫醒那几分钟本来就该越来越清醒，哪怕已是深夜。
+        按增量加、不按目标拉 —— 否则回升期聊天扣掉的精力会被下一 tick 补回来，等于说话不掉血。
+        """
+        rec = self.state.wake_recovery
+        if not rec:
+            return start_ts
+        try:
+            began = int(rec[0])
+            floor = float(rec[1])
+        except (TypeError, ValueError):
+            self.state.wake_recovery = None
+            return start_ts
+        if began <= 0 or began > now or floor < 0 or floor > cap:
+            self.state.wake_recovery = None       # 脏记录（时钟回拨/手改存档）
+            return start_ts
+        cursor = max(start_ts, float(began))
+        stop = min(now, float(began) + WAKE_RECOVER_MAX_MINUTES * 60)
+        rate = max(0.0, self.config.float("night.wake_recover_per_minute", 6.5))
+        if stop > cursor and rate > 0:
+            need = max(0.0, cap - float(self.state.energy))
+            used_min = min((stop - cursor) / 60.0, need / rate)
+            self.state.energy = min(
+                cap, max(floor, float(self.state.energy) + rate * used_min))
+            cursor += used_min * 60.0
+        if self.state.energy >= cap - 1e-6:
+            self.state.energy = cap
+            self.state.wake_recovery = None
+        elif now >= float(began) + WAKE_RECOVER_MAX_MINUTES * 60:
+            self.state.wake_recovery = None       # 超时保险：返率填得再小也不会挂一整天
+        return max(start_ts, cursor)
+
     def _can_sleep_by_energy(self) -> bool:
+        # 回满期内不因精力入睡：消息路径是先扣 4 点再判睡，
+        # 只挡 tick 挡不住它 —— 刚醒来聊八句就能把自己聊睡回去。
+        if self._recovering():
+            return False
         if not energy_mod.exhausted(self.state.energy):
             return False
         min_turns = max(0, self.config.int("night.min_turns_before_sleep", DEFAULT_MIN_TURNS))
@@ -292,6 +365,10 @@ class NightService:
         return True
 
     def _past_latest_sleep(self, now: float) -> bool:
+        # 回满期内豁免：凌晨 2:40 被叫醒、恢复期还没走完就被按回去睡，体验太怪。
+        # 最多延后 WAKE_RECOVER_MAX_MINUTES（30 分钟），之后照旧。
+        if self._recovering(now):
+            return False
         spec = self.config.str("night.latest_sleep_time", "02:30")
         target = energy_mod._parse_hhmm(spec)
         if target is None:
@@ -330,6 +407,15 @@ class NightService:
                     per_minute=0.0,
                     per_message=self.config.float("night.energy_per_message", 4.0),
                 )
+                # 回满期内兑现「只增不降」：消息扣完立刻钳回醒来那一刻的下限。
+                # 代价是这几分钟里疲劳期聊天不掉血，30 分钟后回到原有规则。
+                if self._recovering():
+                    rec = self.state.wake_recovery
+                    if rec:
+                        try:
+                            self.state.energy = max(float(self.state.energy), float(rec[1]))
+                        except (TypeError, ValueError):
+                            pass
                 if self._can_sleep_by_energy():
                     # 开关关着就别报 sleep_triggered：报了上层会挂 pending_sleep，
                     # 回复完 after_reply 再走一次入睡，等于白道别一场还照样躺下。
@@ -378,10 +464,8 @@ class NightService:
         # allow_sleep 关掉时只算精力、不真的睡：想聊天的时候把它关掉就行
         # force=True 来自手动点的「睡」，不受这个开关影响
         if not force and not self.config.bool("night.allow_sleep", True):
-            self.state.energy = max(
-                self.state.energy,
-                self.config.float("night.energy_after_wake", 35.0),
-            )
+            # 拒绝入睡时不动精力。原来这里借 energy_after_wake 把精力抬到 35，
+            # 等于「关掉真睡开关反而回血」，配置删掉后这段就没有依据了。
             logger.info(f"[congling] 长夜如梦：allow_sleep 关闭，跳过入睡（本来原因={reason}）")
             return
         now = time.time()
@@ -395,6 +479,12 @@ class NightService:
         self.state.enter_waking_at = 0
         self.state.pending_crawl = []
         self.state.dream_count_today = 0
+        # 睡回去：这一轮回满作废，补读窗口也停掉，醒来重新开
+        self.state.wake_recovery = None
+        try:
+            await self.catchup.close_window()
+        except Exception:
+            pass
         # 午睡要掷一次骰：这一次到底做不做梦
         if (kind or "night") == "noon":
             chance = max(0.0, min(1.0, self.config.float("night.noon_dream_chance", 0.5)))
@@ -411,12 +501,12 @@ class NightService:
             f"预计醒来={time.strftime('%H:%M', time.localtime(self.state.wake_at))}"
         )
 
-    async def _do_wake(self, *, reason: str = "natural", enter_waking: bool = True) -> None:
+    async def _do_wake(self, *, reason: str = "natural") -> None:
         """醒。
 
-        醒来先看有没有东西要爬：有就进 waking（回第一句时先念一句爬楼语），
-        没有就直接 awake。原来是一律置 awake，等于自然醒、面板叫醒这两条路
-        永远不会爬楼，睡着期间攒下的未读也永远清不掉。
+        精力不再被重置：睡到多少就是多少（连贯衔接）。醒来那一刻开一轮「回满期」，
+        按 wake_recover_per_minute 涨回 energy_max；未读记忆交给后台补读。
+        不再有 waking 中间态，也不会冒出一句「我先翻翻消息」。
         """
         sleep_at = int(self.state.sleep_at or 0)
         wake_at = int(self.state.wake_at or 0)
@@ -424,9 +514,20 @@ class NightService:
         if not sleep_kind or sleep_kind not in ("night", "noon"):
             sleep_kind = "night"
 
+        was_asleep = self.state.is_asleep()
         now = time.time()
         # Natural wake may be processed hours late by a lazy tick.
         woke_at = min(now, float(wake_at)) if reason == "natural" and wake_at > 0 else now
+
+        # wake_now() 是外部直接调，不经过 tick：先把「上次心跳 → 现在」这段睡眠恢复补上，
+        # 否则下面重置 last_tick 会把这一段直接填掉，睡多久都白睡。
+        if was_asleep and self.state.last_tick > 0 and self.state.last_tick < woke_at:
+            gain = self._recover_over(float(self.state.last_tick), float(woke_at))
+            if gain > 0:
+                cap0 = float(self.config.int("night.energy_max", 100))
+                self.state.energy = energy_mod.clamp(
+                    float(self.state.energy) + max(0.0, gain), 0.0, cap0)
+
         if sleep_at > 0 and self.on_wake is not None:
             await self.on_wake(sleep_at, int(woke_at))
         if sleep_at > 0:
@@ -445,33 +546,41 @@ class NightService:
         except Exception:
             pass
 
-        pending: list[str] = []
         if sleep_at > 0:
             await self._remember_sleep_window(sleep_at, wake_at or int(time.time()), sleep_kind)
-            if enter_waking and self.config.bool("night.crawl_enabled", True):
-                pending = await self._pending_sessions(sleep_at)
 
+        cap = float(self.config.int("night.energy_max", 100))
+        self.state.energy = energy_mod.clamp(float(self.state.energy), 0.0, cap)
         self.state.sleep_at = 0
         self.state.wake_at = 0
         self.state.reason = ""
-        self.state.energy = float(self.config.int("night.energy_max", 100))
         self._fatigue_turns = 0
         self._fatigue_entered = 0
         self.waker.reset_all()
 
-        if pending:
-            self.state.mode = NIGHT_WAKING
-            self.state.enter_waking_at = int(time.time())
-            self.state.pending_crawl = pending
-        else:
-            self.state.mode = NIGHT_AWAKE
-            self.state.enter_waking_at = 0
-            self.state.pending_crawl = []
-            self.state.sleep_kind = ""
+        self.state.mode = NIGHT_AWAKE
+        self.state.enter_waking_at = 0
+        self.state.pending_crawl = []
+        self.state.sleep_kind = ""
+
+        if was_asleep:
+            # 只在真正「睡 → 醒」时初始化。重复调 wake_now 必须幂等，
+            # 否则每点一次面板「叫醒」，30 分钟恢复期就往后推一次。
+            self.state.last_wake_at = int(woke_at)
+            self.state.wake_recovery = (
+                (int(woke_at), float(self.state.energy))
+                if self.state.energy < cap else None
+            )
+            try:
+                await self.catchup.open_window(int(woke_at))
+            except Exception as exc:
+                logger.warning(f"[congling] 开补读窗口失败: {exc_brief(exc)}")
+
+        self.state.last_tick = int(now)
         await self.save()
         logger.info(
-            f"[congling] 醒来：原因={reason}"
-            + (f"，待爬 {len(pending)} 个会话" if pending else "")
+            f"[congling] 醒来：原因={reason}，精力={self.state.energy:.0f}/{cap:.0f}"
+            + ("（回满中）" if self.state.wake_recovery else "")
         )
 
     async def _pending_sessions(self, since: int) -> list[str]:
@@ -546,14 +655,19 @@ class NightService:
         await self._do_sleep(reason=reason, kind=kind, force=by_user)
 
     async def wake_now(self, *, reason: str = "manual") -> None:
-        """外部调用强制唤醒。醒来照样要爬楼（有未读就进 waking）。"""
-        await self._do_wake(reason=reason, enter_waking=True)
+        """外部调用强制唤醒。已经醒着就直接返回：重复叫醒不该刷新回满期。"""
+        if not self.state.is_asleep():
+            return
+        await self._do_wake(reason=reason)
 
     async def finish_waking(self) -> None:
-        """爬楼结束后调，把 waking 落回 awake。"""
+        """爬楼结束后调，把 waking 落回 awake。
+
+        批次 3 会连同爬楼一起删掉这个方法。现在留着只是为了 __init__ 还能编译，
+        精力不再在这里赋值（醒来那一刻才是唯一赋值点）。
+        """
         if self.state.mode == NIGHT_WAKING:
             self.state.mode = NIGHT_AWAKE
-            self.state.energy = float(self.config.int("night.energy_after_wake", 35))
         self.state.enter_waking_at = 0
         self.state.pending_crawl = []
         self.state.wake_at = 0
@@ -618,6 +732,14 @@ class NightService:
             "sleep_kind": state.sleep_kind or getattr(self, "_last_sleep_kind", "night"),
             "pending_crawl": len(state.pending_crawl or []),
             "crawl_sessions": list(state.pending_crawl or []),
+            # 醒来回满期：面板显示「恢复中 62/100（+6.5/分钟）」
+            "wake_recovering": self._recovering(now),
+            "wake_recover_rate": max(0.0, self.config.float("night.wake_recover_per_minute", 6.5)),
+            "wake_recover_floor": (
+                float(state.wake_recovery[1]) if state.wake_recovery else 0.0
+            ),
+            "last_wake_at": int(state.last_wake_at or 0),
+            "catchup_on": self.config.bool("night.catchup_enabled", True),
         }
         # 醒时文案：午睡不能报「07:00-09:00 醒」，那是夜里的起床点
         sleep_kind = data["sleep_kind"] if data["sleep_kind"] in ("night", "noon") else "night"
@@ -662,12 +784,6 @@ class NightService:
                 data["stage_text"] = stages_mod.describe(stage)
                 data["stage_seq"] = plan
                 data["stage_stats"] = stages_mod.stats(plan)
-        if state.mode == NIGHT_WAKING:
-            # waking 已不在 is_asleep() 里，面板要的这两项单独补
-            limit = max(1, self.config.int("night.waking_timeout_minutes", 5)) * 60
-            since = int(state.enter_waking_at or 0)
-            data["waking_since"] = since
-            data["waking_left"] = max(0, since + limit - int(now)) if since else 0
         return data
 
     @staticmethod
@@ -694,13 +810,11 @@ class NightService:
             return "长夜如梦没开"
         if data["mode"] == NIGHT_AWAKE:
             fatigue = "（疲劳期）" if data.get("fatigue") else ""
+            recovering = "（恢复中）" if data.get("wake_recovering") else ""
             return (
-                f"醒着{fatigue} 精力 {data['energy']:.0f}/{data['energy_max']} "
+                f"醒着{fatigue}{recovering} 精力 {data['energy']:.0f}/{data['energy_max']} "
                 f"起床点 {data['wake_time']} 浮动 ±{data['wake_jitter']} 分钟"
             )
-        if data["mode"] == NIGHT_WAKING:
-            left = data.get("pending_crawl") or 0
-            return "正醒着，还没爬起来" + (f"（待爬 {left} 个会话）" if left else "")
         return (
             f"睡着中 剩余 {data.get('remaining_text', '?')} "
             f"预计 {data.get('wake_day_label', '')}{data.get('wake_label', '')} 醒 精力 {data['energy']:.0f}"

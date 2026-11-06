@@ -162,16 +162,19 @@ class AtomStore:
         unread_since = 0
         asleep_now = False
         night = getattr(self.plugin, "night", None)
-        crawl_on = True
+        mark_on = True
         if night is not None and getattr(self.plugin, "cfg", None) is not None:
             try:
-                crawl_on = self.plugin.cfg.bool("night.crawl_enabled", True)
-                asleep_now = bool(crawl_on and night.state.state.is_asleep())
+                # 过渡期兼容：补读开关或老的爬楼开关任一开着都要打未读标记，
+                # 否则睡着期间的记忆会直接可召回，两种机制同时失效。
+                mark_on = (self.plugin.cfg.bool("night.catchup_enabled", True)
+                           or self.plugin.cfg.bool("night.crawl_enabled", True))
+                asleep_now = bool(mark_on and night.state.state.is_asleep())
             except Exception:
                 asleep_now = False
         if asleep_now:
             unread, unread_since = 1, now
-        elif crawl_on:
+        elif mark_on:
             covered_at = await self._sleep_hit(draft.evidence_msg_ids)
             if covered_at > 0:
                 unread, unread_since = 1, covered_at

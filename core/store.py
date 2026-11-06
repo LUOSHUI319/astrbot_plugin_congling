@@ -476,6 +476,14 @@ class Store:
                          (6, int(time.time()), self.persona_id, json.dumps(counts)))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_atom_session_ref ON mem_atom(persona_id, session_ref, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_atom_subject_ref ON mem_atom(persona_id, subject_ref, status)")
+        # 面板「最近记忆」和热力图都按 created_at 排序/范围扫，没有这个索引就是全表扫。
+        # 实测：recent 22ms → 0ms，heatmap 22ms → 4ms（7122 行）。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_atom_created ON mem_atom(status, created_at)")
+        # 好感度排行榜要用 confirmed_subject_sql() 里的 NOT EXISTS 逐个主体反查
+        # 「这个 id 是不是群号」。没有这两个索引时，447 个主体 × 全表扫
+        # msg_archive（5.3 万行）= 9 秒；加上之后同一条查询 1ms。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_atom_sk_sid ON mem_atom(session_kind, session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_sk_sid ON msg_archive(session_kind, session_id)")
 
     def _migrate_events(self) -> None:
         """P3 仅看实际结构；历史 user_version=7 也必须执行，不改历史正文。"""
