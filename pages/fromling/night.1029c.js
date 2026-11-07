@@ -3598,7 +3598,11 @@ function normalizeEntries(items) {
     if (seen.has(item.day_key)) throw new Error(`日记日期重复：${item.day_key}`);
     seen.add(item.day_key);
     const text = typeof item.text === "string" ? item.text : "";
+    // id 是删除/置顶唯一的句柄，之前没带出来，API 层 `if (!row.id) return false`
+    // 永远命中，界面提示「已从本次列表移除」，服务端一条请求都没收到。
+    const id = Number(item.id);
     return {
+      id: Number.isFinite(id) && id > 0 ? id : 0,
       day_key: item.day_key,
       day_label: typeof item.day_label === "string" && item.day_label ? item.day_label : item.day_key,
       title: typeof item.title === "string" ? item.title : "",
@@ -4214,11 +4218,14 @@ document.addEventListener("keydown",(event) => {
     event.preventDefault(); if (!state.drag) navigate(event.key==="ArrowLeft" ? -1 : 1);
   }
 }, on);
-$("pinButton").addEventListener("click",() => {
+$("pinButton").addEventListener("click",async () => {
   if (!canWrite() || !currentEntry()) return;
-  const anchor=readingAnchor(), entry=currentEntry(); entry.pinned=entry.pinned ? 0 : 1;
-  API.setDiaryPinned(entry.day_key,entry.pinned); state.items=sortEntries(state.items);
-  renderDirectory(); rebuildBook(anchor); showToast("书签已更新；只修改本次本地状态。");
+  const anchor=readingAnchor(), entry=currentEntry(), next=entry.pinned ? 0 : 1;
+  let ok=false;
+  try { ok=(await API.setDiaryPinned(entry.day_key,next))!==false; } catch (err) { ok=false; }
+  if (!ok) { showToast("书签没动成，稍后再试。"); return; }
+  entry.pinned=next; state.items=sortEntries(state.items);
+  renderDirectory(); rebuildBook(anchor); showToast(next ? "这一页折了个角。" : "书签取下来了。");
 });
 $("rewriteButton").addEventListener("click",() => {
   if (!canWrite() || !currentEntry()) return;
@@ -4230,13 +4237,16 @@ $("deleteButton").addEventListener("click",() => {
   $("deleteDialog").dataset.day=currentEntry().day_key;
   $("deleteDialog").returnValue="cancel"; $("deleteDialog").showModal();
 });
-$("deleteDialog").addEventListener("close",() => {
+$("deleteDialog").addEventListener("close", async () => {
   if ($("deleteDialog").returnValue!=="confirm") return;
   const day=$("deleteDialog").dataset.day, index=state.items.findIndex((entry) => entry.day_key===day);
   if (index<0) return;
-  API.deleteDiary(day); state.items.splice(index,1);
+  let ok=false;
+  try { ok=(await API.deleteDiary(day))!==false; } catch (err) { ok=false; }
+  if (!ok) { showToast("没删掉，稍后再试一次。"); return; }
+  state.items.splice(index,1);
   renderDirectory(); rebuildBook({day:state.items[Math.min(index,state.items.length-1)]?.day_key,offset:0});
-  showToast("已从本次列表移除，未请求服务端；刷新后恢复。");
+  showToast("这一页撕掉了。");
 });
 reducedMotion.addEventListener("change",() => {
   if (state.debug) return;
