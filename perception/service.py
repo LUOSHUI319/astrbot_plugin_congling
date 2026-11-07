@@ -290,6 +290,10 @@ class PerceptionService:
     async def archive(self, msg: PerceivedMessage) -> None:
         if not msg.text and not msg.blocks:
             return
+        # 视觉模型只有 6 秒预算，超时那一次图片块还停在 "[图片]"，
+        # 就这么归档的话，她事后回忆永远不知道图上是什么，会反复追问同一张图。
+        # 描述常常过一会儿才算完并进了缓存，归档时补一次只读缓存，不额外等模型。
+        await self._fill_cached_image_text(msg)
         # msg_id 为空时不能拿它去重：`msg_id IS ''` 会在第一条空 id 之后
         # 把所有后续的也判成"已存在"，消息就静默丢了。合成一个去重键顶上。
         dedupe_id = str(msg.msg_id or "")
@@ -340,6 +344,26 @@ class PerceptionService:
             await self.plugin.bus.emit(self.plugin.bus.ON_PERCEIVED, msg)
         except Exception as exc:
             logger.debug(f"[congling] 消息归档失败: {exc!r}")
+
+
+    async def _fill_cached_image_text(self, msg: PerceivedMessage) -> None:
+        """把缓存里已有的图片描述补回消息，让归档留下能看懂的内容。"""
+        images = [b for b in msg.blocks if b.kind == "image"]
+        if not images:
+            return
+        filled: list[tuple[Block, str]] = []
+        for block in images:
+            if str(block.text or "").strip() not in {"", "[图片]"}:
+                continue
+            cached = await self.media.cached_image(str(block.meta.get("url") or ""))
+            if not cached:
+                continue
+            block.text = cached
+            block.meta["described"] = True
+            filled.append((block, cached))
+        # 顶层 text 是给记忆和主动素材看的纯文本；只有一块图、且它就是占位符时才整体换
+        if len(images) == 1 and filled and str(msg.text or "").strip() in {"", "[图片]"}:
+            msg.text = filled[0][1]
 
     # ================================================================ 工具
     @staticmethod

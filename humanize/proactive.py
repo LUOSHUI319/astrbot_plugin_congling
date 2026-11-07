@@ -44,7 +44,36 @@ TEXT_PROMPT = """现在没人跟你说话，你想主动找对方说一句。
 4. 只输出这句话本身，不要引号，不要解释
 5. 材料里写着「我」的是你自己说过的话，写着「对方」的就是正在跟你说话的那个人，跟他说话一律用「你」
 6. 绝对不许拿任何人的昵称当第三人称主语去转述，像「望山一早发了好几条」「某某说…」这种一律不行，也不要把自己写成第三人称
-"""
+{avoid}"""
+
+
+# 中文二字词重合到 2 个就算「在说同一件事」。
+# 原来只比完全相等的字符串，把「是啥」改成「写的啥」就漏过去了，
+# 于是同一张图能被追问五六遍。
+_TOPIC_STOP = {
+    "什么", "这个", "那个", "这么", "那么", "怎么", "就是", "不是", "还是",
+    "已经", "没有", "可以", "一个", "我们", "你们", "他们", "现在", "今天",
+    "昨天", "明天", "真的", "有点", "感觉", "知道", "觉得", "一下", "时候",
+    "东西", "事儿", "事情", "哈哈", "嘿嘿", "好的", "行吧", "要不", "然后",
+}
+
+
+def _bigrams(text: str) -> set[str]:
+    """中文连续两字切片，用来粗略表示「这句话在说什么」。"""
+    chars = [ch for ch in str(text or "") if "\u4e00" <= ch <= "\u9fff"]
+    return {chars[i] + chars[i + 1] for i in range(len(chars) - 1)}
+
+
+def _repeat_topic(text: str, recent: list[str], need: int = 2) -> str:
+    """跟 recent 里的句子撞话题就返回那一句，没撞返回空串。"""
+    mine = {g for g in _bigrams(text) if g not in _TOPIC_STOP}
+    if len(mine) < need:
+        return ""
+    for item in recent:
+        theirs = {g for g in _bigrams(item) if g not in _TOPIC_STOP}
+        if len(mine & theirs) >= need:
+            return str(item or "")
+    return ""
 
 
 def _in_spec(spec: str, now: float | None = None) -> bool:
@@ -376,45 +405,69 @@ class Proactive:
         if not materials:
             return ""
 
-        prompt = TEXT_PROMPT.format(
-            scene="；".join(scene_bits),
-            materials="\n".join(materials),
-            length=length,
-        )
+        # 最近说过的话：不只防「一模一样」，也防「换个说法重问同一件事」
+        recent_said: list[str] = []
+        try:
+            said = await self.store.fetch_all(
+                "SELECT text FROM msg_archive WHERE session_id=? AND sender_id='bot' "
+                "ORDER BY ts DESC LIMIT 4",
+                (session_id,),
+            )
+            recent_said = [str(item.get("text") or "").strip() for item in said]
+            recent_said = [item for item in recent_said if item]
+        except Exception as exc:
+            logger.warning(f"[congling] 主动消息去重查询失败: {exc_brief(exc)}")
+
+        avoid = ""
+        if recent_said:
+            listed = "\n".join(f"- {item[:60]}" for item in recent_said)
+            avoid = (
+                "7. 下面这些是我最近已经跟对方说过的话，这次不许再说同一件事，"
+                "也不许换个说法重问（比如把「是啥」改成「写的啥」）：\n" + listed
+            )
+
         model = getattr(self.plugin, "models", None)
         if model is None:
             return ""
-        try:
-            raw = await model.chat(
-                prompt,
-                system="你现在想主动跟人说一句话，只输出这句话。",
-                temperature=0.9,
-                max_tokens=200,
+
+        # 撞车就换一件重来；还撞就这次不说话——重复一句比不说更怪
+        for attempt in range(2):
+            hint = avoid
+            if attempt:
+                hint = (avoid + "\n" if avoid else "") + (
+                    "7. 这一次必须换一件跟上面完全不相干的事，哪怕只是说说眼下看到的。"
+                )
+            prompt = TEXT_PROMPT.format(
+                scene="；".join(scene_bits),
+                materials="\n".join(materials),
+                length=length,
+                avoid=hint,
             )
-        except Exception as exc:
-            logger.warning(f"[congling] 主动消息生成失败: {exc_brief(exc)}")
-            return ""
-        text = (raw or "").strip().strip('"“”')
-        text = text.split("\n")[0].strip() if text else ""
-        if not text:
-            return ""
-        if len(text) > length * 2:
-            text = text[: length * 2]
-        # 跟上一条太像就别发了，重复一句比不说话更怪
-        try:
-            last = await self.store.fetch_one(
-                "SELECT text FROM msg_archive WHERE session_id=? AND sender_id='bot' "
-                "ORDER BY ts DESC LIMIT 1",
-                (session_id,),
-            )
-            prev = str((last or {}).get("text") or "")
-        except Exception as exc:
-            logger.warning(f"[congling] 主动消息去重查询失败: {exc_brief(exc)}")
-            prev = ""
-        if prev and prev.strip() == text:
-            logger.debug("[congling] 主动消息与上次重复，放弃")
-            return ""
-        return text
+            try:
+                raw = await model.chat(
+                    prompt,
+                    system="你现在想主动跟人说一句话，只输出这句话。",
+                    temperature=0.9,
+                    max_tokens=200,
+                )
+            except Exception as exc:
+                logger.warning(f"[congling] 主动消息生成失败: {exc_brief(exc)}")
+                return ""
+            text = (raw or "").strip().strip('"“”')
+            text = text.split("\n")[0].strip() if text else ""
+            if not text:
+                return ""
+            if len(text) > length * 2:
+                text = text[: length * 2]
+            hit = _repeat_topic(text, recent_said)
+            if hit:
+                logger.info(
+                    f"[congling] 主动消息和最近说过的话撞车（{hit[:20]}），"
+                    + ("换一件再说" if attempt == 0 else "这次不发了")
+                )
+                continue
+            return text
+        return ""
 
     # ================================================================ 发送
     def _umo_of(self, row: dict[str, Any]) -> str:

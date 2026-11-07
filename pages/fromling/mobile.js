@@ -181,7 +181,9 @@
 
   function unwrap(resp) {
     if (resp == null) return {};
-    if (resp.status === "ok" || resp.ok === true) return resp.data;
+    // 宿主 bridge 已解过一层，本层没有 data 时不能再取 .data
+    var hasData = Object.prototype.hasOwnProperty.call(resp, "data");
+    if (hasData && (resp.status === "ok" || resp.ok === true)) return resp.data;
     if (resp.status === "error" || resp.ok === false) {
       throw new Error(resp.message || resp.error || "请求失败");
     }
