@@ -200,8 +200,12 @@ function askConfirm(message, opts) {
 
 function unwrap(resp) {
   if (resp == null) return {};
-  if (resp.status === "ok") return resp.data;
-  if (resp.ok === true) return resp.data;
+  // 新版 AstrBot 的 bridge 已经解过一层：宿主那边是 a.data.data ?? a.data，
+  // 送到这里的可能直接是业务载荷。只有本层确实带 data 键时才继续解包，
+  // 否则像 {"ok": true, "items": [...]} 这种载荷会被多解一层变成 undefined。
+  const hasData = Object.prototype.hasOwnProperty.call(resp, "data");
+  if (hasData && resp.status === "ok") return resp.data;
+  if (hasData && resp.ok === true) return resp.data;
   if (resp.status === "error") throw new Error(resp.message || "请求失败");
   if (resp.ok === false) throw new Error(resp.error || "请求失败");
   return resp;
