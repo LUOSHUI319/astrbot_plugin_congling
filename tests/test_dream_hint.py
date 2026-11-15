@@ -221,9 +221,24 @@ class DreamHintTests(unittest.IsolatedAsyncioTestCase):
         await plugin.persona_hook(event, req)
         await plugin.persona_hook(event, req)
         self.assertEqual(req.system_prompt, "STATIC")
-        self.assertEqual(len(req.extra_user_content_parts), 1)
-        self.assertIn(DREAM, req.extra_user_content_parts[0].text)
-        self.assertTrue(req.extra_user_content_parts[0].no_save)
+        # 1.3.0 起多了一段「现在几点」（<!--congling:now-->），所以部件数量不再是 1。
+        # 这个用例真正要保证的是「同一个 marker 不会因为 tool loop 重入被拼成好几份」，
+        # 再加上「梦境正文只被消耗一次」。按 marker 数，不按部件总数数。
+        parts = req.extra_user_content_parts
+        night_parts = [p for p in parts if "<!--congling:night-->" in str(getattr(p, "text", ""))]
+        now_parts = [p for p in parts if "<!--congling:now-->" in str(getattr(p, "text", ""))]
+        self.assertEqual(len(night_parts), 1, "作息提示被重复注入了")
+        self.assertLessEqual(len(now_parts), 1, "时间提示被重复注入了")
+        self.assertIn(DREAM, str(getattr(night_parts[0], "text", "")))
+        # 临时标记：AstrBot 的 ContentPart 用 pydantic PrivateAttr `_no_save`，
+        # 老版本可能叫 no_save，两个都认。
+        for part in parts:
+            marked = bool(
+                getattr(part, "_no_save", False)
+                or getattr(part, "no_save", False)
+                or getattr(part, "_congling_temp", False)
+            )
+            self.assertTrue(marked, "临时部件不该写回会话历史")
         self.assertEqual(self.night.state.wake_hints.uses[("dream", "g")], 1)
 
     async def test_qzone_dream_has_only_dedicated_material_path(self):

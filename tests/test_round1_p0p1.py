@@ -331,8 +331,17 @@ class Round1(unittest.IsolatedAsyncioTestCase):
             await self.p.persona_hook(event, req)
         self.assertEqual(req.system_prompt, "STATIC")
         self.assertEqual(req.contexts, [])
-        self.assertEqual(len(req.extra_user_content_parts), 1)
-        self.assertTrue(req.extra_user_content_parts[0].no_save)
+        # 1.3.0 起多了「现在几点」那一段（<!--congling:now-->），部件不再是 1 个。
+        # 这条用例要守的是「重入不会把同一段拼成多份」，所以按 marker 数，
+        # 不按部件总数——数量会随注入层增加而变化，重复注入才是 bug。
+        parts = req.extra_user_content_parts
+        woke_parts = [x for x in parts if "<!--congling:night-->" in str(getattr(x, "text", ""))]
+        now_parts = [x for x in parts if "<!--congling:now-->" in str(getattr(x, "text", ""))]
+        self.assertEqual(len(woke_parts), 1, "作息提示被重复注入")
+        self.assertLessEqual(len(now_parts), 1, "时间提示被重复注入")
+        for part in parts:
+            marked = bool(getattr(part, "_no_save", False) or getattr(part, "no_save", False))
+            self.assertTrue(marked, "临时部件不该写回会话历史")
         self.assertEqual(night.state.wake_hints.uses[("woke", "group:G")], 1)
 
     async def test_woke_crawl_repeated_wake_restart_and_new_sleep(self):

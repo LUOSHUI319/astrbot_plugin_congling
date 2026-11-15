@@ -49,7 +49,10 @@ TAG_LABELS = {
 FLOOR = {"identity": 4, "preference": 4}
 CAP = {"routine": 2, "transient": 1}
 BOOST = {"promise": 1, "user_stress": 1, "emotion_high": 1}
-HARD = {"taboo": 0, "milestone": 5}
+# 还剩一个真·硬标签：里程碑定 5 级。
+# taboo 原来也在这里一票定 0 级，但它太容易误判（「别提了」也命中），
+# 挪到 memory/permanent.py 里做有条件判定——要有明确对象才算禁令。
+HARD = {"milestone": 5}
 
 # 规则兜底：模型不可用、或返回里没带标签时用关键词猜
 RULES: list[tuple[str, tuple[str, ...]]] = [
@@ -87,8 +90,13 @@ class LevelJudge:
         *,
         stage: int | None = None,
         tag_weights: dict[str, Any] | None = None,
+        core: dict[str, tuple[float, str]] | None = None,
     ) -> tuple[int, str, list[str]]:
-        """返回 (等级, 理由, 标签)。"""
+        """返回 (等级, 理由, 标签)。
+
+        `core` 是核心关系人名单（好感度 ≥600，不足三位取前三位），
+        传进来之后「亲近的人的重要记忆」才能进永久档。
+        """
         tags = [tag for tag in (draft.level_tags or []) if tag in KNOWN_TAGS]
         source = "llm"
         if not tags:
@@ -96,7 +104,19 @@ class LevelJudge:
             source = "rule" if tags else "llm"
         base = draft.level if 1 <= int(draft.level or 0) <= 5 else self.guess_base(draft, tags)
 
-        level, why = self.resolve(base, tags, stage, tag_weights)
+        # 永久档判定：三条硬判据 + 核心关系人
+        from .permanent import judge as permanent_judge
+
+        perm = permanent_judge(
+            tags=tags,
+            text=draft.text,
+            subject_id=str(getattr(draft, "subject_key", "") or ""),
+            kind=str(getattr(draft, "kind", "") or ""),
+            importance=float(getattr(draft, "importance", 0.0) or 0.0),
+            core=core,
+        )
+
+        level, why = self.resolve(base, tags, stage, tag_weights, permanent=perm)
 
         # 理由优先用模型给的；模型没给就自己拼一句
         reason = (draft.level_reason or "").strip()
@@ -145,10 +165,16 @@ class LevelJudge:
         tags: list[str],
         stage: int | None,
         tag_weights: dict[str, Any] | None = None,
+        *,
+        permanent: tuple[bool, str] | None = None,
     ) -> tuple[int, str]:
         tag_set = set(tags)
 
-        # 硬标签：不给好感度留余地
+        # 永久档由 permanent.judge() 决定，不再由单个标签一票通过
+        if permanent and permanent[0]:
+            return 0, permanent[1]
+
+        # 剩下的硬标签：不给好感度留余地
         for tag, fixed in HARD.items():
             if tag in tag_set:
                 return fixed, f"{TAG_LABELS[tag]}直接定档 {fixed} 级"

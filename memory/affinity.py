@@ -376,6 +376,27 @@ class Affinity:
             )
 
     # ------------------------------------------------------------ 展示
+    async def core_people(self, *, threshold: float = 600.0, at_least: int = 3) -> dict[str, tuple[float, str]]:
+        """核心关系人：永久记忆判定的依据之一。
+
+        规则：好感度 ≥ threshold 的全算；不足 at_least 位时，取排行榜前 at_least 名补足。
+        返回 {subject_key: (分数, 显示名)}。
+
+        为什么要补足：新装的机器上谁都没到 600，那样这条判据就永久失效了。
+        补到三人能保证「最亲近的那几个」总有记忆进永久档。
+        """
+        board = await self.leaderboard(limit=max(at_least, 20))
+        picked: list[dict[str, Any]] = [row for row in board if float(row.get("score") or 0) >= threshold]
+        if len(picked) < at_least:
+            picked = board[:at_least]
+        out: dict[str, tuple[float, str]] = {}
+        for row in picked:
+            key = str(row.get("subject_key") or "").strip()
+            if not key:
+                continue
+            out[key] = (float(row.get("score") or 0.0), str(row.get("name") or key))
+        return out
+
     async def leaderboard(self, limit: int = 10) -> list[dict[str, Any]]:
         from .subject import confirmed_subject_sql
 

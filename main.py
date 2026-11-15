@@ -37,7 +37,7 @@ from .humanize.delay import ReplyDelayer
 from .core.exc import exc_brief
 from .qqext.qzone_hint import MARKER as QZONE_HINT_MARKER, build_hint as build_qzone_hint
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.3.1"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）

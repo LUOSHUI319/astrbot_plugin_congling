@@ -623,6 +623,13 @@ class MemoryService:
         by_idx = {str(i): r for i, r in enumerate(rows)}
         accepted = []
         bot_name = await narrator_name(self.plugin)
+        # 核心关系人名单：永久记忆判据之一（好感度 ≥600，不足三位取排行榜前三）
+        # 一批只算一次，别在循环里反复查库
+        try:
+            core_people = await self.affinity.core_people()
+        except Exception as exc:
+            logger.debug(f"[congling] 核心关系人计算失败，永久档案退回纯标签判定: {exc_brief(exc)}")
+            core_people = {}
         for draft in drafts:
             try:
                 hint = str(draft.subject or "").strip()
