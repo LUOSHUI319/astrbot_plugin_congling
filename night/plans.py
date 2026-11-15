@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.memory_guard import memory_work
 
 from ..core.contracts import DreamEntry, night_key_of
@@ -247,7 +248,7 @@ class DreamPlans:
             entry.age_to(now)
             record = EventLedger(self.plugin).prepare_record(
                 "dream", entry.dream_id,
-                f"我在{time.strftime('%Y-%m-%d %H:%M', time.localtime(entry.created_at))}做了一段梦；"
+                f"我在{clock.fmt('%Y-%m-%d %H:%M', entry.created_at)}做了一段梦；"
                 "这是梦境，不是现实经历。正文保存在私人梦境记录里。",
                 private_text=f"我做过的梦（梦境不是现实；私人正文）：{entry.text}",
                 occurred_at=entry.created_at,

@@ -229,7 +229,8 @@ _SCHEMA = [
         last_used_at INTEGER DEFAULT 0,
         use_count INTEGER DEFAULT 0,
         tags TEXT DEFAULT '[]',
-        note TEXT DEFAULT ''
+        note TEXT DEFAULT '',
+        kind TEXT DEFAULT 'avatar'
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_avatar_sha ON qq_avatar_pool(persona_id, sha1)",
@@ -385,6 +386,7 @@ class Store:
         self._migrate_refs(current)
         self._migrate_events()
         self._migrate_dream_plans()
+        self._migrate_image_kinds()
         self._conn.commit()
         if current < SCHEMA_VERSION:
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -563,6 +565,34 @@ class Store:
             conn.commit()
         except Exception as exc:
             logger.warning(f"[congling] 唯一索引 ux_dream_plan 建立失败: {exc_brief(exc)}")
+
+    def _migrate_image_kinds(self) -> None:
+        """图片登记表加 kind：avatar / scene / meme。
+
+        这张表原来只装头像，名字和语义都绑死在换脸上。空间要配「生活图」之后，
+        它得能装别的图，但没有必要改名——改名要迁移、要改面板、要改一堆 SQL，
+        收益只是好看。加一列解决问题，老数据 DEFAULT 'avatar' 天然正确，不用回填。
+
+        **换脸必须只认 kind='avatar'**，否则哪天拿生活照当头像换上。
+        """
+        conn = self._conn
+        assert conn is not None
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS qq_avatar_pool(id INTEGER PRIMARY KEY AUTOINCREMENT)"
+            )
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(qq_avatar_pool)")}
+            if "kind" not in columns:
+                conn.execute("ALTER TABLE qq_avatar_pool ADD COLUMN kind TEXT DEFAULT 'avatar'")
+            conn.execute(
+                "UPDATE qq_avatar_pool SET kind='avatar' WHERE kind IS NULL OR kind=''"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_image_kind "
+                "ON qq_avatar_pool(persona_id, kind, trusted)"
+            )
+        except Exception as exc:
+            logger.warning(f"[congling] 图片登记表 kind 迁移失败: {exc_brief(exc)}")
 
     def _backfill_levels(self) -> None:
         """0.4.x → 0.5.0 一次性回填：老记忆没有等级，按 importance 粗分。

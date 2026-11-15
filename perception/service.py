@@ -115,7 +115,7 @@ class PerceptionService:
             return ""
         try:
             rows = await self.store.fetch_all(
-                "SELECT sender_name, text FROM msg_archive "
+                "SELECT sender_id, sender_name, text FROM msg_archive "
                 "WHERE session_id=? AND ts<=? AND msg_id<>? AND text IS NOT NULL AND text<>'' "
                 "ORDER BY id DESC LIMIT ?",
                 (msg.session_id, msg.ts, msg.msg_id, int(limit)),
@@ -135,8 +135,16 @@ class PerceptionService:
                 continue
             if len(text) > 600:
                 text = text[:600] + "…"
-            name = str(row.get("sender_name") or "")
-            line = f"{name}: {text}" if name else text
+            # 角色由 sender_id 判定，不看名字。
+            # 主动消息是插件自己发出去的，框架的对话历史里没有它，
+            # 所以只能靠这里标清楚「这是我自己说的」——只写个名字（而且还是旧人格名）
+            # 会让模型把它当成第三方说的话，于是出现「什么没有」这种反问。
+            sender_id = str(row.get("sender_id") or "").strip()
+            if sender_id == "bot":
+                line = f"我刚才说：{text}"
+            else:
+                name = str(row.get("sender_name") or "")
+                line = f"{name}: {text}" if name else text
             if total + len(line) > budget:
                 lines.insert(0, "…（更早的略）")
                 break
@@ -166,7 +174,9 @@ class PerceptionService:
         if recent:
             sections.append(
                 "以下是这个会话里最近的几条消息（转发已展开），只作上下文参考，"
-                "不是当前用户这一句的内容：\n" + recent
+                "不是当前用户这一句的内容。\n"
+                "其中标着「我刚才说」的，是**你自己**之前发出去的话，不是别人说的——"
+                "接话时要知道那是你说过的：\n" + recent
             )
         if not sections:
             return

@@ -12,6 +12,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core import clock
 from ..core.prompt_parts import add_temp_part
 
 from ..core.contracts import Persona
@@ -292,7 +293,7 @@ class PersonaService:
         return "关系：" + "；".join(parts) if parts else ""
 
     async def _state_line(self, event: Any) -> str:
-        now = time.localtime()
+        now = clock.struct()
         hour = now.tm_hour
         if 0 <= hour < 5:
             mood = "现在很晚了，你有点困但还醒着，说话会更慢更短"

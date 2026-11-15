@@ -33,17 +33,24 @@ class CapabilityRegistry:
     # ================================================================ 生命周期
     async def start(self) -> None:
         from .providers import build_builtin
+        from ..qqext.qzone_tools import build_caps as build_qzone_caps
 
         for cap in build_builtin(self.plugin):
             self.register(cap)
+        # 空间工具不吃 capability.groups 白名单：它不属于「实用查询」那几个分组，
+        # 有自己的开关 qzone_tool_enabled。不加这条，配过分组白名单的机器上
+        # 空间工具会静默消失，而且没有任何提示。
+        for cap in build_qzone_caps(self.plugin):
+            self.register(cap, ignore_groups=True)
         logger.info(f"[congling] 能力注册完成：{len(self.caps)} 项")
 
-    def register(self, cap: Capability) -> None:
+    def register(self, cap: Capability, *, ignore_groups: bool = False) -> None:
         if not self.config.bool("capability.enabled", True):
             return
-        groups = {str(item) for item in self.config.list("capability.groups", [])}
-        if groups and cap.group not in groups:
-            return
+        if not ignore_groups:
+            groups = {str(item) for item in self.config.list("capability.groups", [])}
+            if groups and cap.group not in groups:
+                return
         self.caps[cap.name] = cap
         self._stats.setdefault(cap.name, {"calls": 0, "errors": 0, "total_ms": 0.0})
 

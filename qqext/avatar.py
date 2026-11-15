@@ -19,6 +19,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core import clock
 from ..core import paths
 
 MAX_BYTES = 512 * 1024
@@ -64,12 +65,12 @@ class AvatarService:
             record = await self.store.kv_get("avatar:auto_today", {})
         except Exception:
             record = {}
-        if not isinstance(record, dict) or record.get("day") != time.strftime("%Y-%m-%d"):
+        if not isinstance(record, dict) or record.get("day") != clock.fmt("%Y-%m-%d"):
             return 0
         return int(record.get("count") or 0)
 
     async def _mark_used(self) -> None:
-        day = time.strftime("%Y-%m-%d")
+        day = clock.fmt("%Y-%m-%d")
         try:
             record = await self.store.kv_get("avatar:auto_today", {})
             if not isinstance(record, dict) or record.get("day") != day:

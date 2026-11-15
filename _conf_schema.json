@@ -682,6 +682,34 @@
         "default": "auto",
         "hint": "auto/builtin 都是本插件自己打空间接口（登录态从 OneBot 取）；off 完全不碰"
       },
+      "qzone_owner_qq": {
+        "description": "空间操作的默认对象（QQ 号）",
+        "hint": "填你的 QQ 号。看空间、点赞、评论默认就对你操作，不再跟着说话人走——群里谁喊「看看空间」，看的也是你。留空则退回当前说话人。删说说不受这里影响，永远只删自己号上发的",
+        "type": "string",
+        "default": ""
+      },
+      "qzone_behavior_mode": {
+        "description": "空间主动行为",
+        "type": "string",
+        "options": [
+          "off",
+          "intent"
+        ],
+        "default": "off",
+        "hint": "off 只留通道：读动态/发说说/点赞/评论/回评都能用，但没有东西会自己动（不定时、不自动发、不自动评）。intent 才会按她自己的意愿去发。想让她有生活感再切过来"
+      },
+      "qzone_tool_enabled": {
+        "description": "把空间能力做成工具",
+        "hint": "开着的话她能自己读动态、发说说、点赞评论。关掉就只能用指令和面板，模型碰不到",
+        "type": "bool",
+        "default": true
+      },
+      "qzone_image_from_meme": {
+        "description": "说说配图用表情包库",
+        "hint": "从「表情包小偷」的库里按情绪挑一张。库没连上就不配图，不会硬凑",
+        "type": "bool",
+        "default": true
+      },
       "qzone_allow_write": {
         "description": "允许写入空间",
         "hint": "发说说需要。0.5.0 起默认开启，配合每日配额与内容过滤，不会乱发",
@@ -788,6 +816,12 @@
         "type": "int",
         "default": 30,
         "hint": "超出后按最久没用过的淘汰，你主动存进去的优先保留"
+      },
+      "gallery_limit": {
+        "description": "图库上限（生活图 / 表情各算）",
+        "type": "int",
+        "default": 60,
+        "hint": "跟头像库分开算，图多了不会把头像挤掉。说说配图从这里挑"
       },
       "avatar_allow_bot_inject": {
         "description": "允许她提交候选图",
@@ -1076,7 +1110,11 @@
         "description": "梦境生成模式",
         "hint": "hybrid 入睡预生成前 3 段，其余 REM 在线实时生成；precomputed 预生成全部；live 仅在线生成。补发窗口固定为醒后 24 小时",
         "type": "string",
-        "options": ["hybrid", "precomputed", "live"],
+        "options": [
+          "hybrid",
+          "precomputed",
+          "live"
+        ],
         "default": "hybrid"
       },
       "dream_mention_min_level": {
@@ -1089,7 +1127,10 @@
         "description": "醒后梦提示次数作用域",
         "hint": "session 各会话独立计数；global 所有会话共享次数。TTL 均从实际醒来计算",
         "type": "string",
-        "options": ["session", "global"],
+        "options": [
+          "session",
+          "global"
+        ],
         "default": "session"
       },
       "dream_recall_guard": {
@@ -1245,6 +1286,12 @@
         "hint": "默认关闭。开启后每天到点写一篇，可以手动让她现在就写",
         "type": "bool",
         "default": false
+      },
+      "signature": {
+        "description": "日记签名",
+        "hint": "写在每篇日记页脚的那个名字，1-3 个字。留空则跟随当前人格名",
+        "type": "string",
+        "default": ""
       },
       "hour": {
         "description": "几点写",
@@ -1480,6 +1527,23 @@
         "type": "bool",
         "default": true
       },
+      "trigger_mode": {
+        "description": "谁能让它收线",
+        "hint": "whitelist 只认下面名单里的人（管理员始终算在内）；admin 只认管理员；all 谁说话都算，旧行为，不建议。默认值等于「只有你和名单里的人说了才停」",
+        "type": "string",
+        "options": [
+          "whitelist",
+          "admin",
+          "all"
+        ],
+        "default": "whitelist"
+      },
+      "trigger_whitelist": {
+        "description": "可触发收线的白名单",
+        "hint": "一行一个 QQ 号。私聊按对方 QQ 判，群聊按说话人 QQ 判；填群号则整群放行。名单空着时只有管理员能触发",
+        "type": "list",
+        "default": []
+      },
       "strong_words": {
         "description": "强档结束语",
         "hint": "命中即静默到起床时间",
@@ -1544,6 +1608,41 @@
         "description": "收尾回复字数上限",
         "type": "int",
         "default": 12
+      },
+      "removed_words": {
+        "description": "屏蔽的结束语",
+        "hint": "想删掉某个默认词就写在这里，一行一个。默认词和上面的词表是合并关系，不是覆盖",
+        "type": "list",
+        "default": []
+      },
+      "break_window_minutes": {
+        "description": "安静解除窗口（分钟）",
+        "hint": "管理员在这个窗口内说够几条就解除安静",
+        "type": "int",
+        "default": 5
+      },
+      "break_count": {
+        "description": "安静解除条数",
+        "hint": "窗口内累计这么多条就恢复接话。群聊里管理员没 @ 或引用不算",
+        "type": "int",
+        "default": 2
+      }
+    }
+  },
+  "clock": {
+    "description": "时间来源",
+    "hint": "作息窗口、起床点、日记按哪天算，都用这套钟",
+    "type": "object",
+    "items": {
+      "source": {
+        "description": "用哪套时间",
+        "type": "string",
+        "options": [
+          "beijing",
+          "local"
+        ],
+        "default": "beijing",
+        "hint": "beijing 固定 UTC+8（中国无夏令时，等同 Asia/Shanghai，不需要额外依赖）；local 跟本机时区"
       }
     }
   }

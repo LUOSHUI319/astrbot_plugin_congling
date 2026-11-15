@@ -18,6 +18,7 @@ import uuid
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.memory_guard import memory_work
 
 from ..core.contracts import DreamEntry, night_key_of
@@ -218,7 +219,7 @@ class Dreamer:
         self._last_dream_at = entry.created_at
         await remember_action(
             self.plugin, "dream", entry.dream_id,
-            f"我在{time.strftime('%Y-%m-%d %H:%M', time.localtime(entry.created_at))}做了一段梦；"
+            f"我在{clock.fmt('%Y-%m-%d %H:%M', entry.created_at)}做了一段梦；"
             "这是我的梦境，不是现实经历。梦境正文保存在私人梦境记录里。",
             private_text=f"我做过的梦（梦境不是现实；私人正文）：{entry.text}",
             occurred_at=entry.created_at, result={"dream_id": entry.dream_id, "level": entry.level},

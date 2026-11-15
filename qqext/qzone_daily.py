@@ -16,9 +16,11 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.memory_guard import memory_work
 from ..memory.perspective import SELF_SUBJECT, material_label
 from ..core.exc import exc_brief
+from ..core.contracts import level_of
 
 PROMPT = """你是{name}{identity_line}。你要发一条 QQ 空间的说说，像随手写的一小段日常。
 
@@ -94,12 +96,12 @@ class QzoneDaily:
         if bridge is None or not getattr(bridge, "available", lambda: False)():
             return {"ok": False, "reason": "空间不可用"}
 
-        day = time.strftime("%Y-%m-%d")
+        day = clock.fmt("%Y-%m-%d")
         state = await self._state(day)
         posted = state.get("posted") or []
         if len(posted) >= int(state.get("target") or 0):
             return {"ok": False, "reason": "今天配额已满"}
-        hour = time.localtime().tm_hour
+        hour = clock.hour_of()
         if hour not in (state.get("hours") or []):
             return {"ok": False, "reason": "还没到今天的时段"}
 
@@ -142,7 +144,7 @@ class QzoneDaily:
         if not result.get("ok"):
             return {"ok": False, "reason": str(result.get("text") or "发布失败")}
 
-        day = time.strftime("%Y-%m-%d")
+        day = clock.fmt("%Y-%m-%d")
         state = await self._state(day)
         posted = list(state.get("posted") or [])
         posted.append({"text": text[:80], "at": int(time.time())})
@@ -193,7 +195,7 @@ class QzoneDaily:
                         "text": str(row.get("text") or "")[:200],
                         "subject": str(row.get("subject_id") or ""),
                         "subject_ref": str(row.get("subject_ref") or ""),
-                        "weight": float(row.get("mem_level") or 3),
+                        "weight": float(level_of(row)),
                     }
                 )
         except Exception:

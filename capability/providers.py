@@ -15,6 +15,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core import clock
 from ..core.contracts import Capability
 
 UA = {"User-Agent": "AstrBot-CongLing/0.1 (+https://astrbot.app)"}
@@ -232,35 +233,6 @@ async def translate(plugin: Any, text: str, target: str = "中文") -> dict[str,
 
 # --------------------------------------------------------------------- 注册
 # --------------------------------------------------------------------- 空间
-async def qzone_feed(
-    plugin: Any, _event: Any = None, target: str = "", limit: int = 5
-) -> dict[str, Any]:
-    bridge = getattr(plugin.qqext, "qzone", None) if plugin.qqext is not None else None
-    if bridge is None:
-        return {"text": "空间功能没接上"}
-    try:
-        size = int(limit) or 5
-    except (TypeError, ValueError):
-        size = 5
-    result = await bridge.feed(
-        limit=max(1, min(size, 20)),
-        target=str(target or ""),
-        event=_event,
-    )
-    if not result.get("ok"):
-        return {"text": result.get("text") or "读不到空间"}
-    return {
-        "text": result.get("text") or "读到几条",
-        "data": {"items": result.get("items", []), "target": result.get("target", {})},
-    }
-
-
-async def qzone_publish(plugin: Any, content: str) -> dict[str, Any]:
-    bridge = getattr(plugin.qqext, "qzone", None) if plugin.qqext is not None else None
-    if bridge is None:
-        return {"text": "空间功能没接上"}
-    result = await bridge.publish(str(content or ""))
-    return {"text": result.get("text") or ("发出去了" if result.get("ok") else "没发出去")}
 
 
 # --------------------------------------------------------------------- 记忆
@@ -355,7 +327,7 @@ async def dream_recall(plugin: Any, query: str = "", _event: Any = None) -> dict
             text = "我做过一段梦；正文是私人内容，只能在管理员私聊里回忆。"
         items.append({"dream_id": entry.dream_id, "level": entry.level, "created_at": entry.created_at,
                       "text": text})
-        lines.append(f"[{time.strftime('%m-%d %H:%M', time.localtime(entry.created_at))} / {entry.level}级] {text}")
+        lines.append(f"[{clock.fmt('%m-%d %H:%M', entry.created_at)} / {entry.level}级] {text}")
     return {"text": "\n".join(lines) or "没有找到相关的梦，不要编造。", "data": items}
 
 
@@ -464,35 +436,15 @@ def build_builtin(plugin: Any) -> list[Capability]:
             timeout=6.0,
         ),
         Capability(
-            name="qzone.feed",
-            description="读某个人的 QQ 空间说说，target 留空表示当前说话人自己。",
-            group="life",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "看谁的空间：留空=当前说话人自己，也可填 QQ 号或昵称",
-                    },
-                    "limit": {"type": "integer", "description": "读几条，默认 5，最多 20"},
-                },
-            },
-            handler=lambda target="", limit=5, _event=None: qzone_feed(
-                plugin, _event=_event, target=target, limit=limit
-            ),
-            timeout=20.0,
-            cache_ttl=0,
-            takes_event=True,
-            fallback="空间这会儿读不出来",
-        ),
-        Capability(
             name="avatar.change",
             description=(
                 "换掉自己的 QQ 头像。图片优先用用户刚发的那张（image_path 传路径），"
                 "或者说 pool_id 用头像库里第几张，传 pool_id=0 表示从库里随便挑一张能用的。"
                 "只有用户明确要求换头像、或你自己觉得该换个脸时才用，一天最多一次。"
             ),
-            group="qzone",
+            # 不是空间功能，别放 qzone 组——那个组不在 capability.groups 白名单里，
+            # 会被静默过滤掉，工具直接消失。
+            group="self",
             auth="admin",
             parameters={
                 "type": "object",
@@ -507,22 +459,6 @@ def build_builtin(plugin: Any) -> list[Capability]:
             timeout=30.0,
             cache_ttl=0,
             fallback="头像没换成",
-        ),
-        Capability(
-            name="qzone.publish",
-            description="发一条 QQ 空间说说。只有用户明确让你发的时候才用，不要自己决定发。",
-            group="qzone",
-            auth="admin",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "content": {"type": "string", "description": "说说正文，最多 1000 字"},
-                },
-                "required": ["content"],
-            },
-            handler=lambda content: qzone_publish(plugin, content),
-            timeout=20.0,
-            fallback="没发出去",
         ),
         Capability(
             name="life.translate",

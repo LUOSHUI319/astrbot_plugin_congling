@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
+from .contracts import level_of
 
 # 星图那边只展示这两种状态；forgotten / deleted 不进去
 VISIBLE_STATUS = ("active", "archived")
@@ -76,7 +77,7 @@ class StarMapSync:
             atoms.append({
                 "id": int(row.get("id") or 0),
                 "kind": str(row.get("kind") or "fact"),
-                "level": int(row.get("mem_level") or 3),
+                "level": level_of(row),
                 "importance": round(float(row.get("importance") or 0.5), 3),
                 "strength": round(float(row.get("strength") or 0.65), 3),
                 "text": str(row.get("text") or ""),

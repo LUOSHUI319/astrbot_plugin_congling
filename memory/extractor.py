@@ -15,6 +15,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core import clock
 from ..core.contracts import MemoryDraft
 from .perspective import narrator_name
 from .refs import actor_ref
@@ -87,7 +88,7 @@ class MemoryExtractor:
         # 不能用 str.format：PROMPT 里的 JSON 示例带花括号，会被当成占位符
         # 直接抛 KeyError('"kind"')，历史上记忆一条都没写进去就是这个原因。
         prompt = (
-            PROMPT.replace("{today}", time.strftime("%Y-%m-%d", time.localtime()))
+            PROMPT.replace("{today}", clock.fmt("%Y-%m-%d", ))
             .replace("{bot_name}", bot_name)
             .replace("{max_atoms}", str(max_atoms))
             .replace("{conversation}", conversation)
@@ -184,7 +185,7 @@ class MemoryExtractor:
                 continue
             stamp = ""
             if turn.get("ts"):
-                stamp = time.strftime("%m-%d %H:%M", time.localtime(int(turn["ts"])))
+                stamp = clock.fmt("%m-%d %H:%M", int(turn["ts"]))
             # 群里要能看出是谁说的，否则事实会记到别人头上
             name = str(turn.get("sender_name") or "").strip()
             sid = str(turn.get("sender_id") or "").strip()

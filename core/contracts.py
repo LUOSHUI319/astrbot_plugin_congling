@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from . import clock
+
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -17,6 +19,30 @@ CONTRACT_VERSION = 1
 
 
 # --------------------------------------------------------------------- 人格
+DEFAULT_LEVEL = 3
+
+
+def level_of(source: Any, key: str = "mem_level", default: int = DEFAULT_LEVEL) -> int:
+    """读记忆等级。
+
+    **0 是「永久不可忘」这一档，不是空值。** 所以不能写 `int(x or 3)`——
+    Python 里 `0 or 3` 等于 3，永久记忆会就此掉回普通档，保护等级形同虚设。
+    这里只把 None / 缺字段 / 解析失败当成「用默认值」。
+    """
+    value: Any = None
+    try:
+        value = source.get(key) if hasattr(source, "get") else source
+    except Exception:
+        return default
+    if value is None or value == "":
+        return default
+    try:
+        # 等级范围 0-5：0 是不可忘，5 是最易淡忘
+        return max(0, min(5, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class Persona:
     """当前人格；persona_id 仅作历史兼容标识，不提供多档案切换。"""
@@ -110,7 +136,7 @@ class MemoryHit:
     def line(self) -> str:
         stamp = ""
         if self.created_at:
-            stamp = time.strftime("%Y-%m-%d", time.localtime(self.created_at))
+            stamp = clock.fmt("%Y-%m-%d", self.created_at)
         mark = " 【重要】" if self.importance >= 0.85 else ""
         prefix = f"({stamp}) " if stamp else ""
         where = f"[{self.session_label}] " if self.session_label else ""
@@ -252,6 +278,11 @@ class NightState:
     # 醒来回满期：(开始时刻, 醒来那一刻的精力下限)。None 表示不在恢复期。
     # 用一个可空元组而不是 bool+float 两个字段，避免「布尔说在恢复、值已经满了」这种矛盾。
     wake_recovery: tuple[int, float] | None = None
+    # 安静期：收线命中的截止时间戳。
+    # **这不是睡觉**——mode 仍然是 awake，只是这段时间不接话。
+    # 和 asleep 分开存，是因为「安静」不该触发梦境、不该按睡眠阶段回精力、也不该说早安。
+    quiet_until: int = 0
+    quiet_word: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -268,6 +299,8 @@ class NightState:
             "pending_crawl": list(self.pending_crawl or []),
             "last_wake_at": self.last_wake_at,
             "wake_recovery": list(self.wake_recovery) if self.wake_recovery else None,
+            "quiet_until": int(self.quiet_until or 0),
+            "quiet_word": str(self.quiet_word or ""),
         }
 
     @classmethod
@@ -291,6 +324,18 @@ class NightState:
         raw_pending = data.get("pending_crawl") or []
         state.pending_crawl = [str(x) for x in raw_pending if str(x).strip()] if isinstance(raw_pending, list) else []
         state.last_wake_at = int(data.get("last_wake_at") or 0)
+        # 安静截止时间：过期的当场丢掉，省得每次都要判
+        try:
+            until = int(data.get("quiet_until") or 0)
+        except (TypeError, ValueError):
+            until = 0
+        if until > int(time.time()):
+            state.quiet_until = until
+            state.quiet_word = str(data.get("quiet_word") or "")
+        else:
+            # 过期的安静不该留下痕迹
+            state.quiet_until = 0
+            state.quiet_word = ""
         # 恢复期记录要校验：老档缺字段、时钟回拨、手改存档都可能给出脏值。
         # 脏值一律当 None，绝不在加载时补成「现在」——否则每次重启都白送一轮恢复期。
         state.wake_recovery = None
@@ -410,7 +455,7 @@ class DreamEntry:
             dream_id=str(data.get("dream_id") or ""),
             session_id=str(data.get("session_id") or ""),
             created_at=int(data.get("created_at") or 0),
-            level=int(data.get("level") or 3),
+            level=level_of(data, "level"),
             tags=list(data.get("tags") or []),
             text=str(data.get("text") or ""),
             importance=float(data.get("importance") or 0.6),

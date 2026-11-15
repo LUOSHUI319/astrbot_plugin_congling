@@ -17,7 +17,9 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.exc import exc_brief
+from ..core.contracts import level_of
 
 LEVEL_WEIGHT = {0: 2.0, 1: 0.2, 2: 0.5, 3: 1.0, 4: 2.0, 5: 3.0}
 DEFAULT_NAMES = ["陌生", "眼熟", "熟人", "朋友", "亲近", "交心"]
@@ -268,7 +270,7 @@ class Affinity:
     async def settle_daily(self, force: bool = False) -> dict[str, Any]:
         if not self.enabled():
             return {"enabled": False}
-        today = time.strftime("%Y-%m-%d")
+        today = clock.fmt("%Y-%m-%d")
         if not force:
             try:
                 if await self.store.kv_get("affinity:last_settle_day", "") == today:
@@ -330,7 +332,7 @@ class Affinity:
         gained = 0.0
         evidence: list[int] = []
         for row in levels:
-            lv = int(row.get("mem_level") or 3)
+            lv = level_of(row)
             cnt = int(row.get("cnt") or 0)
             gained += LEVEL_WEIGHT.get(lv, 1.0) * cnt
         gained = min(gained, 12.0)

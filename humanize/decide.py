@@ -16,6 +16,7 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from ..core import clock
 from ..core.contracts import PerceivedMessage, ReplyDecision
 
 QUESTION_HINTS = ("?", "？", "吗", "呢", "怎么", "为什么", "为啥", "能不能", "是不是", "有没有", "多少")
@@ -172,7 +173,7 @@ class Decider:
             end_h, end_m = [int(x) for x in end_text.strip().split(":")]
         except (ValueError, AttributeError):
             return True
-        now = time.localtime()
+        now = clock.struct()
         current = now.tm_hour * 60 + now.tm_min
         start = start_h * 60 + start_m
         end = end_h * 60 + end_m
@@ -188,7 +189,7 @@ class Decider:
             return True
         if msg.session_kind == "group" and len(msg.text) <= 6:
             return True
-        hour = time.localtime().tm_hour
+        hour = clock.hour_of()
         if 0 <= hour < 5 and len(msg.text) < 20:
             return True
         return False

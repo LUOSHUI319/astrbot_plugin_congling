@@ -228,9 +228,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "dream_hint_max_uses": 2,
         "dream_hint_ttl_minutes": 120,
     },
+    "clock": {
+        "source": "beijing",
+    },
     "close": {
         "enabled": True,
         "max_closing_chars": 40,
+        "removed_words": [],
+        "break_window_minutes": 5,
+        "break_count": 2,
     },
     "proactive": {
         "enabled": False,
@@ -262,6 +268,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "diary": {
         "enabled": False,
+        "signature": "",
         "hour": 23,
         "jitter_minutes": 40,
         "length": 700,

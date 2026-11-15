@@ -4,14 +4,27 @@
   "use strict";
   let rootEl = null;
   let bridge = { get: null, post: null };
-  const DIARY_SIGNATURE = "绫";
+  /* 签名跟着当前人格走。原来写死「绫」，换人格后每篇日记底下都还署旧名。
+     取不到就退成中性的「我」——宁可不署名，也别署一个不是她的名字。 */
+  /* 页脚署名：配置里写了就用配置（1-3 字），没写才跟随当前人格名。
+     以前写死过一个旧名字，换人格后每篇日记底下都还署着它。 */
+  function diarySignature() {
+    const picked = String(state.signature || "").trim();
+    if (picked) return picked.slice(0, 3);
+    const live = String(window.__njPersonaTag || "").trim();
+    return live || "我";
+  }
   function countCharacters(text) { return Array.from(String(text == null ? "" : text)).length; }
   const LIST_LIMIT = 60;
   const $ = (id) => (rootEl ? (rootEl.id === id ? rootEl : rootEl.querySelector("#" + id)) : null);
   const API = {
     async list() {
       const resp = await bridge.get("diary/list", { limit: LIST_LIMIT });
-      return { items: (resp && resp.items) || [], enabled: Boolean(!resp || resp.enabled !== false) };
+      return {
+        items: (resp && resp.items) || [],
+        enabled: Boolean(!resp || resp.enabled !== false),
+        signature: String((resp && resp.signature) || ""),
+      };
     },
     rowOf(dayKey) {
       return state.items.find((item) => item.day_key === dayKey) || null;
@@ -108,6 +121,7 @@ function bindDom() {
 const state = {
   items: [], spreads: [], mobilePages: [], firstSpread: new Map(), firstMobile: new Map(),
   index: 0, mobile: false, isFlipping: false, loading: true, enabled: true,
+  signature: "",
   error: null, activeTurn: null, drag: null, pendingLayout: false,
   debug: false,
 };
@@ -252,7 +266,7 @@ function createPage(model, side = "right", measuring = false) {
   }
   const footer = makeElement("footer","entry-footer");
   const folio = measuring ? "第 00 / 00 页" : `第 ${model.folio} / ${state.mobile ? state.mobilePages.length : state.spreads.length * 2} 页`;
-  footer.append(makeElement("span","page-number",folio),makeElement("span","diary-signature",DIARY_SIGNATURE)); page.append(footer);
+  footer.append(makeElement("span","page-number",folio),makeElement("span","diary-signature",diarySignature())); page.append(footer);
   return page;
 }
 
@@ -712,6 +726,7 @@ async function loadDiaries() {
     const firstLoad = !state.items.length;
     const result=await API.list();
     state.items=normalizeEntries(result.items); state.enabled=result.enabled;
+    state.signature=String(result.signature||"");
     await document.fonts.ready;
     state.loading=false; renderDirectory();
     /* 头一次打开直接落到最近写的那一篇（日子最大那篇），不用从最早的一页翻起 */

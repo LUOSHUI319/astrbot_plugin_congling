@@ -19,6 +19,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core import clock
 from ..core.prompt_parts import add_temp_part
 from ..core.memory_guard import memory_work
 
@@ -870,7 +871,7 @@ class MemoryService:
         """
         if not self.profiles.enabled():
             return {"built": 0, "reason": "画像总开关关着"}
-        today = time.strftime("%Y-%m-%d")
+        today = clock.fmt("%Y-%m-%d")
         if not force:
             try:
                 if await self.store.kv_get("profile:last_day", "") == today:

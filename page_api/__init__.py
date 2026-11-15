@@ -93,6 +93,7 @@ GROUP_TITLES = {
     "debug": "调试",
     "night": "长夜如梦",
     "close": "收线静默",
+    "clock": "时间来源",
 }
 
 def _fallback_night_key(ts: int) -> str:
@@ -658,10 +659,19 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
             session_id = str(params.get("session") or params.get("session_id") or "")
             kind = str(params.get("kind") or "")
             keyword = str(params.get("keyword") or "")
+            # level 传了才筛；不传就是全部（0 是有效值，不能当空处理）
+            level_raw = params.get("level")
+            level = None
+            if level_raw is not None and str(level_raw).strip() != "":
+                try:
+                    level = max(0, min(5, int(level_raw)))
+                except (TypeError, ValueError):
+                    level = None
             rows = await atoms.list(
                 session_id=session_id or None,
                 kind=kind or None,
                 keyword=keyword or None,
+                level=level,
                 limit=max(1, min(500, as_int("limit", 50))),
                 offset=max(0, as_int("offset", 0)),
             )
@@ -866,6 +876,18 @@ class PageApi(MemoryResetMixin, ProactiveMixin, DiaryMixin, MemoryM3Mixin, Memor
             data = await bridge.status()
             if not isinstance(data, dict):
                 return _err("状态读取失败")
+            # /qzone 只给连接状态，主动行为模式得单独补上——手机端要显示
+            # 「通道已就绪 · 主动行为已关闭」这类信息，否则看不出能不能自己发。
+            try:
+                mode = str(self.cfg.str("qq_extra.qzone_behavior_mode", "off") or "off").strip().lower()
+            except Exception:
+                mode = "off"
+            if mode not in ("off", "intent"):
+                mode = "off"
+            data["behavior_mode"] = mode
+            data["behavior_text"] = (
+                "通道已就绪 · 主动行为已关闭" if mode == "off" else "通道已就绪 · 主动行为已开启"
+            )
             return _ok(data)
         except Exception as exc:
             return _err(repr(exc)[:200])

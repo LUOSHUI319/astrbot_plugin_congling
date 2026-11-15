@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.memory_guard import memory_work
 
 from .targets import TargetResolver
@@ -34,6 +35,87 @@ from .qzone_client import (
 QZONE_PLUGIN = "astrbot_plugin_qzone_ultra"
 AUTH_KV_KEY = "qzone:auth"
 COOKIE_ACTION_TIMEOUT = 6.0
+# 删说说的时间窗。更久的要人自己在手机上删——不是做不到，
+# 是「删掉几个月前的一条说说」不该由一个工具悄悄完成。
+DELETE_WINDOW_SECONDS = 6 * 3600
+
+
+def within_delete_window(created_at: int, now: float | None = None) -> bool:
+    """这条说说还在可以删的时间窗里吗。
+
+    没时间戳时放行——外层还有「写权限」和「只能删自己的」两道，不必在这里卡死。
+    """
+    try:
+        stamp = int(created_at or 0)
+    except (TypeError, ValueError):
+        return True
+    if stamp <= 0:
+        return True
+    return ((now if now is not None else time.time()) - stamp) <= DELETE_WINDOW_SECONDS
+
+
+def pick_default_target(raw: str, owner: str) -> str:
+    """没指定看谁的时候，看谁。
+
+    顺序：显式 target > 配好的 owner_qq > 空（空会交给 resolve 退回当前说话人）。
+
+    有 owner 就不跟说话人走：群里谁喊一句「看看空间」，看的也是那个人，
+    而不是那个群友——既是隐私问题，也不是想要的东西。
+    """
+    text = str(raw or "").strip()
+    if text:
+        return text
+    who = str(owner or "").strip()
+    return who if who.isdigit() else ""
+
+
+# 中文情绪词 → 表情包库的分类名。表情包的 desc 是中文描述、category 是英文，
+# 所以两样都往 pick() 里塞：中文词命中 desc，英文分类命中 category。
+# 没命中任何词就不配图——「配图是情绪的标点」，没情绪就别硬配。
+MOOD_WORDS: dict[str, tuple[str, ...]] = {
+    "tired": ("累", "困", "疲惫", "没劲", "撑不住", "熬夜", "睡"),
+    "happy": ("开心", "高兴", "笑", "舒服", "不错", "好耶", "爽"),
+    "sad": ("难过", "丧", "失落", "想哭", "遗憾", "舍不得"),
+    "cry": ("哭", "眼泪", "委屈"),
+    "angry": ("生气", "气死", "烦", "火大", "受不了", "讨厌"),
+    "dumb": ("无语", "离谱", "服了", "什么鬼", "离谱"),
+    "surprised": ("惊", "没想到", "居然", "震惊"),
+    "shy": ("害羞", "脸热", "不好意思", "脸红"),
+    "love": ("喜欢", "爱", "心动", "想你"),
+    "thank": ("谢谢", "感谢", "多谢"),
+    "sigh": ("叹气", "唉", "算了", "摆烂"),
+    "excited": ("激动", "兴奋", "期待"),
+    "confused": ("不懂", "困惑", "懵", "什么情况", "看不懂"),
+    "fear": ("怕", "吓", "慌"),
+    "embarrassed": ("尴尬", "社死", "丢人"),
+    "troll": ("呵呵", "阴阳", "乐"),
+}
+
+
+def mood_words(text: str) -> list[str]:
+    """从正文里抠出情绪词，给表情包库检索用。
+
+    返回的是「中文词 + 英文分类」混在一起：中文词去命中 desc，英文分类去命中
+    category。一个都没命中就返回空列表，调用方据此决定不配图。
+    """
+    body = str(text or "")
+    if not body:
+        return []
+    found: list[str] = []
+    for category, words in MOOD_WORDS.items():
+        hits = [word for word in words if word and word in body]
+        if not hits:
+            continue
+        found.extend(hits)
+        found.append(category)
+    # 去重但保序
+    seen: set[str] = set()
+    out: list[str] = []
+    for word in found:
+        if word not in seen:
+            seen.add(word)
+            out.append(word)
+    return out
 
 
 class QzoneBridge:
@@ -59,6 +141,15 @@ class QzoneBridge:
 
     def write_allowed(self) -> bool:
         return self.config.bool("qq_extra.qzone_allow_write", False)
+
+    def behavior_active(self) -> bool:
+        """主动行为总闸：只有 `intent` 放行。
+
+        `off` 不是禁用空间，是禁用主动——工具照样能发、能评、能删，
+        只是没有任何东西会自己发起。写错配置也按 `off`。
+        """
+        mode = str(self.config.str("qq_extra.qzone_behavior_mode", "off") or "off").strip().lower()
+        return mode == "intent"
 
     def _external_present(self) -> bool:
         try:
@@ -248,6 +339,10 @@ class QzoneBridge:
             return {"ok": False, "text": str(exc)[:200], "items": []}
 
         if not target_uin:
+            # 默认对象：显式 target > owner_qq > 当前说话人
+            target = pick_default_target(
+                target, self.config.str("qq_extra.qzone_owner_qq", "") or ""
+            )
             resolution = await self.targets.resolve(target, event)
             if resolution.ok:
                 target_uin = resolution.uin
@@ -320,7 +415,7 @@ class QzoneBridge:
         if not self.available():
             return False
         cap = max(1, min(5, self.config.int("qq_extra.qzone_feed_browse_max", 1)))
-        today = time.strftime("%Y-%m-%d")
+        today = clock.fmt("%Y-%m-%d")
         try:
             used = int(await self.plugin.store.kv_get(f"qzone:browse:{today}", 0) or 0)
         except Exception:
@@ -332,6 +427,10 @@ class QzoneBridge:
 
         返回空列表 = 没开 / 今天用完了 / 出错了，调用方按「什么都没看到」处理。
         """
+        # 主动行为总闸：off 的时候刷动态这件事本身就不该发生。
+        # 顺手挡在这里，比在每个调用点各写一遍靠得住。
+        if not self.behavior_active():
+            return []
         if not await self.may_browse():
             return []
         try:
@@ -341,7 +440,7 @@ class QzoneBridge:
             return []
         if not result.get("ok"):
             return []
-        key = f"qzone:browse:{time.strftime('%Y-%m-%d')}"
+        key = f"qzone:browse:{clock.fmt('%Y-%m-%d')}"
         try:
             used = int(await self.plugin.store.kv_get(key, 0) or 0)
             await self.plugin.store.kv_set(key, used + 1)
@@ -375,7 +474,7 @@ class QzoneBridge:
         if not self.available() or not self.write_allowed():
             return False
         cap = max(1, min(5, self.config.int("qq_extra.qzone_feed_like_max", 2)))
-        today = time.strftime("%Y-%m-%d")
+        today = clock.fmt("%Y-%m-%d")
         try:
             used = int(await self.plugin.store.kv_get(f"qzone:liked:{today}", 0) or 0)
         except Exception:
@@ -426,7 +525,7 @@ class QzoneBridge:
                 continue
             done.append({**item, "liked": True})
             seen_set.add(str(item["fid"]))
-            key = f"qzone:liked:{time.strftime('%Y-%m-%d')}"
+            key = f"qzone:liked:{clock.fmt('%Y-%m-%d')}"
             try:
                 used = int(await self.plugin.store.kv_get(key, 0) or 0)
                 await self.plugin.store.kv_set(key, used + 1)
@@ -447,12 +546,248 @@ class QzoneBridge:
         if not self.available() or not self.write_allowed():
             return False
         cap = max(1, min(3, self.config.int("qq_extra.qzone_feed_reply_max", 1)))
-        today = time.strftime("%Y-%m-%d")
+        today = clock.fmt("%Y-%m-%d")
         try:
             used = int(await self.plugin.store.kv_get(f"qzone:replied:{today}", 0) or 0)
         except Exception:
             used = 0
         return used < cap
+
+    # ---------------------------------------------------------------- 单条（工具层用）
+    async def like_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        """给指定的那一条点赞。
+
+        跟 like_feed 的区别：那个是「她自己刷到就随手点几个」，受 `qzone_feed_like`
+        这个**主动开关**管；这个是「有人明确让我点这条」，所以只看写权限和去重，
+        不看主动开关——否则用户说「给这条点个赞」，开关关着就点不了，很怪。
+
+        这是公开行为，点完对方说说下面会显示她的赞。
+        """
+        if not self.write_allowed():
+            return {"ok": False, "text": "空间写权限关着呢，先打开才能操作"}
+        fid = str(item.get("fid") or "")
+        unikey = str(item.get("unikey") or "")
+        curkey = str(item.get("curkey") or "")
+        if not (fid and unikey and curkey):
+            return {
+                "ok": False,
+                "text": "这一条拿不到点赞要的参数（unikey 只在好友动态流里给，翻历史说说没有）",
+            }
+        try:
+            auth = await self.auth()
+        except Exception as exc:
+            self._last_error = str(exc)[:200]
+            return {"ok": False, "text": "还没拿到空间登录态"}
+        if int(item.get("uin") or 0) == int(auth.uin or 0):
+            return {"ok": False, "text": "这是你自己发的说说"}
+        try:
+            client = QzoneClient(auth)
+            await client.like(
+                unikey=unikey,
+                curkey=curkey,
+                fid=fid,
+                abstime=int(item.get("created_at") or 0),
+                appid=str(item.get("appid") or "311"),
+                host_uin=int(item.get("uin") or 0),
+            )
+        except Exception as exc:
+            self._last_error = repr(exc)[:200]
+            logger.warning(f"[congling] 点赞失败: {exc!r}")
+            return {"ok": False, "text": "赞没点上"}
+
+        try:
+            seen = list(await self.plugin.store.kv_get("qzone:liked_topics", []) or [])
+            seen.append(fid)
+            await self.plugin.store.kv_set("qzone:liked_topics", seen[-100:])
+        except Exception:
+            pass
+        return {"ok": True, "text": "点了赞"}
+
+    async def comment_item(self, item: dict[str, Any], text: str) -> dict[str, Any]:
+        """在指定的那一条下面评论。同理，只看写权限，不看主动开关。
+
+        评论是比点赞更重的公开行为：内容会挂在别人的说说下面，说完就撤不回。
+        """
+        if not self.write_allowed():
+            return {"ok": False, "text": "空间写权限关着呢，先打开才能操作"}
+        topic_id = str(item.get("topic_id") or "")
+        if not topic_id:
+            return {"ok": False, "text": "这一条拿不到 topic_id，评不了"}
+        content = str(text or "").strip()
+        if not content:
+            return {"ok": False, "text": "评论内容是空的"}
+        try:
+            auth = await self.auth()
+        except Exception as exc:
+            self._last_error = str(exc)[:200]
+            return {"ok": False, "text": "还没拿到空间登录态"}
+        if int(item.get("uin") or 0) == int(auth.uin or 0):
+            return {"ok": False, "text": "这是你自己发的说说"}
+        try:
+            client = QzoneClient(auth)
+            await client.comment(topic_id, content, host_uin=int(item.get("uin") or 0))
+        except Exception as exc:
+            self._last_error = repr(exc)[:200]
+            logger.warning(f"[congling] 评论失败: {exc!r}")
+            return {"ok": False, "text": "评论没发出去"}
+
+        try:
+            seen = list(await self.plugin.store.kv_get("qzone:replied_topics", []) or [])
+            seen.append(topic_id)
+            await self.plugin.store.kv_set("qzone:replied_topics", seen[-200:])
+        except Exception:
+            pass
+        return {"ok": True, "text": "评论发出去了"}
+
+    async def own_feed(self, *, limit: int = 5, page: int = 1) -> dict[str, Any]:
+        """只读自己（登录账号）的空间。
+
+        跟 feed() 的区别：feed 的默认目标可能是 owner_qq（你），
+        而「删说说」必须落在自己的号上，不能被默认目标带偏。
+        """
+        try:
+            auth = await self.auth()
+        except Exception as exc:
+            self._last_error = str(exc)[:200]
+            return {"ok": False, "text": "还没拿到空间登录态", "items": []}
+        return await self.feed(
+            limit=limit, page=page, target_uin=int(auth.uin or 0), target_label="你自己"
+        )
+
+    # ---------------------------------------------------------------- 详情 / 删 / 回评 / 访客
+    async def detail_of(self, item: dict[str, Any]) -> dict[str, Any]:
+        """读一条说说的详情，重点是评论列表。"""
+        fid = str(item.get("fid") or "")
+        if not fid:
+            return {"ok": False, "text": "这一条拿不到 fid，读不了详情", "comments": []}
+        try:
+            auth = await self.auth()
+        except Exception as exc:
+            self._last_error = str(exc)[:200]
+            return {"ok": False, "text": "还没拿到空间登录态", "comments": []}
+        host = int(item.get("uin") or auth.uin or 0)
+        try:
+            client = QzoneClient(auth)
+            data = await client.post_detail(host, fid)
+        except Exception as exc:
+            self._last_error = repr(exc)[:200]
+            logger.warning(f"[congling] 读说说详情失败: {exc!r}")
+            return {"ok": False, "text": "详情没读出来", "comments": []}
+        data["nickname"] = str(item.get("nickname") or "")
+        data["fid"] = fid
+        return data
+
+    async def delete_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        """删自己的一条说说。
+
+        **只允许 6 小时内的。** 再久就得人自己去手机上删——不是技术上做不到，
+        是"删掉一条几个月前的说说"这种事不该由一个工具悄悄完成。
+        """
+        if not self.write_allowed():
+            return {"ok": False, "text": "空间写权限关着呢"}
+        fid = str(item.get("fid") or "")
+        if not fid:
+            return {"ok": False, "text": "这一条拿不到 fid，删不了"}
+        created = int(item.get("created_at") or 0)
+        if not within_delete_window(created):
+            return {
+                "ok": False,
+                "text": "这条发出去超过 6 小时了，删它得你自己去手机上操作",
+            }
+        try:
+            auth = await self.auth()
+        except Exception as exc:
+            self._last_error = str(exc)[:200]
+            return {"ok": False, "text": "还没拿到空间登录态"}
+        if int(item.get("uin") or 0) != int(auth.uin or 0):
+            return {"ok": False, "text": "只能删自己发的说说"}
+        try:
+            client = QzoneClient(auth)
+            await client.delete_post(
+                fid, appid=int(item.get("appid") or 311), created_at=created
+            )
+        except Exception as exc:
+            self._last_error = repr(exc)[:200]
+            logger.warning(f"[congling] 删说说失败: {exc!r}")
+            return {"ok": False, "text": "没删掉"}
+        return {"ok": True, "text": "删掉了"}
+
+    async def reply_comment_item(
+        self, item: dict[str, Any], comment: dict[str, Any], text: str
+    ) -> dict[str, Any]:
+        """回复某条评论。跟 comment_item 不是一个动作：那是新开一条，这是接在别人话下面。"""
+        if not self.write_allowed():
+            return {"ok": False, "text": "空间写权限关着呢"}
+        fid = str(item.get("fid") or "")
+        comment_id = str((comment or {}).get("comment_id") or "")
+        if not fid or not comment_id:
+            return {"ok": False, "text": "缺 fid 或者评论 id，回不了"}
+        content = str(text or "").strip()
+        if not content:
+            return {"ok": False, "text": "回复内容是空的"}
+        try:
+            auth = await self.auth()
+        except Exception as exc:
+            self._last_error = str(exc)[:200]
+            return {"ok": False, "text": "还没拿到空间登录态"}
+        host = int(item.get("uin") or auth.uin or 0)
+        try:
+            client = QzoneClient(auth)
+            await client.reply_comment(
+                host,
+                fid,
+                comment_id,
+                int((comment or {}).get("uin") or 0),
+                content,
+                appid=int(item.get("appid") or 311),
+            )
+        except Exception as exc:
+            self._last_error = repr(exc)[:200]
+            logger.warning(f"[congling] 回评失败: {exc!r}")
+            return {"ok": False, "text": "回复没发出去"}
+
+        try:
+            seen = list(await self.plugin.store.kv_get("qzone:replied_comments", []) or [])
+            seen.append(comment_id)
+            await self.plugin.store.kv_set("qzone:replied_comments", seen[-200:])
+        except Exception:
+            pass
+        return {"ok": True, "text": "回复发出去了"}
+
+    async def visitors(self, *, limit: int = 10) -> dict[str, Any]:
+        """最近访客。
+
+        **每天只允许看一次。** 这不是抠，是分寸：访客列表是双向可见的，
+        你刷了谁的动态，对方在「最近访客」里就能看到你。
+        """
+        if not self.available():
+            return {"ok": False, "text": "空间功能关着呢", "items": []}
+        today = clock.fmt("%Y-%m-%d")
+        key = f"qzone:visitors:{today}"
+        try:
+            used = int(await self.plugin.store.kv_get(key, 0) or 0)
+        except Exception:
+            used = 0
+        if used:
+            return {"ok": False, "text": "今天已经看过一次了，明天再看", "items": []}
+        try:
+            auth = await self.auth()
+        except Exception as exc:
+            self._last_error = str(exc)[:200]
+            return {"ok": False, "text": "还没拿到空间登录态", "items": []}
+        try:
+            client = QzoneClient(auth)
+            data = await client.visitors(count=max(5, min(int(limit or 10), 30)))
+        except Exception as exc:
+            self._last_error = repr(exc)[:200]
+            logger.warning(f"[congling] 读访客失败: {exc!r}")
+            return {"ok": False, "text": "访客没读出来", "items": []}
+        try:
+            await self.plugin.store.kv_set(key, 1)
+        except Exception:
+            pass
+        items = list(data.get("items") or [])[: max(1, int(limit or 10))]
+        return {"ok": True, "items": items, "text": f"最近有 {len(items)} 个人来过"}
 
     async def reply_to_feed(self, items: list[dict[str, Any]], *, limit: int = 1) -> list[dict[str, Any]]:
         """从刷到的动态里随机挑几条评一句。返回实际评上的条目。"""
@@ -496,7 +831,7 @@ class QzoneBridge:
                 continue
             done.append({**item, "comment": line})
             seen_set.add(str(item["topic_id"]))
-            key = f"qzone:replied:{time.strftime('%Y-%m-%d')}"
+            key = f"qzone:replied:{clock.fmt('%Y-%m-%d')}"
             try:
                 used = int(await self.plugin.store.kv_get(key, 0) or 0)
                 await self.plugin.store.kv_set(key, used + 1)
@@ -550,7 +885,13 @@ class QzoneBridge:
 
     # ================================================================ 写
     @memory_work
-    async def publish(self, text: str, *, images: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    async def publish(
+        self,
+        text: str,
+        *,
+        images: list[dict[str, Any]] | None = None,
+        auto_image: bool = True,
+    ) -> dict[str, Any]:
         if not self.available():
             return {"ok": False, "text": "空间功能关着呢"}
         if not self.write_allowed():
@@ -558,6 +899,12 @@ class QzoneBridge:
         content = (text or "").strip()
         if not content:
             return {"ok": False, "text": "内容是空的"}
+
+        # 没显式给图就自己找一张。配图是加分项，整条链路尽力而为：
+        # 开关关着、库里没连上、没匹到情绪、上传失败——任何一步塌了都退回纯文本，
+        # 绝不因为配不上图把整条说说卡死。
+        if not images and auto_image:
+            images = await self._meme_images(content)
 
         try:
             return await self._publish_once(content, images=images)
@@ -576,6 +923,41 @@ class QzoneBridge:
             logger.warning(f"[congling] 发说说失败: {exc!r}")
             return {"ok": False, "text": "发布出错了，稍后再试"}
 
+    async def _meme_images(self, text: str) -> list[dict[str, Any]]:
+        """按正文的情绪挑一张表情包，传上图床，返回能直接塞进 publish 的 images。
+
+        挑不到、传不上，一律返回空列表 —— 上层会当纯文本发。
+        """
+        if not self.config.bool("qq_extra.qzone_image_from_meme", True):
+            return []
+        qqext = getattr(self.plugin, "qqext", None)
+        sticker = getattr(qqext, "sticker", None) if qqext is not None else None
+        if sticker is None:
+            return []
+        moods = mood_words(text)
+        if not moods:
+            # 正文里没有情绪词就不配图。「配图是情绪的标点」，硬配反而怪。
+            return []
+        try:
+            picked = await sticker.pick_bytes(moods)
+        except Exception as exc:
+            logger.debug(f"[congling] 挑表情包失败: {exc!r}")
+            return []
+        if not picked:
+            return []
+        data, suffix = picked
+        try:
+            auth = await self.auth()
+            client = QzoneClient(auth)
+            info = await client.upload_image(data, filename=f"meme{suffix}")
+        except Exception as exc:
+            logger.debug(f"[congling] 表情包上传失败: {exc!r}")
+            return []
+        if not info:
+            return []
+        logger.info(f"[congling] 说说配图：{moods[0]} → 一张表情包")
+        return [info]
+
     async def _publish_once(
         self, content: str, *, images: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
@@ -592,17 +974,30 @@ class QzoneBridge:
         shot = f"（配图 {result.get('images')} 张）" if result.get("images") else ""
         await remember_action(
             self.plugin, "qzone", str(result.get("fid") or uuid.uuid4().hex),
-            f"我在{time.strftime('%Y-%m-%d %H:%M')}发了QQ空间说说{shot}：{content[:300]}",
+            f"我在{clock.fmt('%Y-%m-%d %H:%M')}发了QQ空间说说{shot}：{content[:300]}",
             result={"fid": str(result.get("fid") or "")},
         )
+        # 记进「自知表」：下次 she 想发的时候，这句话会作为反重复的依据出现
+        try:
+            from .qzone_hint import remember_post
+
+            await remember_post(
+                self.plugin, content, fid=str(result.get("fid") or ""), source="manual"
+            )
+        except Exception:
+            pass
         return {"ok": True, "text": "发出去了", "fid": result.get("fid", ""),
                 "images": int(result.get("images") or 0)}
 
     # ================================================================ 自动发
     async def maybe_auto_post(self, content: str) -> bool:
+        # 主动行为总闸：off 时她不会自己发。这个方法目前没有调用点，
+        # 但留着这道判断，免得哪天接回来又绕过总闸。
+        if not self.behavior_active():
+            return False
         if not self.config.bool("qq_extra.qzone_auto_post", False):
             return False
-        today = time.strftime("%Y-%m-%d")
+        today = clock.fmt("%Y-%m-%d")
         key = f"qzone:auto:{today}"
         try:
             done = await self.plugin.store.kv_get(key)

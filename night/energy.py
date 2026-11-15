@@ -12,6 +12,8 @@ import random
 import time
 from typing import Any
 
+from ..core import clock
+
 DEFAULT_NOON = "13:00-14:30"
 DEFAULT_NIGHT = "23:30-07:00"
 
@@ -65,8 +67,8 @@ def in_window(now_minute: int, window: tuple[int, int] | None) -> bool:
 
 
 def now_minute(ts: float | None = None) -> int:
-    stamp = time.localtime(ts if ts is not None else time.time())
-    return stamp.tm_hour * 60 + stamp.tm_min
+    """当天第几分钟。走 core.clock，默认按北京时间算。"""
+    return clock.minute_of_day(ts)
 
 
 # ---------------------------------------------------------------- 疲劳期
@@ -145,20 +147,13 @@ def next_wake_time(
     jitter_max = config.int("night.wake_jitter_minutes", 90)
     jitter_max = max(0, min(90, jitter_max))  # 硬上限 90
 
-    local = time.localtime(base)
-    today = time.mktime(
-        (local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1)
-    )
-    base_wake = today + wake_minute * 60
+    base_wake = clock.day_start(base) + wake_minute * 60
 
     # 如果今天这个点已经过去了（比如凌晨 2 点睡，目标 8 点），用今天的
     # 如果把固定点设在凌晨（比如 06:00 而现在是 23:00），同样用今天
     if base_wake <= base:
         # 已经过了今天的点，说明要睡到明天
-        tomorrow = time.localtime(base + 86400)
-        base_wake = time.mktime(
-            (tomorrow.tm_year, tomorrow.tm_mon, tomorrow.tm_mday, 0, 0, 0, 0, 0, -1)
-        ) + wake_minute * 60
+        base_wake = clock.day_start(base + 86400) + wake_minute * 60
 
     if jitter_max <= 0:
         return int(base_wake)

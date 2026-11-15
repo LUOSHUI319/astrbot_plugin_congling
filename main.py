@@ -19,7 +19,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
-from .core import paths
+from .core import clock, paths
 from .core.budget import Budget
 from .core.bus import EventBus
 from .core.config import Config
@@ -27,13 +27,17 @@ from .core.contracts import Persona
 from .core.guard import OutputGuard
 from .core.log import DecisionLogger
 from .core.prompt_parts import add_temp_part, has_temp_part
+
+# 时间提示的 marker：放在整个注入链条的最末尾，单独一段
+NOW_MARKER = "<!--congling:now-->"
 from .core.probe import Probe
 from .core.rhythm import RhythmController
 from .core.store import Store
 from .humanize.delay import ReplyDelayer
 from .core.exc import exc_brief
+from .qqext.qzone_hint import MARKER as QZONE_HINT_MARKER, build_hint as build_qzone_hint
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 PLUGIN_NAME = "从绫开始"
 
 # 钩子优先级（数值越小越晚执行）
@@ -116,6 +120,10 @@ class ConglingPlugin(Star):
 
     # ================================================================ 生命周期
     async def initialize(self) -> None:
+        # 全插件的「现在几点」都由它决定，必须在任何模块启动之前定下来，
+        # 否则作息窗口会先用本机时间算一遍。
+        clock.configure(self.cfg)
+        logger.info(f"[congling] 时间来源：{clock.describe()}")
         await self.store.open()
         try:
             from .core import migrate as config_migrate
@@ -397,7 +405,10 @@ class ConglingPlugin(Star):
             return
         try:
             daily = getattr(ext, "qzone_daily", None)
-            if daily is not None:
+            # 主动行为总闸。off 的时候她自己一条都不会发，定时器只剩换脸那件事。
+            # 这里不是「删掉发说说」，是「先关闸」——真正的清理在把 qzone_daily
+            # 降级成素材后端那一步做，那之前先保证不会有东西偷偷发出去。
+            if daily is not None and self.qzone_behavior() == "intent":
                 await daily.tick()
         except Exception as exc:
             logger.warning(f"[congling] 每日说说任务出错: {exc_brief(exc)}")
@@ -411,6 +422,17 @@ class ConglingPlugin(Star):
             logger.warning(f"[congling] 自动换头像失败: {exc_brief(exc)}")
 
     # ================================================================ 工具方法
+    def qzone_behavior(self) -> str:
+        """空间主动行为总闸：`off` / `intent`。
+
+        `off` = 手在不动。工具全部注册、全部可用，但没有任何东西会主动发起：
+        定时说说、自动评论、自动点赞、自动回评，一律先过这道判断。
+
+        配置读不到或写错都按 `off` 处理——宁可少做，不可乱做。
+        """
+        mode = str(self.cfg.str("qq_extra.qzone_behavior_mode", "off") or "off").strip().lower()
+        return mode if mode in ("off", "intent") else "off"
+
     @property
     def persona_id(self) -> str:
         return self.cfg.persona_id
@@ -674,6 +696,15 @@ class ConglingPlugin(Star):
                 avatar_hint = self.qqext.avatar_hint()
                 if avatar_hint:
                     add_temp_part(req, avatar_hint, "<!--congling:avatar-->")
+            # 空间：off 说「手在别乱动」，intent 说「可以有念头」并带上最近发过的。
+            # 工具注册只让模型看见签名，不会让它知道自己该不该用，这段话补的就是这个。
+            if self.qqext is not None and not has_temp_part(req, QZONE_HINT_MARKER):
+                try:
+                    qzone_hint = await build_qzone_hint(self)
+                except Exception:
+                    qzone_hint = ""
+                if qzone_hint:
+                    add_temp_part(req, qzone_hint, QZONE_HINT_MARKER)
             if owner_private and self.diary is not None and self.cfg.bool("diary.feel_in_prompt", False):
                 snippet = await self.diary.latest_snippet(200)
                 if snippet:
@@ -684,6 +715,15 @@ class ConglingPlugin(Star):
                     )
             if self.capabilities is not None:
                 self.capabilities.attach_tools(req)
+
+            # 时间放在最后一段：这句话每轮都在变，放前面会把整段前缀打散，
+            # 放最后则前面的记忆、人格、场景一个字都不用重算，前缀缓存照样命中。
+            # 走的是 clock 那一套钟，北京还是本机看 clock.source。
+            if not has_temp_part(req, NOW_MARKER):
+                try:
+                    add_temp_part(req, clock.moment_line(), NOW_MARKER)
+                except Exception:
+                    pass
         except Exception as exc:
             logger.debug(f"[congling] 人格注入失败: {exc!r}")
 
@@ -818,11 +858,18 @@ class ConglingPlugin(Star):
             "recall": {"last_hits": None, "at": 0, "error": "module_unavailable"},
             "subject": {"unresolved": None, "at": 0, "error": "module_unavailable"},
         }
+        # 人格名以运行时为准（astrbot 模式下会跟随框架人格），配置值只是兜底
+        persona_name = self.cfg.persona_name
+        if self.persona is not None:
+            try:
+                persona_name = self.persona.get().name or persona_name
+            except Exception:
+                pass
         return {
             "plugin": PLUGIN_NAME,
             "version": PLUGIN_VERSION,
             "uptime": int(time.time()) - self._started_at,
-            "persona": {"id": self.cfg.persona_id, "name": self.cfg.persona_name},
+            "persona": {"id": self.cfg.persona_id, "name": persona_name},
             "modules": {
                 "perception": self.perception is not None,
                 "persona": self.persona is not None,

@@ -13,8 +13,10 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core import clock
 from ..core.contracts import NIGHT_ASLEEP, NIGHT_AWAKE, NIGHT_WAKING, PerceivedMessage
-from .close import close_minutes, is_closing, match_strength
+from .close import close_minutes, is_closing, match_strength, trigger_allowed
+from .quiet import QuietBreaker
 from .crawl import Crawler
 from .dream import Dreamer
 from .plans import DreamPlans
@@ -29,6 +31,8 @@ __all__ = [
     "is_closing",
     "match_strength",
     "close_minutes",
+    "trigger_allowed",
+    "QuietBreaker",
 ]
 
 
@@ -45,6 +49,7 @@ class NightModule:
         self.state.on_sleep = self.plans.plan_sleep
         self.state.on_wake = self.plans.note_wake
         self.crawler = Crawler(plugin)
+        self.breaker = QuietBreaker(plugin)
         self._waking_started: dict[str, int] = {}
         self.pending_sleep: dict[str, Any] | None = None
         # 爬楼语念过哪些会话（crawl_announce=once 时用）
@@ -78,26 +83,71 @@ class NightModule:
             if not started:
                 self._waking_started[msg.session_id] = int(time.time())
 
+        # 安静期：人醒着，但这段时间不接话。
+        # 管理员在窗口内攒够条数就解除（群聊还要 @ 或引用才算数）。
+        if not self.state.state.is_asleep() and self.state.is_quiet():
+            is_admin = False
+            try:
+                is_admin = str(msg.sender_id) in {str(x) for x in (self.plugin.admin_ids() or [])}
+            except Exception:
+                is_admin = False
+            broke, why = self.breaker.check(msg, is_admin=is_admin, self_id=self_id)
+            if broke:
+                await self.state.clear_quiet(reason=why)
+                result["quiet_broken"] = True
+                result["hint"] = f"安静被打破（{why}），正常接话"
+                logger.info(f"[congling] {result['hint']}")
+            else:
+                result["block"] = True
+                result["quiet"] = True
+                result["hint"] = (
+                    f"安静中（{why}，到 {self.state.quiet_clock()}）"
+                )
+                return result
+
         # 醒着的时候判断这句话是不是在收线
         if not self.state.state.is_asleep() and self.config.bool("close.enabled", True):
             closing, strength, word = is_closing(msg.text, self.config)
             if closing and strength in ("strong", "medium"):
-                kind = "noon" if ("午" in word or "眯" in word or "盹" in word) else "night"
-                # 真睡开关关着：静默照旧（对方就是要下线了），但不挂入睡、
-                # 也不让 prompt 去写「说完这句就睡」的道别。
-                if self.config.bool("night.allow_sleep", True):
-                    self.pending_sleep = {
-                        "kind": kind,
-                        "reason": "talk",
-                        "word": word,
-                        "strength": strength,
-                        "session_id": msg.session_id,
-                    }
-                    result["closing"] = True
-                    result["hint"] = f"对方收线（{word}），回完这句就睡"
+                allowed, who = self._close_allowed(msg)
+                if not allowed:
+                    # 话确实是结束语，但人不在这条权限链里。不跟着停，也不挂
+                    # pending_sleep —— 照常回一句就行，别让路人的一句晚安把整只
+                    # bot 按下去。这里不改除 hint 外的任何状态，也不 return，
+                    # 免得连带跳过下面「精力耗尽也要道别」那段。
+                    result["closing"] = False
+                    result["close_denied"] = who
+                    result["hint"] = f"对方收线（{word}），但触发人不在允许范围（{who}），不跟着停"
+                    logger.info(f"[congling] 收线被忽略：{word}（{who}）")
                 else:
-                    result["closing"] = True
-                    result["hint"] = f"对方收线（{word}），不睡，只是安静一会儿"
+                    kind = "noon" if ("午" in word or "眯" in word or "盹" in word) else "night"
+                    sleeping_enabled = (
+                        self.config.bool("night.allow_sleep", True)
+                        and self.config.bool("night.enabled", False)
+                    )
+                    if sleeping_enabled:
+                        # 真睡开着：维持老行为，回完这句就躺下
+                        self.pending_sleep = {
+                            "kind": kind,
+                            "reason": "talk",
+                            "word": word,
+                            "strength": strength,
+                            "session_id": msg.session_id,
+                            "trigger": who,
+                        }
+                        result["closing"] = True
+                        result["hint"] = f"对方收线（{word}），回完这句就睡"
+                    else:
+                        # 不睡，只安静。强档词安静到下次起床点，其余按分钟数。
+                        minutes = close_minutes(self.config, strength, word)
+                        until = await self.state.start_quiet(
+                            minutes=minutes, kind=kind, word=word
+                        )
+                        result["closing"] = True
+                        result["quiet_until"] = until
+                        result["hint"] = (
+                            f"对方收线（{word}），安静到 {clock.fmt('%H:%M', until)}（不入睡）"
+                        )
 
         # 精力耗尽触发的入睡，也要给一次道别的机会
         # 双保险：state.on_message 那边已经拦过一次，这里再拦一次，
@@ -113,6 +163,34 @@ class NightModule:
             self.pending_sleep = {"kind": kind, "reason": "energy", "session_id": msg.session_id}
 
         return result
+
+    def quiet_line(self) -> str:
+        """面板和状态指令用的一句话。没在安静就返回空串。"""
+        state = self.state
+        if not state.is_quiet():
+            return ""
+        return (
+            f"安静中（{state.state.quiet_word or '收线'}，到 {state.quiet_clock()}，"
+            f"还有 {state.quiet_left_minutes()} 分钟）"
+        )
+
+    def _close_allowed(self, msg: PerceivedMessage) -> tuple[bool, str]:
+        """这次收线该不该认。
+
+        人对了才停。判定本身是纯函数（night/close.trigger_allowed），这里只负责
+        把「说话人」和「管理员名单」递进去。名单取不到时按拒绝处理——宁可少停一次，
+        也别让陌生人一句话把 bot 关掉。
+        """
+        try:
+            return trigger_allowed(
+                getattr(msg, "sender_id", ""),
+                self.config,
+                admins=getattr(self.plugin, "admin_ids", ()) or (),
+                session_id=getattr(msg, "session_id", ""),
+            )
+        except Exception as exc:
+            logger.warning(f"[congling] 收线权限判定失败: {exc_brief(exc)}")
+            return False, "error"
 
     async def after_reply(self, msg: PerceivedMessage | None = None, *, session_id: str = "") -> None:
         """回完一句话之后：执行收线入睡。
@@ -360,16 +438,25 @@ class NightModule:
             else:
                 lines.append("你这次睡觉时做过梦，正文是私人内容；本会话只可提及做过梦，不可透露梦的内容。")
 
+        # 精力提示只留最后一档：掉到 30 以下才说「要休息了」。
+        # 中间那些「有点困」「精力剩 55%」全去掉了——报电量式的句子
+        # 模型只会照着复述，反而不像人在说话。时间已经由最后那段单独给，
+        # 凌晨两点这个事实本身比任何百分比都有说服力。
+        #
+        # allow_sleep 关着的时候不能说「准备去睡」：它永远不会睡，
+        # 嘴上说要休息、实际一直聊，比不提醒更怪。
         kind = energy_mod.fatigue_kind(self.config)
-        if kind:
-            percent = max(0, int(state.energy))
-            if percent <= 25:
-                tone = "已经很困了，脑子转不太动，说话会短、会卡"
-            elif percent <= 55:
-                tone = "有点犯困，反应慢半拍"
+        if kind and float(state.energy) < 30:
+            if self.config.bool("night.allow_sleep", True):
+                lines.append(
+                    "你已经很困了，心里在准备休息。对方要是没有要紧事，"
+                    "你想早点收场；回话短一点，别开新话题。"
+                )
             else:
-                tone = "开始犯困了，但还能撑"
-            lines.append(f"现在是疲劳时段，你的精力还剩 {percent}%，{tone}。")
+                lines.append(
+                    "你已经很困了，但还醒着愿意陪。回话会短、会慢，"
+                    "不用硬撑出精神来。"
+                )
 
         if not lines:
             return ""

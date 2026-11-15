@@ -14,6 +14,9 @@ from typing import Any
 STRONG = (
     "晚安", "我睡了", "睡了", "去睡了", "先睡一步", "我下了", "下线了",
     "关灯了", "撑不住了", "困死了", "睡觉去", "睡啦", "good night", "night night",
+    # 让人去睡的说法。对 bot 说这些等同于「你该歇了」，所以和「我睡了」同档。
+    # 叙述句（「他说睡觉吧」）和问句（「睡觉吧？」）仍被下面的句式过滤挡住。
+    "睡觉吧", "去睡觉", "睡吧", "我去睡了", "该睡了",
 )
 
 MEDIUM = (
@@ -37,13 +40,43 @@ _NOUN_AFTER = ("曲", "歌", "片", "剧", "书", "会", "餐", "班", "店", "�
 
 
 def _strength_words(config: Any) -> tuple[list[str], list[str], list[str]]:
-    strong = config.list("close.strong_words", []) or list(STRONG)
-    medium = config.list("close.medium_words", []) or list(MEDIUM)
-    weak = config.list("close.weak_words", []) or list(WEAK)
+    """默认词 + 配置词合并，而不是配置整表覆盖。
+
+    原来是 `config.list(...) or list(STRONG)`：配置里只要写了非空列表，
+    代码里的默认词就整个作废——之前「睡觉去」就是这么无声失效的。
+    现在改成合并，想删默认词就在 `close.removed_words` 里写。
+    """
+    try:
+        removed = {
+            str(item).strip().lower()
+            for item in (config.list("close.removed_words", []) or [])
+            if str(item).strip()
+        }
+    except Exception:
+        removed = set()
+
+    def merge(defaults: tuple[str, ...], key: str) -> list[str]:
+        try:
+            extra = config.list(key, []) or []
+        except Exception:
+            extra = []
+        merged: list[str] = []
+        seen: set[str] = set()
+        for raw in list(defaults) + [str(item) for item in extra]:
+            text = str(raw).strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in seen or lowered in removed:
+                continue
+            seen.add(lowered)
+            merged.append(text)
+        return merged
+
     return (
-        [str(item) for item in strong if str(item).strip()],
-        [str(item) for item in medium if str(item).strip()],
-        [str(item) for item in weak if str(item).strip()],
+        merge(STRONG, "close.strong_words"),
+        merge(MEDIUM, "close.medium_words"),
+        merge(WEAK, "close.weak_words"),
     )
 
 
@@ -142,6 +175,60 @@ def is_closing(text: str, config: Any) -> tuple[bool, str, str]:
         return True, strength, word
 
     return False, "", ""
+
+
+# ---------------------------------------------------------------- 触发权限
+# 「谁能让它停下」和「什么话算结束语」是两件事：前者管人，后者管字。
+# 群里随便一个路人都能把整只 bot 说睡过去，就是把这两件事混在一起的下场。
+TRIGGER_MODES = ("whitelist", "admin", "all")
+
+
+def trigger_allowed(
+    sender_id: str,
+    config: Any,
+    admins: Any = (),
+    session_id: str = "",
+) -> tuple[bool, str]:
+    """这句话有没有资格触发收线静默。
+
+    返回 (是否允许, 依据)。依据会落进日志与诊断，方便回头查「为什么没停」。
+
+    - whitelist：白名单里的人（管理员始终在内，避免把自己锁死）
+    - admin：只认管理员
+    - all：谁都能触发，旧行为
+    """
+    mode = str(config.str("close.trigger_mode", "whitelist") or "whitelist").strip().lower()
+    if mode not in TRIGGER_MODES:
+        mode = "whitelist"
+    if mode == "all":
+        return True, "all"
+
+    uid = str(sender_id or "").strip()
+    admin_set = {str(item).strip() for item in (admins or []) if str(item).strip()}
+    if uid and uid in admin_set:
+        return True, "admin"
+    if mode == "admin":
+        return False, "admin_only"
+
+    allow: set[str] = set()
+    try:
+        allow = {
+            str(item).strip()
+            for item in (config.list("close.trigger_whitelist", []) or [])
+            if str(item).strip()
+        }
+    except Exception:
+        allow = set()
+    if not allow:
+        # 名单空着：退回「只有管理员能停」，比「谁都能停」安全得多
+        return False, "whitelist_empty"
+    if uid and uid in allow:
+        return True, "whitelist"
+    # 群号也认：群聊时 session_id 就是群号，放行一整群比一个个加人省事
+    sid = str(session_id or "")
+    if sid and any(item.isdigit() and len(item) >= 5 and item in sid for item in allow):
+        return True, "group"
+    return False, "not_whitelisted"
 
 
 def close_minutes(config: Any, strength: str, word: str) -> int:

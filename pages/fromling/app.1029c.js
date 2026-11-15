@@ -1216,6 +1216,8 @@ const VIEWS = {
   diary: { title: "日记", render: renderDiary },
   tools: { title: "工具", render: renderTools },
   qq: { title: "QQ", render: renderQQ },
+  settings: { title: "设置总览", render: renderSettingsAll },
+  settingsRead: { title: "设置快照", render: renderSettingsRead },
   system: { title: "系统", render: renderSystem },
 };
 
@@ -1233,6 +1235,7 @@ const SUBTABS = {
     { key: "next", title: "下次更新", render: () => renderChangelog("next") },
   ],
   memory: [
+    { key: "permanent", title: "永久记忆", render: renderPermanentMemory },
     { key: "summary", title: "记忆总览", render: renderM3Overview },
     /* 0.7.0：「按用户分」取消，认识的人合并进好感度页 */
     { key: "sessions", title: "按会话分", render: renderM3Sessions },
@@ -1979,6 +1982,75 @@ function changelogHtml(key) {
       "它是一个独立插件，不随本体分发。面板侧边栏新增「记忆星图」一页：预览图、功能说明、一键打开、以及复制记忆库路径。安装包与后续版本都在官方群里。"),
   ]);
 
+  /* ---------------- 1.3.0 · 2026-11-14 · 修复 ---------------- */
+  const v130 = ul([
+    item("永久记忆等级 0 被读成 3",
+      "int(x or 3) 遇上 mem_level=0（永久不可忘）会返回 3。全插件 8 处都这么写，实库 157 条永久记忆在展示、权重、统计里全掉回普通档，禁区保护形同虚设。现在统一走 level_of()，只把 None、空串、解析失败当默认值。"),
+    item("「重写日记」是假按钮",
+      "compose() 发现当天已有日记就直接返回旧文；就算绕过它，_insert 用的是 INSERT OR IGNORE，新内容也会被静默丢弃。两道门都得开：加 force 跳过短路，新增 _replace() 用 UPDATE 覆盖，同时保留置顶。"),
+    item("主动找人后认不出自己说的话",
+      "bot 主动问「你吃饭了么」，用户回「没有」，它反问「什么没有」。根因是三轮叠加：框架的 send_message 不写对话历史、归档里确实有那条、但注入时只按名字渲染成「绫: …」，模型认不出是自己说的。现在按 sender_id 判角色，bot 的行渲染成「我刚才说：…」，注入块开头也点明了。"),
+    item("人格名残留「绫」",
+      "配置里 persona.name 还写着旧名，系统提示跟随 AstrBot 人格（洛水），归档却读配置——两条路分叉，于是模型把「绫」当成别人。已统一：配置改名、归档改用 display_name()、并过滤掉拿不到时返回的占位串。前端日记签名和人格兜底里的「绫」也清掉了。"),
+    item("手机端空间页字段层级读错",
+      "读 data.ok、data.usable、data.feed，三个字段后端都不返回。结果未登录也显示「可用」，动态永远空白。现在读 auth.ok 与 write_allowed，动态另调 qzone/feed。"),
+    item("收线词表被配置整表覆盖",
+      "config.list(...) or list(STRONG)：配置只要非空，代码默认词全作废，源码里的「睡觉去」就是这么无声失效的。改成默认词加配置词合并，新增 close.removed_words 用来删默认词。"),
+    item("「睡觉吧」不在任何词表",
+      "补进强档：睡觉吧、去睡觉、睡吧、我去睡了、该睡了。叙述句（他说睡觉吧）和问句（睡觉吧？）仍被句式过滤挡住。"),
+    item("「安静一会儿」是句空话",
+      "close_minutes() 以前除了测试没有任何调用点，命中后只改了一句提示。现在真的落成 quiet_until：写进 kv、重启有效、面板能看到。"),
+    item("主动找人不受安静期约束",
+      "说了晚安还反过来主动戳人，比不回更怪。现在会跳过安静期。"),
+    item("日记里写精力数值",
+      "素材里直接喂了「精力 100」，模型照抄成「精力是满的，100」，读起来像仪表盘读数。改成感觉描述（精神是满的 / 有点乏 / 快撑不住了），并在 prompt 里禁掉数值型状态。"),
+    item("人格状态和作息提示打架",
+      "人格状态按小时切四档，18:00 之后一律说「你精神最好」，但它不读精力。23:40、精力掉到 18% 的时候，模型会同时收到「精神最好」和「已经困了」两个相反信号。现在人格那段只描述此刻在做什么，困不困交给作息提示一处说。"),
+    item("疲劳提示在报电量",
+      "原来「精力还剩 38%」「精力还剩 55%」这类句子模型只会照着复述，读起来像系统日志。现在只在精力掉到 30 以下说一句「心里在准备休息」，其余时候不吭声。"),
+    item("版本号显示过期",
+      "手机端兜底写死 1.1.1（4 处）、关于页写死「测试版」、左上角写死「1.1.1 · 测试版」。现在统一从 health.version 读。"),
+  ]);
+
+  const v130news = ul([
+    item("QQ 空间能力全打通",
+      "三个工具四个接口：read（动态 / 某人空间 / 单条全文 / 评论 / 访客）、post（发 / 删）、interact（点赞 / 评论 / 回评）。配套四条边界：删说说限 6 小时内、访客每天一次、评论 id 不外泄给模型、点赞评论只能对动态流里的条目。"),
+    item("说说自动配图",
+      "正文抽情绪词 → 表情包库检索 → 上传图床 → 带图发布。没有情绪词就不配图——配图是情绪的标点，不是装饰。任何一步失败都退回纯文本，不会因为配不上图把说说卡死。"),
+    item("空间行为模式",
+      "off 只在明确要求时动手；intent 可以有念头，带「最近发过什么」防重复和 6 小时冷却。两档都在 prompt 层注入，不动 system prompt。"),
+    item("时间来源可切",
+      "clock.source：beijing 固定 UTC+8（等价 Asia/Shanghai，但不用装 tzdata）、local 跟本机时区。作息窗口、起床点、最晚睡觉、日记按天归档、面板钟点全部走同一套钟。"),
+    item("收线改为「安静」",
+      "以前收线要么真睡、要么什么都不做，现在多了一层中间态：强档安静到下次起床点，拜拜 30 分钟，午安 75 分钟。mode 保持 awake——不做梦、不按睡眠阶段回精力、醒来也不说道别。"),
+    item("安静的解除规则",
+      "只有管理员的消息计数；群聊要 @ 或引用；默认 5 分钟内 2 条解除，到数就醒，不掷骰。"),
+    item("设置总览",
+      "15 个板块 241 项配置一页摊开。电脑端按「常改 → 少改」排序、冷门项收进折叠，改完一起保存；手机端在设置页顶部一个按钮直达。"),
+    item("设置快照",
+      "纯只读，一个可点控件都没有。用来核对现状、截图发人、排查「改了怎么没生效」。"),
+    item("日记签名可配",
+      "diary.signature，1-3 个字。留空则跟随当前人格名。"),
+    item("永久记忆单独一页",
+      "mem_level=0 那一档不衰减、不会被淡忘、检索永远排最前。混在几万条里翻找不着，所以给它单独一个页面：条数、占比、命中次数都在，每条可以降成普通或直接忘掉。"),
+    item("时间提示挂到最后",
+      "模型需要知道现在几点，但这句话每轮都在变。现在单独抽出来，追加在整条注入链的最末尾——前面的记忆、人格、场景一个字都不用重算，prompt 前缀缓存照样命中。"),
+    item("手机端补齐",
+      "空间页重写（登录态、账号、来源、写权限、动态一次看全）、新增发说说、新增更新日志页、新增永久记忆页。"),
+  ]);
+
+  /* ---------------- 1.2.1 · 2026-11-11 · 修复 ---------------- */
+  const v121 = ul([
+    item("私聊安静了，群聊还在回",
+      "state.on_message 开头有一句「未启用就直接放行」，写在状态判断之前，而入睡本身并不看长夜开关。于是「长夜如梦没开、只开了收线静默」的机器上，私聊里说完晚安它真躺下了，群聊那边却因为提前返回继续有说有笑。现在只有确实没在睡才提前返回，睡着就一律拦：不分私聊群聊、不分哪个会话。"),
+  ]);
+  const v121news = ul([
+    item("收线静默要认人了",
+      "以前任何人一句晚安都能让它躺下，群里随便一个路人就能把整只 bot 按睡过去。新增 trigger_mode：whitelist 只认白名单（管理员始终算在内，默认）、admin 只认管理员、all 谁都能触发（旧行为）。名单填 QQ 号，私聊按对方、群聊按说话人判；填群号则整群放行。名单空着不是「谁都能停」，而是退回「只有管理员能停」；判定出错一律按拒绝处理。不在范围内的人说晚安，照常回一句道别，但不跟着停。"),
+    item("静默是全局的，没有分会话这一档",
+      "试过做「只停当前会话」，但那样等于私聊躺下了群里还能聊。既然睡了就是睡了，就只有一个开关：所有会话一起停，醒来一起醒。"),
+  ]);
+
   /* ---------------- 下次更新计划 ---------------- */
   const vNext = ul([
     item("说说配图的图源",
@@ -2001,12 +2073,36 @@ function changelogHtml(key) {
   if (key === "fixes") {
     return `
       ${ver(
+        "1.2.0 → 1.3.0",
+        "空间、安静与手机端",
+        "2026-11-14",
+        "已公布版本是 1.2.0，这一版把原本准备作为 1.2.1 的内容一并收了进来。修的比加的更值得看：157 条永久记忆的等级一直是错的，「重写日记」按钮点了没反应，主动说完话它认不出是自己说的。",
+        v130,
+        true
+      )}
+      ${ver(
+        "1.2.0 → 1.3.0 · 新增",
+        "这一版加了什么",
+        "2026-11-14",
+        "空间能力全打通、说说自动配图、时间来源可切、收线改成「安静」、设置总览与快照。",
+        v130news,
+        false
+      )}
+      ${ver(
+        "1.2.0 → 1.2.1",
+        "睡觉这件事",
+        "2026-11-11",
+        "这一版只动一件事：谁能让它停下，以及停下之后是不是真的全停了。",
+        v121,
+        true
+      )}
+      ${ver(
         "1.1.1 → 1.2.0",
         "空间与星图",
         "2026-11-07",
         "这一版把 QQ 空间从「只能发纯文字」补到「能带图、能读别人的、能互动」，同时挖出两个一直在静默失效的地方：好友动态从来没读通过，头像库从来没存进过图。",
         v120,
-        true
+        false
       )}
       ${ver(
         "1.1.0 → 1.1.1",
@@ -2053,12 +2149,36 @@ function changelogHtml(key) {
   if (key === "news") {
     return `
       ${ver(
+        "1.2.0 → 1.3.0",
+        "空间、安静与手机端",
+        "2026-11-14",
+        "已公布版本是 1.2.0，这一版把原本准备作为 1.2.1 的内容一并收了进来。空间从「能发能看」补到「能互动、能配图、能自己决定发不发」；睡觉这件事从「要么真睡要么不做」多了一层「安静」；手机端补上空间发布和更新日志。",
+        v130news,
+        true
+      )}
+      ${ver(
+        "1.2.0 → 1.3.0 · 修复",
+        "十七个一直在静默失效的地方",
+        "2026-11-14",
+        "这一版修的比加的更值得看：157 条永久记忆的等级一直是错的，「重写日记」按钮点了没反应，主动说完话它认不出是自己说的。",
+        v130,
+        false
+      )}
+      ${ver(
+        "1.2.0 → 1.2.1",
+        "收线静默认人了",
+        "2026-11-11",
+        "谁能让它停下这件事，现在要过名单了；顺带把「私聊安静了、群聊还在回」修掉。",
+        v121news,
+        true
+      )}
+      ${ver(
         "1.1.1 → 1.2.0",
         "空间配图与记忆星图",
         "2026-11-07",
         "空间能带图发了，好友动态能读了，刷到的东西会记下来。另外有一个独立插件「记忆星图」上架 —— 它不随本体分发，进官方群获取。",
         v120news,
-        true
+        false
       )}
       ${ver(
         "1.1.0 → 1.1.1",
@@ -2129,6 +2249,26 @@ async function renderChangelog() {
       } catch (_) {}
     };
   });
+}
+
+/* 左上角版本号：从后端读，别写死在 HTML 里。
+   写死过一次 1.1.1，一路过到 1.3.0 才发现——这种数字只要还在源码里，就一定会有忘记改的那天。 */
+let brandVersionSynced = false;
+async function syncBrandVersion() {
+  if (brandVersionSynced) return;
+  brandVersionSynced = true;
+  try {
+    const data = await get("page/health");
+    const version = data && data.version ? String(data.version) : "";
+    if (!version) return;
+    const el = document.querySelector(".brand-ver");
+    if (el) {
+      el.textContent = version;
+      el.title = `当前版本 ${version}`;
+    }
+  } catch (_) {
+    /* 读不到就保持 HTML 里的兜底值，不影响页面 */
+  }
 }
 
 async function renderOverview() {
@@ -2942,6 +3082,62 @@ async function renderQQ() {
 }
 
 /* ------------------------------------------------------------------ 系统 */
+async function renderSettingsAll() {
+  if (isNightUI() && typeof njSettingsAll === "function") return njSettingsAll();
+  /* 非夜航皮肤的兜底：只读平铺。要改还是去各板块自己的页面。 */
+  const data = await get("page/settings");
+  settingsCache = data;
+  const fmt = (item) => {
+    const v = item.value;
+    if (String(item.type) === "bool") {
+      const on = v === true || v === 1 || String(v).toLowerCase() === "true";
+      return on ? "开" : "关";
+    }
+    if (Array.isArray(v)) return v.length ? `${v.slice(0, 3).join("、")}${v.length > 3 ? ` 等 ${v.length} 项` : ""}` : "（空）";
+    if (v === null || v === undefined || v === "") return "—";
+    const text = String(v);
+    return text.length > 30 ? text.slice(0, 30) + "…" : text;
+  };
+  view.innerHTML = (data.groups || [])
+    .map(
+      (group) => `<section class="cfg-group">
+        <div class="cfg-head"><h3>${esc(group.title || group.name)}</h3><p>${esc((group.items || []).length)} 项</p></div>
+        ${(group.items || [])
+          .map((item) => `<div class="cfg-row"><label>${esc(item.label || item.key)}</label><code>${esc(fmt(item))}</code></div>`)
+          .join("")}
+      </section>`
+    )
+    .join("");
+}
+
+
+async function renderSettingsRead() {
+  if (isNightUI() && typeof njSettingsRead === "function") return njSettingsRead();
+  /* 非夜航皮肤兜底：同样只读，不给控件 */
+  const data = await get("page/settings");
+  const fmt = (item) => {
+    const v = item.value;
+    if (String(item.type) === "bool") {
+      const on = v === true || v === 1 || String(v).toLowerCase() === "true";
+      return on ? "开" : "关";
+    }
+    if (Array.isArray(v)) return v.length ? v.join("、") : "（空）";
+    if (v === null || v === undefined || v === "") return "—";
+    return String(v);
+  };
+  view.innerHTML = (data.groups || [])
+    .map(
+      (group) => `<section class="cfg-group">
+        <div class="cfg-head"><h3>${esc(group.title || group.name)}</h3><p>${(group.items || []).length} 项 · 只读</p></div>
+        ${(group.items || [])
+          .map((item) => `<div class="cfg-row"><label>${esc(item.label || item.key)}</label><code>${esc(fmt(item))}</code></div>`)
+          .join("")}
+      </section>`
+    )
+    .join("");
+}
+
+
 async function renderSystem() {
   if (isNightUI() && typeof njSystem === "function") return njSystem();
   const settings = await loadSettings();
@@ -3090,6 +3286,10 @@ function updateCompatLine() {
     yielding.length ? `\n让位 ${yielding.join(" / ")}` : "\n全部自管"
   }`;
 }
+
+try {
+  syncBrandVersion();
+} catch (_) {}
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.onclick = () => setView(btn.dataset.view);
@@ -3460,6 +3660,24 @@ async function renderSubjectDetail(key) {
 }
 
 /* ------------------------------------------------ 等级与遗忘 */
+async function renderPermanentMemory() {
+  if (isNightUI() && typeof njPermanentMemory === "function") return njPermanentMemory();
+  /* 非夜航皮肤兜底：只读列表 */
+  const data = await get("page/memory/list", { level: 0, limit: 200 }).catch(() => ({}));
+  const items = data.items || [];
+  view.innerHTML = `
+    <h2 class="sec">永久记忆 · ${items.length} 条</h2>
+    <p class="hint">这一档不衰减、不会被淡忘，检索时永远排最前。</p>
+    ${items.length
+      ? `<div class="list">${items.map((r) => `
+          <div class="row">
+            <div>${esc(r.text || "")}</div>
+            <div class="dim mono">${esc(r.created_text || "")}</div>
+          </div>`).join("")}</div>`
+      : '<div class="empty">还没有永久记忆</div>'}
+  `;
+}
+
 async function renderMemoryLevels() {
   if (isNightUI() && typeof njMemoryLevels === "function") return njMemoryLevels();
   const [levels, curve] = await Promise.all([

@@ -23,6 +23,7 @@ from typing import Any
 
 from astrbot.api import logger
 from ..memory.perspective import remember_action
+from ..core import clock
 from ..core.memory_guard import memory_work
 from ..core.exc import exc_brief
 
@@ -58,7 +59,7 @@ def _in_spec(spec: str, now: float | None = None) -> bool:
         eh, em = [int(x) for x in right.strip().split(":")]
     except (ValueError, AttributeError):
         return True
-    moment = time.localtime(now or time.time())
+    moment = clock.struct(now or time.time())
     current = moment.tm_hour * 60 + moment.tm_min
     start = sh * 60 + sm
     end = eh * 60 + em
@@ -212,6 +213,10 @@ class Proactive:
             mode = str(getattr(state_obj, "mode", "") or "")
             if mode in ("asleep", "waking"):
                 return False, "她在睡/刚醒", 0.0
+            # 安静期也别主动找人：说了晚安还反过来戳你，比不回更怪
+            quiet_until = int(getattr(state_obj, "quiet_until", 0) or 0)
+            if quiet_until > int(time.time()):
+                return False, "她说了晚安，正在安静", 0.0
             try:
                 energy = float(getattr(state_obj, "energy", 100.0))
             except (TypeError, ValueError):
@@ -226,7 +231,7 @@ class Proactive:
             return False, "还在冷却", 0.0
 
         # ---- 额度
-        day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+        day_key = clock.fmt("%Y-%m-%d", now)
         if state.get("day") != day_key:
             state["day"] = day_key
             state["sent_today"] = 0
@@ -279,7 +284,7 @@ class Proactive:
             score -= 10.0
             signals.append("群聊-10")
 
-        hour = time.localtime(now).tm_hour
+        hour = clock.hour_of(now)
         if hour >= 1 and hour < 8:
             score *= 0.6
             signals.append("深夜×0.6")
@@ -329,7 +334,7 @@ class Proactive:
     async def compose(self, row: dict[str, Any], *, reason: str = "idle") -> str:
         session_id = str(row.get("session_id") or "")
         length = max(10, min(120, self._cfg_int("length", 40)))
-        scene_bits = [f"现在 {time.strftime('%H:%M', time.localtime())}"]
+        scene_bits = [f"现在 {clock.fmt('%H:%M', )}"]
         if reason == "after_wake":
             scene_bits.append("你刚睡醒，想先跟人说一句刚看到的消息")
         elif reason == "unanswered":
@@ -503,7 +508,7 @@ class Proactive:
         kind = str(row.get("session_kind") or "private")
         await remember_action(
             self.plugin, "proactive", action_id,
-            f"我在{time.strftime('%Y-%m-%d %H:%M')}主动向{'群' if kind == 'group' else '联系人'}"
+            f"我在{clock.fmt('%Y-%m-%d %H:%M')}主动向{'群' if kind == 'group' else '联系人'}"
             f"{session_id}发了消息：{' '.join(sent)}",
             session_id=session_id, session_kind=kind,
             platform=self._umo_of(row).split(":", 1)[0] or "qq",
@@ -511,9 +516,25 @@ class Proactive:
         )
 
     async def _archive(self, session_id: str, umo: str, text: str, kind: str) -> None:
-        """主动消息也要进归档，否则下一轮上下文里她不知道自己刚说过话。"""
+        """主动消息也要进归档，否则下一轮上下文里她不知道自己刚说过话。
+
+        名字用实际显示名（跟随 AstrBot 人格），不再读配置里那个静态的旧名。
+        但**角色识别在读取侧靠 `sender_id='bot'`**，名字只负责好看——
+        只靠名字的话，换个名就又会错位。
+        """
         try:
             platform = umo.split(":", 1)[0] if ":" in umo else ""
+            name = ""
+            try:
+                persona_svc = getattr(self.plugin, "persona", None)
+                if persona_svc is not None:
+                    name = str(await persona_svc.display_name() or "")
+            except Exception:
+                name = ""
+            # display_name() 在拿不到 AstrBot 人格时会返回占位串
+            # （"AstrBot 当前人格"），那不是名字，别写进归档
+            if not name or name in ("AstrBot 当前人格", "当前人格"):
+                name = self.config.persona_name
             await self.store.execute(
                 "INSERT INTO msg_archive(msg_id, session_id, session_kind, sender_id, sender_name, ts, text, "
                 "blocks_json, expanded, umo, platform) VALUES(?,?,?,?,?,?,?,?,0,?,?)",
@@ -522,7 +543,7 @@ class Proactive:
                     session_id,
                     kind,
                     "bot",
-                    self.config.persona_name,
+                    name,
                     int(time.time()),
                     text,
                     "[]",
@@ -729,7 +750,7 @@ class Proactive:
     async def state_view(self) -> dict[str, Any]:
         await self.load()
         now = time.time()
-        day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+        day_key = clock.fmt("%Y-%m-%d", now)
         self._roll_day(day_key, now)
         return {
             "enabled": self.enabled(),
@@ -756,7 +777,7 @@ class Proactive:
         for row in rows:
             item = dict(row)
             at = int(item.get("at") or 0)
-            item["at_text"] = time.strftime("%m-%d %H:%M", time.localtime(at)) if at else ""
+            item["at_text"] = clock.fmt("%m-%d %H:%M", at) if at else ""
             item["replied"] = bool(int(item.get("replied_at") or 0))
             out.append(item)
         return out

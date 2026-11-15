@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from ..core import clock
+
 import argparse
 import json
 import shutil
@@ -51,7 +53,7 @@ def existing() -> list[Path]:
 
 def snapshot(note: str = "") -> Path:
     BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
+    stamp = clock.fmt("%Y%m%d_%H%M%S")
     dest = BACKUP_ROOT / f"astrbot_plugin_congling_{stamp}"
     counter = 1
     while dest.exists():
@@ -62,7 +64,7 @@ def snapshot(note: str = "") -> Path:
 
     meta = {
         "created_at": int(time.time()),
-        "created_text": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "created_text": clock.fmt("%Y-%m-%d %H:%M:%S"),
         "note": note,
         "source": str(PLUGIN_SRC),
     }

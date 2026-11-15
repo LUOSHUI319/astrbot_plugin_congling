@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from ..core import clock
+
 import html as html_lib
 import json
 import re
@@ -42,6 +44,12 @@ LIKE_URL = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/
 USER_FEEDS_URL = (
     "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
 )
+# 单条说说详情（含评论列表）。注意参数是 tid=fid，不是 topic_id。
+DETAIL_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6"
+# 删说说。topicId 不传现成字段，要按 {登录uin}_{fid}__1 拼。
+DELETE_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_delete_v6"
+# 最近访客
+VISITOR_URL = "https://h5.qzone.qq.com/proxy/domain/g.qzone.qq.com/cgi-bin/friendshow/cgi_get_visitor_more"
 
 COOKIE_SECRET_KEYS = ("p_skey", "skey", "pskey", "skey2")
 COOKIE_KEY_ALIASES = {
@@ -459,7 +467,7 @@ class QzoneAuth:
             "source": self.source,
             "refreshed_at": self.refreshed_at,
             "refreshed_text": (
-                time.strftime("%m-%d %H:%M", time.localtime(self.refreshed_at))
+                clock.fmt("%m-%d %H:%M", self.refreshed_at)
                 if self.refreshed_at
                 else ""
             ),
@@ -606,7 +614,7 @@ class QzoneClient:
                     "content": content[:800],
                     "created_at": created,
                     "created_text": (
-                        time.strftime("%m-%d %H:%M", time.localtime(created)) if created else ""
+                        clock.fmt("%m-%d %H:%M", created) if created else ""
                     ),
                     "comment_count": int(row.get("cmtnum") or 0),
                     "like_count": int(row.get("likenum") or 0),
@@ -759,7 +767,7 @@ class QzoneClient:
                     "content": content[:800],
                     "created_at": created,
                     "created_text": (
-                        time.strftime("%m-%d %H:%M", time.localtime(created)) if created else ""
+                        clock.fmt("%m-%d %H:%M", created) if created else ""
                     ),
                     "comment_count": int(row.get("commentcnt") or row.get("cmtnum") or 0),
                     "like_count": int(
@@ -1036,3 +1044,280 @@ class QzoneClient:
             raise QzoneRequestError(str(payload.get("msg") or "评论失败"))
         logger.info(f"[congling] 空间评论已发（{topic_id}）：{text[:30]}")
         return {"ok": True, "topic_id": topic_id}
+
+    # ----------------------------------------------------------------- 详情 / 删 / 回评 / 访客
+    async def post_detail(
+        self, host_uin: int, fid: str, *, num: int = 20, pos: int = 0
+    ) -> dict[str, Any]:
+        """读一条说说的详情，重点是评论列表。
+
+        参数是 `tid=fid`，**不是** topic_id —— 这两个在空间里不是一回事，
+        topic_id 形如 `3404044656_xxxx__1`，fid 是 `xxxx` 那一段。
+        """
+        if not fid:
+            raise QzoneRequestError("缺 fid")
+        if not self.auth.usable:
+            raise QzoneAuthError("还没有可用的空间登录态")
+        host = int(host_uin or self.auth.uin or 0)
+        referer = f"https://user.qzone.qq.com/{host}/mood/{fid}"
+        payload = await self._get_json(
+            DETAIL_URL,
+            {
+                "uin": host,
+                "tid": fid,
+                "num": max(1, min(int(num or 20), 50)),
+                "pos": max(0, int(pos or 0)),
+                "not_trunc_con": 1,
+                "format": "json",
+                # 必须带 g_tk：这个接口不带就直接 403（实测），
+                # 而点赞、访客那几个也没一个是免 tk 的。
+                "g_tk": self.auth.gtk,
+            },
+            referer,
+        )
+        comments = parse_comment_list(payload)
+        # 正文在 conlist（{con, type} 的数组）里，不是 content。
+        content = _detail_content(payload)
+        return {
+            "ok": True,
+            "fid": fid,
+            "host_uin": host,
+            "content": strip_html(str(content)).strip(),
+            "comments": comments,
+            "comment_count": len(comments),
+        }
+
+    async def delete_post(
+        self, fid: str, *, appid: int = 311, created_at: int = 0
+    ) -> dict[str, Any]:
+        """删自己的一条说说。
+
+        `topicId` 要按 `{登录uin}_{fid}__1` 拼出来，接口不认单独的 fid。
+        只能删自己的：uin 固定用登录账号。
+        """
+        if not fid:
+            raise QzoneRequestError("缺 fid")
+        if not self.auth.usable:
+            raise QzoneAuthError("还没有可用的空间登录态")
+        uin = int(self.auth.uin or 0)
+        referer = f"https://user.qzone.qq.com/{uin}/mood/{fid}"
+        payload = await self._post_form(
+            DELETE_URL,
+            {"g_tk": self.auth.gtk},
+            {
+                "uin": str(uin),
+                "topicId": f"{uin}_{fid}__1",
+                "feedsType": 0,
+                "feedsFlag": 0,
+                "feedsKey": fid,
+                "feedsAppid": int(appid or 311),
+                "feedsTime": int(created_at or time.time()),
+                "fupdate": 1,
+                "ref": "feeds",
+                "format": "json",
+                "qzreferrer": f"https://user.qzone.qq.com/{uin}",
+            },
+            referer,
+        )
+        if payload.get("ret") not in (0, "0", None):
+            raise QzoneRequestError(str(payload.get("msg") or "删除失败"))
+        logger.info(f"[congling] 空间说说已删（{fid}）")
+        return {"ok": True, "fid": fid}
+
+    async def reply_comment(
+        self,
+        host_uin: int,
+        fid: str,
+        comment_id: str,
+        comment_uin: int,
+        content: str,
+        *,
+        appid: int = 311,
+    ) -> dict[str, Any]:
+        """回复某条评论。
+
+        跟 `comment()` 走同一个 cgi（emotion_cgi_re_feeds），区别只是多带
+        `commentId` + `commentUin`——带了这两样才是"回复某人"，不带就是新开一条。
+        """
+        text = (content or "").strip()
+        if not text:
+            raise QzoneRequestError("回复内容是空的")
+        if len(text) > 200:
+            raise QzoneRequestError("回复最多 200 字")
+        if not fid or not comment_id:
+            raise QzoneRequestError("缺 fid 或 comment_id")
+        if not self.auth.usable:
+            raise QzoneAuthError("还没有可用的空间登录态")
+
+        uin = int(self.auth.uin or 0)
+        host = int(host_uin or uin)
+        referer = f"https://user.qzone.qq.com/{host}/mood/{fid}"
+        payload = await self._post_form(
+            COMMENT_URL,
+            {"g_tk": self.auth.gtk},
+            {
+                "topicId": f"{host}_{fid}__1",
+                "uin": str(uin),
+                "hostUin": str(host),
+                "feedsType": 100,
+                "inCharset": "utf-8",
+                "outCharset": "utf-8",
+                "plat": "qzone",
+                "source": "ic",
+                "platformid": 50,
+                "format": "json",
+                "ref": "feeds",
+                "content": text,
+                "commentId": str(comment_id),
+                "commentUin": str(comment_uin or 0),
+                "private": 0,
+                "paramstr": "1",
+                "isSignIn": "0",
+                "appid": int(appid or 311),
+                "richval": "",
+                "richtype": "",
+                "qzreferrer": referer,
+            },
+            referer,
+        )
+        if payload.get("ret") not in (0, "0", None):
+            raise QzoneRequestError(str(payload.get("msg") or "回复失败"))
+        logger.info(f"[congling] 空间回评已发（{fid} → {comment_id}）：{text[:30]}")
+        return {"ok": True, "fid": fid, "comment_id": str(comment_id)}
+
+    async def visitors(self, *, page: int = 1, count: int = 20) -> dict[str, Any]:
+        """最近访客。
+
+        这是**别人看得见**的行为：刷了谁的动态，对方在「最近访客」里能看到。
+        调用方自己把关频率。
+        """
+        if not self.auth.usable:
+            raise QzoneAuthError("还没有可用的空间登录态")
+        uin = int(self.auth.uin or 0)
+        referer = f"https://user.qzone.qq.com/{uin}"
+        payload = await self._get_json(
+            VISITOR_URL,
+            {
+                "uin": uin,
+                "mask": 7,
+                "mod": 2,
+                "fupdate": 1,
+                "page": max(1, int(page or 1)),
+                "count": max(1, min(int(count or 20), 50)),
+                "format": "json",
+                # 跟 detail 一样，不带 g_tk 会被 403 挡掉
+                "g_tk": self.auth.gtk,
+            },
+            referer,
+        )
+        return {"ok": True, "items": parse_visitors(payload)}
+
+
+def _detail_content(payload: dict[str, Any]) -> str:
+    """详情里的正文。
+
+    新版返回放在 `conlist`（`[{"con": "…", "type": "2"}]`）里，不是 `content`。
+    纯图说说 conlist 是空的，这时返回空串由调用方决定怎么描述。
+    """
+    con = payload.get("conlist")
+    if isinstance(con, list):
+        parts = [str(item.get("con") or "") for item in con if isinstance(item, dict)]
+        text = "".join(parts).strip()
+        if text:
+            return text
+    for key in ("content", "con", "summary"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def parse_comment_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """从详情返回里挖出评论列表。
+
+    字段位置不固定：可能挂在 `comment.commentlist`、`commentlist`、`data.commentlist`。
+    评论本体字段名也乱（commentid / commentId / tid / id 都有），所以逐个试。
+    回复嵌套在 replyList / replies / list_3 里，一并摊平。
+    """
+    candidates: list[Any] = []
+    block = payload.get("comment")
+    if isinstance(block, dict):
+        candidates.extend([block.get("comments"), block.get("commentlist"), block.get("list")])
+    candidates.extend([payload.get("comments"), payload.get("commentlist"), payload.get("list_3")])
+    data = payload.get("data")
+    if isinstance(data, dict):
+        candidates.extend([data.get("comments"), data.get("commentlist")])
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+
+    def take(raw: Any, parent: str = "") -> None:
+        if not isinstance(raw, dict):
+            return
+        user = raw.get("user") or raw.get("userinfo") or raw.get("commenter") or {}
+        if not isinstance(user, dict):
+            user = {}
+        cid = str(
+            raw.get("commentid") or raw.get("commentId") or raw.get("tid") or raw.get("id") or ""
+        )
+        uin = int(
+            raw.get("uin") or raw.get("commentUin") or user.get("uin") or user.get("user_id") or 0
+        )
+        nickname = str(
+            user.get("nickname") or user.get("name") or raw.get("nickname") or raw.get("name") or ""
+        )
+        content = str(
+            raw.get("content") or raw.get("commentContent") or raw.get("htmlContent") or raw.get("text") or ""
+        )
+        content = strip_html(content).strip()
+        created = int(raw.get("date") or raw.get("created_at") or raw.get("pubtime") or raw.get("abstime") or 0)
+        key = (cid, uin, content)
+        if cid and key not in seen:
+            seen.add(key)
+            out.append(
+                {
+                    "comment_id": cid,
+                    "uin": uin,
+                    "nickname": nickname,
+                    "content": content,
+                    "created_at": created,
+                    "parent_id": parent,
+                }
+            )
+        for name in ("replyList", "replylist", "replies", "list_3", "children"):
+            nested = raw.get(name)
+            if isinstance(nested, list):
+                for item in nested:
+                    take(item, parent=cid or parent)
+
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            for item in candidate:
+                take(item)
+    return out
+
+
+def parse_visitors(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """访客列表。字段名同样不固定，尽量认，认不出就跳过。"""
+    raw = (
+        payload.get("items")
+        or payload.get("visitors")
+        or payload.get("data")
+        or payload.get("list")
+        or []
+    )
+    if isinstance(raw, dict):
+        raw = raw.get("items") or raw.get("list") or raw.get("visitors") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        uin = int(item.get("uin") or item.get("frienduin") or item.get("userid") or 0)
+        name = str(item.get("name") or item.get("nickname") or item.get("uinname") or "")
+        stamp = int(item.get("time") or item.get("visit_time") or item.get("date") or 0)
+        if not uin and not name:
+            continue
+        out.append({"uin": uin, "nickname": name, "at": stamp})
+    return out

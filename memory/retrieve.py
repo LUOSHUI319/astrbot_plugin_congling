@@ -20,7 +20,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.contracts import MemoryHit
+from ..core.contracts import MemoryHit, level_of
 from .atom import AtomStore
 from .refs import actor_ref as make_actor_ref, session_ref as make_session_ref, parse_ref
 from .subject import SubjectBook
@@ -116,7 +116,7 @@ class Retriever:
         if is_identity_question(query):
             # about_ref is mem_atom.subject_ref, not the evidence speaker (actor_ref).
             personal = [r for r in rows if r.get("_personal") and int(r["id"]) not in excluded]
-            personal.sort(key=lambda r: (6 if r.get("mem_level") == 0 else int(r.get("mem_level") or 3),
+            personal.sort(key=lambda r: (6 if level_of(r) == 0 else level_of(r),
                                           float(r.get("importance") or 0), int(r["id"])), reverse=True)
             return [AtomStore.to_hit(r, float(r.get("importance") or 0.5)) for r in personal[:top_k]]
 

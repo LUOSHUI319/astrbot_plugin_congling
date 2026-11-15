@@ -153,8 +153,10 @@ function njPersonaName(name, id) {
   const el = document.getElementById("nj-persona-name");
   if (el && name) el.textContent = name;
   if (name) {
-    window.__njPersonaTag = `${name} · ${id || "ling"}`;
-    if (personaTag) personaTag.textContent = window.__njPersonaTag;
+    /* 只用名字，不拼内部 id：这个全局同时被日记签名取用，
+       拼成「洛水 · ling」会直接印在日记页脚上。 */
+    window.__njPersonaTag = name;
+    if (personaTag) personaTag.textContent = `${name} · ${id || "ling"}`;
   }
 }
 
@@ -592,7 +594,7 @@ async function njPersona() {
   const personas = astr.items || [];
   const selected = data.astrbot_persona_id || "";
   const style = data.style || {};
-  njPersonaName(data.name || "绫", data.persona_id || "ling");
+  njPersonaName(data.name || "", data.persona_id || "");
 
   const options = ['<option value="">（AstrBot 默认人格）</option>']
     .concat(
@@ -1643,6 +1645,85 @@ async function njM3Sessions() {
 }
 
 /* ------------------------------------------------------------ 等级与遗忘 */
+/* 永久记忆：只看 mem_level = 0 这一档。
+   它和普通记忆不是一回事——不衰减、不会被淡忘、检索里永远排最前面，
+   混在几万条列表里翻根本看不见。所以单独给一页。 */
+async function njPermanentMemory() {
+  njShell();
+  njTitle("04");
+  const data = await get("page/memory/list", { level: 0, limit: 200 }).catch(() => ({}));
+  const total = Number(data.total) || 0;
+  const items = data.items || [];
+
+  const cards = items
+    .map((row) => {
+      const kw = (row.keywords || []).slice(0, 4).map((k) => `<span class="nj-chip">${esc(k)}</span>`).join("");
+      return `<article class="nj-card" data-atom="${esc(String(row.id))}" style="margin-bottom:12px">
+        <div class="nj-head" style="margin:0 0 8px">
+          <h2 style="font-size:15px;line-height:1.7">${esc(row.text || "")}</h2>
+          <span>${esc(row.created_text || "")}${row.hit_count ? " · 命中 " + esc(String(row.hit_count)) + " 次" : ""}</span>
+        </div>
+        <div class="nj-toolbar" style="margin:0;gap:6px;flex-wrap:wrap">
+          ${kw}
+          <span class="nj-chip on">永久</span>
+          <button class="nj-btn sm" data-unlock="${esc(String(row.id))}">降成普通</button>
+          <button class="nj-btn sm" data-forget="${esc(String(row.id))}">忘掉</button>
+        </div>
+      </article>`;
+    })
+    .join("");
+
+  view.innerHTML = njPage(
+    njHeroBar({
+      eyebrow: "04 / PERMANENT",
+      art: "memory",
+      title: "永久记忆",
+      note: "这一档不衰减、不会被淡忘，检索时永远排最前。只该放「绝不能忘」的事。",
+      stats: [
+        { label: "永久记忆", value: items.length, unit: "条" },
+        { label: "记忆总数", value: total, unit: "条" },
+        { label: "占比", value: total ? ((items.length / total) * 100).toFixed(1) : "0", unit: "%" },
+      ],
+    }),
+    `<div class="nj-head" style="margin-top:22px"><h2>全部永久记忆</h2>
+      <span>${items.length ? "按写入时间倒序" : "还没有"}</span></div>
+     ${cards || '<div class="nj-empty">还没有永久记忆。想留住某条，去记忆列表里把它改成 0 级。</div>'}`
+  );
+
+  view.querySelectorAll("[data-unlock]").forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.unlock);
+      if (!id) return;
+      btn.disabled = true;
+      try {
+        await post("page/memory/level/set", { atom_id: id, level: 3, reason: "从永久记忆页降级" });
+        njToast("已降成「平常」", "ok");
+        njPermanentMemory();
+      } catch (err) {
+        btn.disabled = false;
+        njToast(err.message || "没改成功", "err");
+      }
+    };
+  });
+
+  view.querySelectorAll("[data-forget]").forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.forget);
+      if (!id) return;
+      if (!confirm("确定忘掉这条？忘掉之后不再参与检索。")) return;
+      btn.disabled = true;
+      try {
+        await post("page/memory/delete", { id, status: "deleted" });
+        njToast("已忘掉", "ok");
+        njPermanentMemory();
+      } catch (err) {
+        btn.disabled = false;
+        njToast(err.message || "没删掉", "err");
+      }
+    };
+  });
+}
+
 async function njMemoryLevels() {
   njShell();
   njTitle("04");
@@ -3337,6 +3418,113 @@ async function njAvatarPage() {
 }
 
 /* ------------------------------------------------------------ 系统 */
+/* 设置总览：一页把所有配置板块摊开。
+   每块用 configCard 渲染（自带「高级设置」折叠），能直接改、一起保存。
+   顺序按从「最常动」到「最少动」排，不是 schema 里的定义顺序。 */
+async function njSettingsAll() {
+  njShell();
+  njTitle("10");
+  const settings = await loadSettings();
+  const order = ["basic", "persona", "humanize", "guard", "perception", "memory",
+                 "capability", "qq_extra", "compat", "night", "diary", "proactive", "close", "clock", "debug"];
+  const groups = order
+    .map((name) => pickGroup(settings, name))
+    .filter(Boolean)
+    .map((group) => configCard(group, { title: group.title || group.name, desc: group.desc || "" }))
+    .join("");
+
+  view.innerHTML = `
+    ${njHeroBar({
+      eyebrow: "10 / SETTINGS",
+      variant: "compact",
+      title: "设置总览",
+      note: "所有板块的配置都在这一页。常改的露在外面，冷门的收进「高级设置」。",
+      art: "system",
+      stats: [
+        { label: "板块", value: (settings.groups || []).length, unit: "个" },
+        { label: "配置项", value: (settings.groups || []).reduce((n, g) => n + (g.items || []).length, 0), unit: "项" },
+      ],
+    })}
+    ${groups}
+    ${pageActions("保存全部设置")}
+  `;
+  njBindSettings(view);
+}
+
+
+/* 设置快照：纯只读，用来「核对现在到底配了什么」。
+   和「设置总览」的区别——那一页能改、能保存，这一页只显示，不给任何入口点歪。
+   适合截图发人、排查「我明明改过怎么没生效」。 */
+async function njSettingsRead() {
+  njShell();
+  njTitle("11");
+  const settings = await loadSettings();
+  const groups = settings.groups || [];
+  const order = ["basic", "persona", "humanize", "guard", "perception", "memory",
+                 "capability", "qq_extra", "compat", "night", "diary", "proactive", "close", "clock", "debug"];
+  const sorted = order
+    .map((name) => groups.find((group) => group.name === name))
+    .filter(Boolean)
+    .concat(groups.filter((group) => order.indexOf(group.name) < 0));
+
+  const one = (item) => {
+    const value = njReadValue(item);
+    const label = esc(item.label || item.key || "");
+    const isLong = String(value).length > 40;
+    if (isLong) {
+      return `<div class="nj-cell wide"><div class="k">${label}</div>
+        <div class="v" style="white-space:pre-wrap;line-height:1.6">${esc(value)}</div></div>`;
+    }
+    return `<div class="nj-cell"><div class="k">${label}</div><div class="v">${esc(value)}</div></div>`;
+  };
+
+  const blocks = sorted
+    .map((group) => {
+      const items = group.items || [];
+      const title = group.title && group.title !== group.name ? group.title : (group.name || "");
+      return `<div class="nj-head" style="margin-top:22px"><h2>${esc(title)}</h2>
+          <span>${items.length} 项${group.desc ? " · " + esc(group.desc).slice(0, 30) : ""}</span></div>
+        <div class="nj-cells">${items.map(one).join("") || '<div class="nj-cell"><div class="v">（这组没有配置项）</div></div>'}</div>`;
+    })
+    .join("");
+
+  const total = groups.reduce((n, group) => n + (group.items || []).length, 0);
+  view.innerHTML = `
+    ${njHeroBar({
+      eyebrow: "11 / SNAPSHOT",
+      variant: "compact",
+      title: "设置快照",
+      note: "只读。这一页不提供任何修改入口，用来核对当前值、排查「改了没生效」。",
+      art: "system",
+      stats: [
+        { label: "板块", value: groups.length, unit: "个" },
+        { label: "配置项", value: total, unit: "项" },
+        { label: "性质", value: "只读" },
+      ],
+    })}
+    ${blocks}
+  `;
+}
+
+/* 只读值的显示规则：开关说人话，列表折行，长文本不截断（快照就是给人核对用的） */
+function njReadValue(item) {
+  const value = item.value;
+  const type = String(item.type || "string");
+  if (type === "bool") {
+    const on = value === true || value === 1 || String(value).toLowerCase() === "true";
+    return on ? "开" : "关";
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) return "（空）";
+    return value.join("、");
+  }
+  if (value === null || value === undefined || value === "") return "—";
+  const text = String(value);
+  if (type === "float" && /^\d+(\.\d+)?$/.test(text)) return text;
+  return text;
+}
+
+
 async function njSystem() {
   njShell();
   njTitle("09");
@@ -3453,14 +3641,27 @@ try {
   "use strict";
   let rootEl = null;
   let bridge = { get: null, post: null };
-  const DIARY_SIGNATURE = "绫";
+  /* 签名跟着当前人格走。原来写死「绫」，换人格后每篇日记底下都还署旧名。
+     取不到就退成中性的「我」——宁可不署名，也别署一个不是她的名字。 */
+  /* 页脚署名：配置里写了就用配置（1-3 字），没写才跟随当前人格名。
+     以前写死过一个旧名字，换人格后每篇日记底下都还署着它。 */
+  function diarySignature() {
+    const picked = String(state.signature || "").trim();
+    if (picked) return picked.slice(0, 3);
+    const live = String(window.__njPersonaTag || "").trim();
+    return live || "我";
+  }
   function countCharacters(text) { return Array.from(String(text == null ? "" : text)).length; }
   const LIST_LIMIT = 60;
   const $ = (id) => (rootEl ? (rootEl.id === id ? rootEl : rootEl.querySelector("#" + id)) : null);
   const API = {
     async list() {
       const resp = await bridge.get("diary/list", { limit: LIST_LIMIT });
-      return { items: (resp && resp.items) || [], enabled: Boolean(!resp || resp.enabled !== false) };
+      return {
+        items: (resp && resp.items) || [],
+        enabled: Boolean(!resp || resp.enabled !== false),
+        signature: String((resp && resp.signature) || ""),
+      };
     },
     rowOf(dayKey) {
       return state.items.find((item) => item.day_key === dayKey) || null;
@@ -3475,7 +3676,7 @@ try {
       if (!row || !row.id) return Promise.resolve(false);
       return bridge.post("diary/delete", { id: Number(row.id) });
     },
-    rewriteDiary(dayKey) { return bridge.post("diary/generate", { day: dayKey }); },
+    rewriteDiary(dayKey) { return bridge.post("diary/generate", { day: dayKey, force: true }); },
     writeDiary() { return bridge.post("diary/generate", {}); },
   };
 
@@ -3557,6 +3758,7 @@ function bindDom() {
 const state = {
   items: [], spreads: [], mobilePages: [], firstSpread: new Map(), firstMobile: new Map(),
   index: 0, mobile: false, isFlipping: false, loading: true, enabled: true,
+  signature: "",
   error: null, activeTurn: null, drag: null, pendingLayout: false,
   debug: false,
 };
@@ -3701,7 +3903,7 @@ function createPage(model, side = "right", measuring = false) {
   }
   const footer = makeElement("footer","entry-footer");
   const folio = measuring ? "第 00 / 00 页" : `第 ${model.folio} / ${state.mobile ? state.mobilePages.length : state.spreads.length * 2} 页`;
-  footer.append(makeElement("span","page-number",folio),makeElement("span","diary-signature",DIARY_SIGNATURE)); page.append(footer);
+  footer.append(makeElement("span","page-number",folio),makeElement("span","diary-signature",diarySignature())); page.append(footer);
   return page;
 }
 
@@ -4161,6 +4363,7 @@ async function loadDiaries() {
     const firstLoad = !state.items.length;
     const result=await API.list();
     state.items=normalizeEntries(result.items); state.enabled=result.enabled;
+    state.signature=String(result.signature||"");
     await document.fonts.ready;
     state.loading=false; renderDirectory();
     /* 头一次打开直接落到最近写的那一篇（日子最大那篇），不用从最早的一页翻起 */

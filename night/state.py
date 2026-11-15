@@ -26,6 +26,7 @@ from ..core.contracts import (
     PerceivedMessage,
     WakeAttempt,
 )
+from ..core import clock
 from ..core.transient_hints import TransientHints
 from . import energy as energy_mod
 from . import stages as stages_mod
@@ -388,10 +389,15 @@ class NightService:
             wake      唤醒掷骰结果（睡眠期间才有）
             hint      给调用方的说明
         """
-        if not self.enabled:
-            return {"block": False, "hint": "未启用"}
-
         await self.tick()
+
+        # 长夜没开、只开了「收线静默」的时候，人也是可能正躺在睡眠里的：
+        # _do_sleep 不认 night.enabled，close 一句话照样能把状态写成 asleep。
+        # 原来这里一句 `if not self.enabled: return block=False` 就把所有消息放了
+        # 过去 —— 结果私聊里说晚安它安静了，群聊那边照样有说有笑。
+        # 现在只有「确实没在睡」才提前返回；睡着就一律拦，不分私聊群聊、不分哪个会话。
+        if not self.enabled and not self.state.is_asleep() and self.state.mode != NIGHT_WAKING:
+            return {"block": False, "hint": "未启用"}
 
         if not self.state.is_asleep():
             # 醒着：只扣精力、累计疲劳期轮次
@@ -471,6 +477,9 @@ class NightService:
         now = time.time()
         self.wake_hints.clear()
         self._woke_from = None
+        # 真睡下去就把安静清掉：安静是「不睡但闭嘴」，睡着是另一回事
+        self.state.quiet_until = 0
+        self.state.quiet_word = ""
         self.state.mode = NIGHT_ASLEEP
         self.state.sleep_at = int(now)
         self.state.wake_at = energy_mod.next_wake_time(self.config, now, kind=kind)
@@ -498,7 +507,7 @@ class NightService:
             await self.on_sleep()
         logger.info(
             f"[congling] 入睡：原因={reason} "
-            f"预计醒来={time.strftime('%H:%M', time.localtime(self.state.wake_at))}"
+            f"预计醒来={clock.fmt('%H:%M', self.state.wake_at)}"
         )
 
     async def _do_wake(self, *, reason: str = "natural") -> None:
@@ -559,6 +568,8 @@ class NightService:
         self.waker.reset_all()
 
         self.state.mode = NIGHT_AWAKE
+        self.state.quiet_until = 0
+        self.state.quiet_word = ""
         self.state.enter_waking_at = 0
         self.state.pending_crawl = []
         self.state.sleep_kind = ""
@@ -631,6 +642,63 @@ class NightService:
         except Exception as exc:
             logger.warning(f"[congling] 记录睡眠区间失败: {exc_brief(exc)}")
 
+    # ================================================================ 安静（不睡觉）
+    def quiet_until(self) -> int:
+        return int(getattr(self.state, "quiet_until", 0) or 0)
+
+    def is_quiet(self, now: float | None = None) -> bool:
+        stamp = int(now if now is not None else time.time())
+        return self.quiet_until() > stamp
+
+    def quiet_clock(self) -> str:
+        until = self.quiet_until()
+        return clock.fmt("%H:%M", until) if until > 0 else ""
+
+    def quiet_left_minutes(self, now: float | None = None) -> int:
+        stamp = int(now if now is not None else time.time())
+        return max(0, round((self.quiet_until() - stamp) / 60))
+
+    async def start_quiet(
+        self, *, minutes: int = 0, kind: str = "night", word: str = ""
+    ) -> int:
+        """进入安静期，返回到期时间戳。
+
+        **不会调用 `_do_sleep`。** 安静只是「这段时间不接话」，`mode` 保持 awake：
+        不做梦、不按睡眠阶段回精力、醒来也不说道别。这条边界是刻意的——
+        把「安静」和「睡着」混成一个状态，会连带触发一堆睡着才该有的事。
+
+        minutes=0 表示安静到下一次起床点（强档词用这个）。
+        """
+        now = int(time.time())
+        if minutes and minutes > 0:
+            until = now + int(minutes) * 60
+        else:
+            try:
+                until = int(
+                    energy_mod.next_wake_time(self.config, now, kind=kind or "night")
+                )
+            except Exception:
+                until = now + 8 * 3600
+        self.state.quiet_until = until
+        self.state.quiet_word = str(word or "")[:20]
+        await self.save()
+        logger.info(
+            f"[congling] 进入安静：到 {clock.fmt('%m-%d %H:%M', until)}（{word or '收线'}，不入睡）"
+        )
+        return until
+
+    async def clear_quiet(self, *, reason: str = "") -> bool:
+        if not self.quiet_until():
+            return False
+        until = self.quiet_until()
+        self.state.quiet_until = 0
+        self.state.quiet_word = ""
+        await self.save()
+        logger.info(
+            f"[congling] 安静解除：{reason or '手动'}（原定 {clock.fmt('%H:%M', until)}）"
+        )
+        return True
+
     async def sleep_now(
         self,
         *,
@@ -668,6 +736,8 @@ class NightService:
         """
         if self.state.mode == NIGHT_WAKING:
             self.state.mode = NIGHT_AWAKE
+        self.state.quiet_until = 0
+        self.state.quiet_word = ""
         self.state.enter_waking_at = 0
         self.state.pending_crawl = []
         self.state.wake_at = 0
@@ -732,6 +802,12 @@ class NightService:
             "sleep_kind": state.sleep_kind or getattr(self, "_last_sleep_kind", "night"),
             "pending_crawl": len(state.pending_crawl or []),
             "crawl_sessions": list(state.pending_crawl or []),
+            # 安静期：醒着但不接话。和 sleeping 分开展示，面板上要能一眼看出区别。
+            "quiet": self.is_quiet(now),
+            "quiet_until": self.quiet_until(),
+            "quiet_clock": self.quiet_clock(),
+            "quiet_word": str(getattr(state, "quiet_word", "") or ""),
+            "quiet_left_minutes": self.quiet_left_minutes(now),
             # 醒来回满期：面板显示「恢复中 62/100（+6.5/分钟）」
             "wake_recovering": self._recovering(now),
             "wake_recover_rate": max(0.0, self.config.float("night.wake_recover_per_minute", 6.5)),
@@ -744,18 +820,18 @@ class NightService:
         # 醒时文案：午睡不能报「07:00-09:00 醒」，那是夜里的起床点
         sleep_kind = data["sleep_kind"] if data["sleep_kind"] in ("night", "noon") else "night"
         wake_ts = int(state.wake_at or 0)
-        clock = time.strftime("%H:%M", time.localtime(wake_ts)) if wake_ts else ""
+        wake_clock = clock.fmt("%H:%M", wake_ts) if wake_ts else ""
         day_label = self._day_label(wake_ts, now) if wake_ts else ""
         if sleep_kind == "noon":
             data["wake_kind"] = "noon"
             data["wake_window"] = ""
-            data["wake_at_clock"] = clock
+            data["wake_at_clock"] = wake_clock
             data["wake_day_label"] = day_label
-            data["wake_label"] = clock
+            data["wake_label"] = wake_clock
         else:
             window = energy_mod.wake_window_text(self.config, int(now))
             data["wake_kind"] = "night"
-            data["wake_at_clock"] = clock
+            data["wake_at_clock"] = wake_clock
             data["wake_day_label"] = day_label
             data["wake_label"] = window
         if state.is_asleep():
@@ -791,10 +867,8 @@ class NightService:
         """今天 / 明天 / 后天 / 具体日期，给状态栏用。"""
         if ts <= 0:
             return ""
-        base = time.localtime(now if now is not None else time.time())
-        target = time.localtime(ts)
-        today = time.mktime((base.tm_year, base.tm_mon, base.tm_mday, 0, 0, 0, 0, 0, -1))
-        that = time.mktime((target.tm_year, target.tm_mon, target.tm_mday, 0, 0, 0, 0, 0, -1))
+        today = clock.day_start(now)
+        that = clock.day_start(ts)
         delta = int(round((that - today) / 86400))
         if delta == 0:
             return "今天"
@@ -802,7 +876,7 @@ class NightService:
             return "明天"
         if delta == 2:
             return "后天"
-        return time.strftime("%m-%d", target)
+        return clock.fmt("%m-%d", ts)
 
     def status_text(self) -> str:
         data = self.snapshot()

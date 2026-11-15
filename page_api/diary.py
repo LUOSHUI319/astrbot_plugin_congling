@@ -48,6 +48,20 @@ async def _params() -> dict[str, Any]:
 
 class DiaryMixin:
     # ------------------------------------------------------------ 读
+    def _diary_signature(self) -> str:
+        """日记页脚那个署名。
+
+        配置项 `diary.signature`，限制 1-3 个字（多的直接砍）。
+        留空返回空串，由前端回落到当前人格名——这样换人格不用改配置。
+        """
+        try:
+            raw = str(self.cfg.str("diary.signature", "") or "").strip()
+        except Exception:
+            raw = ""
+        if not raw:
+            return ""
+        return raw[:3]
+
     async def diary_list(self) -> dict[str, Any]:
         try:
             diary = getattr(self.plugin, "diary", None)
@@ -68,6 +82,8 @@ class DiaryMixin:
                 "items": items,
                 "enabled": diary.enabled,
                 "hour": self.cfg.int("diary.hour", 23),
+                # 页脚签名：配置优先，1-3 个字；留空交给前端跟随人格名
+                "signature": self._diary_signature(),
             })
         except Exception as exc:
             logger.warning(f"[congling] 日记列表失败: {exc!r}")
@@ -102,7 +118,9 @@ class DiaryMixin:
                 return _err("日记总开关是关的，先在设置里打开")
             if not diary.enabled:
                 return _err("日记总开关是关的，先在设置里打开")
-            row = await diary.compose(day_key=day)
+            # force=True 表示「重写今天这篇」：跳过「已有就返回旧文」，覆盖写入
+            force = bool(body.get("force"))
+            row = await diary.compose(day_key=day, force=force)
             if row is None:
                 return _err("这次没写成（可能这天没什么可记的，或者模型没给出内容）")
             return _ok(row)

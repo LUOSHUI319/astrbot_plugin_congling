@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from . import clock
+
 import json
 import time
 from typing import Any
@@ -106,7 +108,7 @@ class DecisionLogger:
                 row["plan"] = {}
             row.pop("plan_json", None)
             stamp = row.get("ts") or 0
-            row["time"] = time.strftime("%m-%d %H:%M:%S", time.localtime(int(stamp)))
+            row["time"] = clock.fmt("%m-%d %H:%M:%S", int(stamp))
         return rows
 
     async def purge(self) -> None:

@@ -14,7 +14,8 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..core.contracts import MemoryDraft, MemoryHit
+from ..core import clock
+from ..core.contracts import MemoryDraft, MemoryHit, level_of
 from .grade import STRENGTH, next_review_at
 from .refs import platform_key, resolved_refs
 from ..core.exc import exc_brief
@@ -36,20 +37,6 @@ def negation_signature(text: str) -> frozenset[str]:
     """文本里出现过哪些否定字，用来挡住「加个不字就被当复述」。"""
     body = str(text or "")
     return frozenset(ch for ch in _NEGATIONS if ch in body)
-
-
-def level_of(value: Any, default: int = 3) -> int:
-    """解析记忆等级。
-
-    0 是「不可忘」，它是个有意义的值，不能被 `or 3` 吞掉 —— 老代码
-    `int(x or 3)` 把 0 全变成了 3，禁区保护因此形同虚设。
-    """
-    if value is None or value == "":
-        return default
-    try:
-        return max(0, min(5, int(value)))
-    except (TypeError, ValueError):
-        return default
 
 
 def similarity(a: str, b: str) -> float:
@@ -314,7 +301,7 @@ class AtomStore:
         try:
             row = await self.store.fetch_one("SELECT mem_level FROM mem_atom WHERE id=?", (int(atom_id),))
             if row:
-                level = int(row.get("mem_level") or 3)
+                level = level_of(row)
         except Exception:
             level = 3
         base = STRENGTH.get(level, 0.65)
@@ -338,6 +325,7 @@ class AtomStore:
         kind: str | None = None,
         keyword: str | None = None,
         session_id: str | None = None,
+        level: int | None = None,
         limit: int = 50,
         offset: int = 0,
         include_unread: bool = False,
@@ -366,6 +354,10 @@ class AtomStore:
         if keyword:
             sql += " AND (text LIKE ? OR keywords LIKE ?)"
             params.extend([f"%{keyword}%", f"%{keyword}%"])
+        # 按等级精确筛。level=0 是「永久不可忘」——单独看这一档时不能让 0 掉进默认值
+        if level is not None:
+            sql += " AND mem_level=?"
+            params.append(int(level))
         sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
         params.extend([max(1, min(500, limit)), max(0, offset)])
         rows = await self.store.fetch_all(sql, params)
@@ -376,9 +368,9 @@ class AtomStore:
             row["keywords"] = self._loads(row.get("keywords"), [])
             row["evidence"] = self._loads(row.get("source_msg_ids"), [])
             row["level_tags"] = self._loads(row.get("level_tags"), [])
-            row["mem_level"] = int(row.get("mem_level") or 3)
-            row["created_text"] = time.strftime(
-                "%Y-%m-%d %H:%M", time.localtime(int(row.get("created_at") or 0))
+            row["mem_level"] = level_of(row)
+            row["created_text"] = clock.fmt(
+                "%Y-%m-%d %H:%M", int(row.get("created_at") or 0)
             )
         return rows
 
@@ -395,8 +387,8 @@ class AtomStore:
         for row in rows:
             row["count"] = int(row.get("cnt") or 0)
             row["important"] = int(row.get("important") or 0)
-            row["last_text"] = time.strftime(
-                "%Y-%m-%d %H:%M", time.localtime(int(row.get("last_at") or 0))
+            row["last_text"] = clock.fmt(
+                "%Y-%m-%d %H:%M", int(row.get("last_at") or 0)
             )
             row["kind"] = str(row.get("session_kind") or "")
             row["label"] = str(row.get("session_label") or row.get("session_id") or "未知会话")

@@ -16,6 +16,7 @@ import uuid
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.exc import exc_brief
 
 MAX_ALIASES = 12
@@ -325,8 +326,8 @@ class SubjectBook:
             item = dict(row)
             item["aliases"] = self._loads(row.get("aliases"), [])
             item["atom_count"] = count
-            item["last_text"] = time.strftime(
-                "%Y-%m-%d %H:%M", time.localtime(int(row.get("last_seen_at") or 0))
+            item["last_text"] = clock.fmt(
+                "%Y-%m-%d %H:%M", int(row.get("last_seen_at") or 0)
             )
             out.append(item)
         return out

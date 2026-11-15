@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from ..core import clock
+
 import asyncio
 import random
 from typing import Any
@@ -77,7 +79,7 @@ class ReplyDelayer:
         try:
             import time
 
-            hour = time.localtime().tm_hour
+            hour = clock.hour_of()
         except Exception:
             return 1.0
         if 1 <= hour <= 5:

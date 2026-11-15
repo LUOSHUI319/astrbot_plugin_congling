@@ -471,9 +471,23 @@
     else startProgress();
     dom.main.scrollTop = 0;
     var render = VIEWS[tab];
+    if (typeof render !== "function") {
+      stopProgress();
+      dom.main.innerHTML = errorHTML(new Error("这个页签没有渲染函数：" + tab));
+      return;
+    }
+    /* 兜底：接口卡死时不要让骨架一直转。
+       15 秒还没结果就换成错误卡片，至少能看出是出了问题。 */
+    var watchdog = setTimeout(function () {
+      if (nav.tab === tab && !nav.stack.length) {
+        stopProgress();
+        dom.main.innerHTML = errorHTML(new Error("读取超时，检查一下连接再下拉刷新"));
+      }
+    }, 15000);
     Promise.resolve()
       .then(function () { return render(); })
       .then(function (html) {
+        clearTimeout(watchdog);
         if (nav.tab !== tab || nav.stack.length) return;
         dom.main.innerHTML = html;
         stopProgress();
@@ -484,6 +498,7 @@
         paintTabs();
       })
       .catch(function (err) {
+        clearTimeout(watchdog);
         stopProgress();
         if (nav.tab !== tab || nav.stack.length) return;
         dom.main.innerHTML = errorHTML(err);
@@ -511,7 +526,7 @@
         '<div class="m-hero-row">' +
           "<div>" +
             '<h1 class="m-hero-name">' + txt(persona.name, "她") + "</h1>" +
-            '<p class="m-hero-meta">v' + txt(health.version, "1.1.1") +
+            '<p class="m-hero-meta">v' + txt(health.version, "1.3.0") +
               " · 已运行 " + esc(durationText(health.uptime)) +
               " · " + (asleep ? "正在睡" : "醒着") + "</p>" +
           "</div>" +
@@ -851,9 +866,15 @@
     var circumference = 2 * Math.PI * 56;
     var dash = circumference * (1 - p / 100);
     var asleep = String(s.mode) === "asleep";
+    /* 安静是「醒着但不接话」，和睡着不是一回事：不做梦、不回精力，
+       面板上必须分开显示，否则会以为它睡着了。 */
+    var quiet = s.quiet === true;
     var desc = asleep
       ? (s.stage_text || "正在睡") + (s.remaining_text ? " · 还有 " + s.remaining_text : "")
-      : (s.fatigue === "night" || s.fatigue === "noon" ? "在疲劳时段里，随时可能犯困" : "现在不困");
+      : quiet
+        ? "安静中（说了「" + (s.quiet_word || "晚安") + "」），到 " + (s.quiet_clock || "—") +
+          "，还有 " + num(s.quiet_left_minutes) + " 分钟"
+        : (s.fatigue === "night" || s.fatigue === "noon" ? "在疲劳时段里，随时可能犯困" : "现在不困");
     var wakeLine = s.wake_label || s.wake_at_clock || s.wake_window || s.wake_time || "—";
 
     var stagePills = "";
@@ -865,6 +886,18 @@
         return '<i class="m-stage-pill' + cls + '" title="' + esc(seg.label || "") + '"></i>';
       }).join("") + "</div>";
     }
+
+    var quietCard = quiet
+      ? '<div class="m-card" style="border-color:rgba(200,168,106,.45)">' +
+          '<div class="m-kv"><span class="m-kv-k">安静中</span><span class="m-kv-v">' +
+            '<span class="m-tag is-gold">醒着 · 不接话</span></span></div>' +
+          '<div class="m-kv"><span class="m-kv-k">到</span><span class="m-kv-v m-mono">' +
+            esc(s.quiet_clock || "—") + "</span></div>" +
+          '<div class="m-kv"><span class="m-kv-k">还剩</span><span class="m-kv-v">' +
+            esc(String(num(s.quiet_left_minutes))) + " 分钟</span></div>" +
+          '<div class="m-hint" style="margin-top:8px">想让她重新接话，发两条消息就行（群里要 @ 或引用）。</div>' +
+        "</div>"
+      : "";
 
     var ring =
       '<div class="m-night-ring' + (p <= 30 ? " is-low" : "") + '">' +
@@ -950,6 +983,7 @@
     return (
       '<div class="m-page">' +
         cards +
+        quietCard +
         kv +
         '<div class="m-sec-head"><span class="m-sec-title">她的梦</span><span class="m-sec-hint">按夜分组 · 睡着后只在 REM 做</span></div>' +
         dreamHTML +
@@ -1084,7 +1118,7 @@
           '<span class="m-nav-ico" style="width:40px;height:40px;border-radius:12px"><svg><use href="#i-user"/></svg></span>' +
           '<div style="flex:1 1 auto;min-width:0">' +
             '<div style="font-family:var(--m-serif);font-size:18px;font-weight:600">' + txt(persona.name, "她") + "</div>" +
-            '<div style="font-size:11.5px;color:var(--m-ink-4)">v' + txt(health.version, "1.1.1") + " · 已运行 " + esc(durationText(health.uptime)) + "</div>" +
+            '<div style="font-size:11.5px;color:var(--m-ink-4)">v' + txt(health.version, "1.3.0") + " · 已运行 " + esc(durationText(health.uptime)) + "</div>" +
           "</div>" +
           '<button class="m-btn" type="button" data-act="open" data-page="persona">看人格</button>' +
         "</section>" +
@@ -1093,6 +1127,7 @@
         '<div class="m-card">' +
           row("user", "人格", "名字、身份设定、风格与禁忌", 'data-act="open" data-page="persona"') +
           row("sliders", "设置", "全部配置项，按组翻", 'data-act="open" data-page="settings"') +
+          row("memory", "永久记忆", "不会淡忘的那一档，单独看", 'data-act="open" data-page="permanent"') +
           row("tool", "工具", "实用查询能力与试跑", 'data-act="open" data-page="tools"') +
           row("heart", "好感度", "按记忆和频次结算的关系分数", 'data-act="open" data-page="affinity"') +
           row("mail", "主动找人", "谁会收到、今天发了几条", 'data-act="open" data-page="proactive"') +
@@ -1107,7 +1142,8 @@
 
         '<div class="m-group-head">关于</div>' +
         '<div class="m-card">' +
-          row("spark", "版本", "从绫开始 v" + txt(health.version, "1.1.1") + " · 测试版", 'data-act="open" data-page="about"') +
+          row("spark", "更新日志", "这一版改了什么、修了什么", 'data-act="open" data-page="changelog"') +
+          row("spark", "版本", "从绫开始 v" + txt(health.version, "1.3.0"), 'data-act="open" data-page="about"') +
         "</div>" +
         footHTML() +
       "</div>"
@@ -1189,10 +1225,99 @@
         return (
           '<div class="m-page">' +
             '<div class="m-empty" style="padding:10px 4px 0;text-align:left;font-size:12px">改完记得点保存；部分项要重载插件才完全生效</div>' +
+            '<div class="m-btn-row">' +
+              '<button class="m-btn" type="button" data-act="open" data-page="settings-all">总览全部配置</button>' +
+              '<button class="m-btn" type="button" data-act="open" data-page="settings-read">只读快照</button>' +
+            '</div>' +
             '<div class="m-card">' + groups + "</div>" +
             footHTML() +
           "</div>"
         );
+      });
+    },
+  };
+
+  /* 设置总览：一页把所有配置平铺出来，按板块分区。
+     手机上一层层点进去太慢，想核对"到底配了什么"时需要一眼看完。 */
+  PAGES["settings-all"] = {
+    title: "设置总览",
+    render: function () {
+      return apiGet("settings").then(function (data) {
+        st.settings = data;
+        var groups = data.groups || [];
+        if (!groups.length) return '<div class="m-page"><div class="m-empty">没有读到配置</div></div>';
+        var blocks = groups.map(function (group) {
+          var title = group.title && group.title !== group.name
+            ? group.title
+            : (GROUP_TITLE_ZH[group.name] || group.title || group.name);
+          var items = group.items || [];
+          var rows = items.map(function (item) {
+            var label = txt(item.label, item.key);
+            return '<div class="m-kv"><span class="m-kv-k">' + esc(label) + "</span>" +
+              '<span class="m-kv-v m-mono">' + esc(settingValue(item)) + "</span></div>";
+          }).join("");
+          return '<div style="margin:18px 4px 6px;font-size:13px;font-weight:600;opacity:.85">' +
+              esc(title) + ' <span style="font-weight:400;opacity:.6">· ' + items.length + " 项</span></div>" +
+            '<div class="m-card">' + (rows || '<div class="m-empty">这组没有配置项</div>') + "</div>";
+        }).join("");
+        return '<div class="m-page">' +
+          '<div class="m-empty" style="padding:6px 4px 0;text-align:left;font-size:12px">只读总览，要改去对应的分组里改</div>' +
+          blocks + "</div>";
+      });
+    },
+  };
+
+  function settingValue(item) {
+    var v = item.value;
+    var type = String(item.type || "string");
+    /* 后端一般是真 bool，但旧配置里可能是 "False" 这种字符串——
+       直接 `v ?` 会把它们全判成"开"，所以显式比对。 */
+    if (type === "bool") {
+      var on = v === true || v === 1 || v === "1" || String(v).toLowerCase() === "true";
+      return on ? "开" : "关";
+    }
+    if (v === null || v === undefined || v === "") return "—";
+    if (Array.isArray(v)) {
+      if (!v.length) return "（空）";
+      var head = v.slice(0, 3).join("、");
+      return v.length > 3 ? head + " 等 " + v.length + " 项" : head;
+    }
+    var text = String(v);
+    return text.length > 30 ? text.slice(0, 30) + "…" : text;
+  }
+
+
+  /* 设置快照：和「设置总览」共用一份数据，但一个控件都没有。
+     手机屏幕小，误触代价大；想核对现状时用这一页更安全。 */
+  PAGES["settings-read"] = {
+    title: "设置快照",
+    render: function () {
+      return apiGet("settings").then(function (data) {
+        st.settings = data;
+        var groups = data.groups || [];
+        if (!groups.length) return '<div class="m-page"><div class="m-empty">没有读到配置</div></div>';
+        var blocks = groups.map(function (group) {
+          var title = group.title && group.title !== group.name
+            ? group.title
+            : (GROUP_TITLE_ZH[group.name] || group.title || group.name);
+          var items = group.items || [];
+          var rows = items.map(function (item) {
+            var label = txt(item.label, item.key);
+            var value = settingValue(item);
+            var long = String(value).length > 34;
+            return '<div class="m-kv"' + (long ? ' style="align-items:flex-start"' : "") + ">" +
+              '<span class="m-kv-k">' + esc(label) + "</span>" +
+              '<span class="m-kv-v' + (long ? "" : " m-mono") + '"' +
+                (long ? ' style="text-align:right;white-space:normal;line-height:1.55"' : "") + ">" +
+                esc(value) + "</span></div>";
+          }).join("");
+          return '<div style="margin:16px 4px 6px;font-size:13px;font-weight:600;opacity:.85">' +
+              esc(title) + ' <span style="font-weight:400;opacity:.6">· ' + items.length + " 项</span></div>" +
+            '<div class="m-card">' + (rows || '<div class="m-empty">这组没有配置项</div>') + "</div>";
+        }).join("");
+        return '<div class="m-page">' +
+          '<div class="m-empty" style="padding:6px 4px 0;text-align:left;font-size:12px">只读快照，一个都不能点。要改请回「设置」。</div>' +
+          blocks + "</div>";
       });
     },
   };
@@ -1449,28 +1574,56 @@
   PAGES.qzone = {
     title: "QQ 空间",
     render: function () {
-      return apiGet("qzone").catch(function (err) { return { error: err.message }; }).then(function (data) {
+      /* 状态和动态是两个接口：
+         /qzone      只给状态（auth.ok / write_allowed / mode…），不含动态
+         /qzone/feed 才给 items
+         以前这里只读 /qzone，还去读 data.ok / data.usable / data.feed，
+         三个字段后端都不返回 —— 结果未登录也显示「可用」，动态永远空白。 */
+      return Promise.all([
+        apiGet("qzone").catch(function (err) { return { error: err.message }; }),
+        apiGet("qzone/feed", { limit: 10 }).catch(function () { return { items: [] }; }),
+      ]).then(function (res) {
+        var data = res[0] || {};
+        var feedData = res[1] || {};
         if (data.error) {
           return '<div class="m-page"><div class="m-empty"><b>空间没接上</b>' + esc(data.error) +
             '<div style="margin-top:14px"><button class="m-btn" type="button" data-act="qzone-auth">试着登录</button></div></div></div>';
         }
-        var ok = data.ok !== false && (data.usable !== false);
-        var feed = data.feed || data.items || [];
-        var feedRows = (Array.isArray(feed) ? feed : []).slice(0, 10).map(function (item) {
+        var auth = data.auth || {};
+        var ok = auth.ok === true;
+        var canWrite = data.write_allowed === true;
+        var items = feedData.items || [];
+        var feedRows = items.slice(0, 10).map(function (item) {
           var text = item.content || item.text || "";
-          return '<div class="m-dream"><div class="m-dream-text" style="-webkit-line-clamp:3">' + esc(clip(text, 160)) + "</div>" +
-            '<div class="m-dream-foot"><span>' + esc(item.createTime || item.time || "") + "</span></div></div>";
+          var shots = (item.images || []).length;
+          return '<div class="m-dream"><div class="m-dream-text" style="-webkit-line-clamp:3">' +
+              (text ? esc(clip(text, 160)) : '<span style="opacity:.6">（一组图，' + shots + ' 张）</span>') +
+            "</div>" +
+            '<div class="m-dream-foot"><span>' + esc(item.nickname || "") + "</span>" +
+              "<span>" + esc(item.created_text || item.createTime || item.time || "") + "</span></div></div>";
         }).join("");
+
         return (
           '<div class="m-page">' +
             '<div class="m-card">' +
-              '<div class="m-kv"><span class="m-kv-k">登录态</span><span class="m-kv-v">' + (ok ? '<span class="m-tag is-accent">可用</span>' : '<span class="m-tag is-gold">不可用</span>') + "</span></div>" +
-              '<div class="m-kv"><span class="m-kv-k">账号</span><span class="m-kv-v m-mono">' + txt(data.uin, "—") + "</span></div>" +
-              '<div class="m-kv"><span class="m-kv-k">来源</span><span class="m-kv-v">' + txt(data.source, "—") + "</span></div>" +
+              '<div class="m-kv"><span class="m-kv-k">登录态</span><span class="m-kv-v">' +
+                (ok ? '<span class="m-tag is-accent">已就绪</span>' : '<span class="m-tag is-gold">未获取</span>') + "</span></div>" +
+              '<div class="m-kv"><span class="m-kv-k">账号</span><span class="m-kv-v m-mono">' + txt(auth.uin, "—") + "</span></div>" +
+              '<div class="m-kv"><span class="m-kv-k">来源</span><span class="m-kv-v">' + txt(auth.source, "—") + "</span></div>" +
+              '<div class="m-kv"><span class="m-kv-k">写权限</span><span class="m-kv-v">' +
+                (canWrite ? '<span class="m-tag is-accent">已开</span>' : '<span class="m-tag is-gold">关闭</span>') + "</span></div>" +
+              '<div class="m-kv"><span class="m-kv-k">主动发布</span><span class="m-kv-v">' +
+                esc(data.behavior_text || "—") + "</span></div>" +
             "</div>" +
-            '<div class="m-btn-row"><button class="m-btn" type="button" data-act="qzone-auth">重新登录</button>' +
-              '<button class="m-btn" type="button" data-act="qzone-feed">读动态</button></div>' +
-            (feedRows ? '<div class="m-card">' + feedRows + "</div>" : "") +
+            '<div class="m-btn-row">' +
+              '<button class="m-btn" type="button" data-act="qzone-auth">更新登录态</button>' +
+              (canWrite
+                ? '<button class="m-btn is-primary" type="button" data-act="qzone-publish">发一条</button>'
+                : '<button class="m-btn" type="button" disabled>发说说（写权限关着）</button>') +
+            "</div>" +
+            '<div class="m-card-title">最近动态</div>' +
+            (feedRows ? '<div class="m-card">' + feedRows + "</div>"
+                      : '<div class="m-card"><div class="m-empty">' + (ok ? "最近没动静" : "还没拿到登录态") + "</div></div>") +
           "</div>"
         );
       });
@@ -1478,6 +1631,55 @@
   };
 
   /* ------------------------------------------------------------------ 子页：诊断 */
+
+  /* ------------------------------------------------------------------ 子页：更新日志 */
+  var CHANGELOG_HTML = "<section class=\"m-cl-ver\"><div class=\"m-cl-head\"><span class=\"m-cl-ver-no\">1.3.0</span><span class=\"m-cl-date\">2026-11-15</span></div><div class=\"m-cl-tag\">空间、安静与手机端</div><p class=\"m-cl-note\">已公布版本是 1.2.0，这一版把原准备作为 1.2.1 的内容一并收了进来。</p><div class=\"cl-sub\">新增</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>QQ 空间能力全打通</b><span>三个工具四个接口：read（动态 / 某人空间 / 单条全文 / 评论 / 访客）、post（发 / 删）、interact（点赞 / 评论 / 回评）。配套四条边界：删说说限 6 小时内、访客每天一次、评论 id 不外泄给模型、点赞评论只</span></div><div class=\"m-cl-item\"><b>说说自动配图</b><span>正文抽情绪词 → 表情包库检索 → 上传图床 → 带图发布。没有情绪词就不配图——配图是情绪的标点，不是装饰。任何一步失败都退回纯文本，不会因为配不上图把说说卡死。</span></div><div class=\"m-cl-item\"><b>空间行为模式</b><span>off 只在明确要求时动手；intent 可以有念头，带「最近发过什么」防重复和 6 小时冷却。两档都在 prompt 层注入，不动 system prompt。</span></div><div class=\"m-cl-item\"><b>时间来源可切</b><span>clock.source：beijing 固定 UTC+8（等价 Asia/Shanghai，但不用装 tzdata）、local 跟本机时区。作息窗口、起床点、最晚睡觉、日记按天归档、面板钟点全部走同一套钟。</span></div><div class=\"m-cl-item\"><b>收线改为「安静」</b><span>以前收线要么真睡、要么什么都不做，现在多了一层中间态：强档安静到下次起床点，拜拜 30 分钟，午安 75 分钟。mode 保持 awake——不做梦、不按睡眠阶段回精力、醒来也不说道别。</span></div><div class=\"m-cl-item\"><b>安静的解除规则</b><span>只有管理员的消息计数；群聊要 @ 或引用；默认 5 分钟内 2 条解除，到数就醒，不掷骰。</span></div><div class=\"m-cl-item\"><b>设置总览</b><span>15 个板块 241 项配置一页摊开。电脑端按「常改 → 少改」排序、冷门项收进折叠，改完一起保存；手机端在设置页顶部一个按钮直达。</span></div><div class=\"m-cl-item\"><b>设置快照</b><span>纯只读，一个可点控件都没有。用来核对现状、截图发人、排查「改了怎么没生效」。</span></div><div class=\"m-cl-item\"><b>日记签名可配</b><span>diary.signature，1-3 个字。留空则跟随当前人格名。</span></div><div class=\"m-cl-item\"><b>手机端补齐</b><span>空间页重写（登录态、账号、来源、写权限、动态一次看全）、新增发说说、新增更新日志页。</span></div><div class=\"m-cl-item\"><b>永久记忆单独一页</b><span>0 级那一档不衰减、不会被淡忘。混在几万条里翻找不着，现在单独一页：条数、占比、命中次数，可降成普通或忘掉。</span></div><div class=\"m-cl-item\"><b>时间提示挂到最后</b><span>时间每轮都变，单独抽出来追加在注入链最末尾。前面的记忆、人格、场景不用重算，前缀缓存照样命中。</span></div></div><div class=\"cl-sub\">修复</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>永久记忆等级 0 被读成 3</b><span>int(x or 3) 遇上 mem_level=0（永久不可忘）会返回 3。全插件 8 处都这么写，实库 157 条永久记忆在展示、权重、统计里全掉回普通档，禁区保护形同虚设。现在统一走 level_of()，只把 None、空串、解析失</span></div><div class=\"m-cl-item\"><b>「重写日记」是假按钮</b><span>compose() 发现当天已有日记就直接返回旧文；就算绕过它，_insert 用的是 INSERT OR IGNORE，新内容也会被静默丢弃。两道门都得开：加 force 跳过短路，新增 _replace() 用 UPDATE 覆盖，同时</span></div><div class=\"m-cl-item\"><b>主动找人后认不出自己说的话</b><span>bot 主动问「你吃饭了么」，用户回「没有」，它反问「什么没有」。根因是三轮叠加：框架的 send_message 不写对话历史、归档里确实有那条、但注入时只按名字渲染成「绫: …」，模型认不出是自己说的。现在按 sender_id 判角色</span></div><div class=\"m-cl-item\"><b>人格名残留「绫」</b><span>配置里 persona.name 还写着旧名，系统提示跟随 AstrBot 人格（洛水），归档却读配置——两条路分叉，于是模型把「绫」当成别人。已统一：配置改名、归档改用 display_name()、并过滤掉拿不到时返回的占位串。前端日记</span></div><div class=\"m-cl-item\"><b>手机端空间页字段层级读错</b><span>读 data.ok、data.usable、data.feed，三个字段后端都不返回。结果未登录也显示「可用」，动态永远空白。现在读 auth.ok 与 write_allowed，动态另调 qzone/feed。</span></div><div class=\"m-cl-item\"><b>收线词表被配置整表覆盖</b><span>config.list(...) or list(STRONG)：配置只要非空，代码默认词全作废，源码里的「睡觉去」就是这么无声失效的。改成默认词加配置词合并，新增 close.removed_words 用来删默认词。</span></div><div class=\"m-cl-item\"><b>「睡觉吧」不在任何词表</b><span>补进强档：睡觉吧、去睡觉、睡吧、我去睡了、该睡了。叙述句（他说睡觉吧）和问句（睡觉吧？）仍被句式过滤挡住。</span></div><div class=\"m-cl-item\"><b>「安静一会儿」是句空话</b><span>close_minutes() 以前除了测试没有任何调用点，命中后只改了一句提示。现在真的落成 quiet_until：写进 kv、重启有效、面板能看到。</span></div><div class=\"m-cl-item\"><b>主动找人不受安静期约束</b><span>说了晚安还反过来主动戳人，比不回更怪。现在会跳过安静期。</span></div><div class=\"m-cl-item\"><b>日记里写精力数值</b><span>素材里直接喂了「精力 100」，模型照抄成「精力是满的，100」，读起来像仪表盘读数。改成感觉描述（精神是满的 / 有点乏 / 快撑不住了），并在 prompt 里禁掉数值型状态。</span></div><div class=\"m-cl-item\"><b>版本号显示过期</b><span>手机端兜底写死 1.1.1（4 处）、关于页写死「测试版」、左上角写死「1.1.1 · 测试版」。现在统一从 health.version 读。</span></div><div class=\"m-cl-item\"><b>人格状态和作息提示打架</b><span>人格状态按小时切四档，18:00 后一律说「你精神最好」，但它不读精力。23:40、精力 18% 时会同时注入「精神最好」和「已经困了」，语气就飘了。现在人格只描述此刻在做什么。</span></div><div class=\"m-cl-item\"><b>疲劳提示在报电量</b><span>「精力还剩 38%」这类句子模型只会照着复述。现在只在精力低于 30 时说一句「心里在准备休息」，其余时候不吭声。</span></div></div></section><section class=\"m-cl-ver\"><div class=\"m-cl-head\"><span class=\"m-cl-ver-no\">1.2.1</span><span class=\"m-cl-date\">2026-11-11</span></div><div class=\"m-cl-tag\">收线静默认人了</div><p class=\"m-cl-note\">谁能让它停下这件事，现在要过名单了（并入 1.3.0）。</p><div class=\"cl-sub\">新增</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>收线静默要认人了</b><span>以前任何人一句晚安都能让它躺下，群里随便一个路人就能把整只 bot 按睡过去。新增 trigger_mode：whitelist 只认白名单（管理员始终算在内，默认）、admin 只认管理员、all 谁都能触发（旧行为）。名单填 QQ 号，</span></div><div class=\"m-cl-item\"><b>静默是全局的，没有分会话这一档</b><span>试过做「只停当前会话」，但那样等于私聊躺下了群里还能聊。既然睡了就是睡了，就只有一个开关：所有会话一起停，醒来一起醒。</span></div></div><div class=\"cl-sub\">修复</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>私聊安静了，群聊还在回</b><span>state.on_message 开头有一句「未启用就直接放行」，写在状态判断之前，而入睡本身并不看长夜开关。于是「长夜如梦没开、只开了收线静默」的机器上，私聊里说完晚安它真躺下了，群聊那边却因为提前返回继续有说有笑。现在只有确实没在睡才提</span></div></div></section><section class=\"m-cl-ver\"><div class=\"m-cl-head\"><span class=\"m-cl-ver-no\">1.2.0</span><span class=\"m-cl-date\">2026-11-07</span></div><div class=\"m-cl-tag\">空间与星图</div><p class=\"m-cl-note\">空间从只能发纯文字补到能带图、能读别人的、能互动。</p><div class=\"cl-sub\">新增</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>QQ 空间发说说可以带图</b><span>先传到空间图床拿回 richval 与 pic_bo，再随正文一起提交，单条最多九张。参数全部来自实测：上传走 base64 加 urlencoded（不是 multipart）、richval 固定十段且首尾为空、多张之间 richval</span></div><div class=\"m-cl-item\"><b>好友动态重新可读</b><span>正文、时间、配图、来源会话都能取到，纯图说说也会保留。顺手把访客上限压到每天一次 —— 刷了谁的动态，对方在最近访客里是看得见的。</span></div><div class=\"m-cl-item\"><b>空间评论</b><span>支持在说说下留言。返回被 frameElement.callback 包裹，解析器已经能剥这种外壳。</span></div><div class=\"m-cl-item\"><b>刷到的动态会写进记忆</b><span>按「看到了但没参与」的权重入库：重要度 0.42、等级 2、不计作自身经历。短于八个字又没有配图的直接跳过，避免稀释真正重要的记忆。</span></div><div class=\"m-cl-item\"><b>空间互动三个开关</b><span>主动浏览、随机评论、随机点赞各自独立，全部默认关闭，并且各有每日上限。评论比点赞克制，点赞比浏览克制 —— 越公开的行为，配额越紧。</span></div><div class=\"m-cl-item\"><b>记忆星图</b><span>把每一段记忆画成一颗星：同会话、同实体、文字相近的会连成星座，越重要的星越大越亮。可搜索、可按分类和时间筛选，点开一颗星能看到来源会话、重要度、衰减曲线和关联记忆。只读直连数据库，不写不改。</span></div><div class=\"m-cl-item\"><b>记忆星图已上架，但要进群拿</b><span>它是一个独立插件，不随本体分发。面板侧边栏新增「记忆星图」一页：预览图、功能说明、一键打开、以及复制记忆库路径。安装包与后续版本都在官方群里。</span></div></div><div class=\"cl-sub\">修复</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>好感度页卡住九秒</b><span>排行榜的过滤条件要对四百多个主体逐个反查「这个 id 是不是群号」，而 msg_archive 有五万三千行却没有对应索引，等于四百多次全表扫。补上 (session_kind, session_id) 索引后，同一条查询 9000ms →</span></div><div class=\"m-cl-item\"><b>记忆总览打开要等</b><span>统计、未读数、会话列表、注入档位是四条独立查询串行执行。合并成一条聚合查询，并给 (status, created_at) 建索引，单次 22ms → 0ms。</span></div><div class=\"m-cl-item\"><b>好友动态一直读不到内容</b><span>该接口返回的不是 JSON：键没有引号、字符串用单引号、HTML 里的尖括号写成 \\\\x3C，标准解析必然失败，异常又被上层兜住，表现成「最近没什么动静」。改为字符串感知的逐字符扫描，能正确切出每条动态。</span></div><div class=\"m-cl-item\"><b>动态正文混着昵称、浏览数、点赞人</b><span>原来整段 HTML 去标签，把渲染层的所有文字都卷了进来。改为只取正文容器 f-info，图片只从 img-box 里找，并按 appid、typeid、图床域名过滤广点通广告。</span></div><div class=\"m-cl-item\"><b>头像库存不进图片</b><span>接口只有信任、取消信任、删除、改标签四个动作，压根没有入库分支，add_bytes 从上线起没被调用过一次。补上上传动作，顺带把两套皮肤都加上「存一张」按钮。</span></div><div class=\"m-cl-item\"><b>空间点赞接口返回 500</b><span>常见实现里的 emotion_cgi_like 已经不可用。真正可用的是 internal_dolike_app，参数还要求 unikey 与 curkey —— 它们不在任何 JSON 字段里，藏在动态 HTML 的 data 属性上。</span></div><div class=\"m-cl-item\"><b>文章里说点赞能用，但拿不到老说说的 unikey</b><span>unikey 只在好友动态流里给。指定某人的历史说说走的是另一条接口，不返回这个字段，所以「给某条老说说点赞」目前做不到，已把点赞开关默认关闭。</span></div><div class=\"m-cl-item\"><b>面板接口出问题只能靠猜</b><span>新增计时中间件，每个接口的耗时写进 diag:timing。这次的九秒就是靠它直接定位到具体接口，而不是逐个怀疑缓存、桥接、资源体积。</span></div></div></section><section class=\"m-cl-ver\"><div class=\"m-cl-head\"><span class=\"m-cl-ver-no\">1.1.1</span><span class=\"m-cl-date\">2026-11-03</span></div><div class=\"m-cl-tag\">移动端</div><p class=\"m-cl-note\">给手机做一套真正的界面。</p><div class=\"cl-sub\">新增</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>手机端五个页签</b><span>概览（人格名 / 精力 / 记忆数 / 最近决策）、记忆（检索、改等级、删）、长夜（精力环、让她睡、叫醒、补梦、去爬）、日记（写一篇、衬线体阅读页、置顶）、更多（人格、设置、工具、好感度、主动找人、QQ 空间、诊断）。</span></div><div class=\"m-cl-item\"><b>手机端专门处理的事</b><span>可点区域 ≥ 44px、100dvh 加安全区、底部弹层、自绘下拉刷新、输入框字号 ≥ 16px；避开 color-mix 和可选链，X5 与微信内置浏览器也能开。</span></div></div><div class=\"cl-sub\">修复</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>移动端换成一整套独立界面</b><span>原来手机上看桌面面板只能整页缩放，字小、按钮难点。这一版新增 mobile.html / mobile.css / mobile.js：底部五个页签、卡片流、底部弹层，设置页按 schema 动态渲染，14 组两百多项都能在手机上改。</span></div><div class=\"m-cl-item\"><b>摘掉原来的移动端适配</b><span>responsive.css（响应式规则全部挂在 html[data-layout=\\\"mobile\\\"] 下）与「桌面 / 手机视图」切换按钮一并删除，1280 整页缩放也去掉，桌面面板回到纯桌面布局。</span></div><div class=\"m-cl-item\"><b>修掉「从手机版回桌面版会被弹回去」的隐患</b><span>AstrBot 给插件页发的响应带 Referrer-Policy: no-referrer，document.referrer 拿不到值，靠 referrer 判断会失效。改成显式开关：手机版点「桌面面板」走 ?desk=1，桌面版看到它</span></div><div class=\"m-cl-item\"><b>修掉「日记和梦的素材把昵称当第三人称」的问题</b><span>素材行只带了 sender_name，模型照着写成「某某一早发了好几条」。改成用 sender_id 判主语：自己写过的话记作「我」，别人的一律写「对方」，群聊也不再拼昵称。</span></div></div></section><section class=\"m-cl-ver\"><div class=\"m-cl-head\"><span class=\"m-cl-ver-no\">1.1.0</span><span class=\"m-cl-date\">2026-11-02</span></div><div class=\"m-cl-tag\">稳定性</div><p class=\"m-cl-note\">把「能用」变成「稳」。</p><div class=\"cl-sub\">新增</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>三套稳定标识</b><span>用户、会话、说话人各有一套固定键。名字永远不参与标识，缺失身份时明确标为待补，而不是猜一个。</span></div><div class=\"m-cl-item\"><b>三层召回与弱相关兜底</b><span>会话层、个人层、公共层分开检索，另有全库层供跨群查找。</span></div><div class=\"m-cl-item\"><b>自称识别与别名</b><span>从「我叫 X / 叫我 X / 我是 X」里抽出称呼写进主体库，抽取时能用别名反查。规则刻意收紧：按停顿词截断、拒绝「我是群主」这类、单字不认。</span></div><div class=\"m-cl-item\"><b>事件账本</b><span>新增四状态的自身行为账本（已计划、已成功、已失败、已过期），同一终态重试幂等，不同终态互转直接拒绝。与记忆写在同一事务，失败一起回滚。</span></div><div class=\"m-cl-item\"><b>梦境排产与补发</b><span>入睡时算出整晚 REM 段，默认预生成前三段，进程在线时后续段实时生成。启动时补发 24 小时内到期的梦，不逐条播报。</span></div><div class=\"m-cl-item\"><b>梦境检索工具</b><span>任何等级都能查，但只在对方明确问起时调用。工具描述里写死了「梦想 / 白日梦 / 别做梦了 / 中国梦」不触发，不靠关键词拦截。</span></div><div class=\"m-cl-item\"><b>素材标签与类型互斥</b><span>主体是我、主体未确认、他人三档明确；历史正文永不改写。同一段经历不会在日记、说说、梦里反复出现。</span></div><div class=\"m-cl-item\"><b>删除所有记忆</b><span>四重确认：条数清单、输入固定短语、勾选并确认已备份、按钮倒计时十秒。服务端强制导出备份、单事务删除、删完回收空间、写修复日志。身份只来自框架认证，不信任请求体。</span></div></div><div class=\"cl-sub\">修复</div><div class=\"m-cl-list\"><div class=\"m-cl-item\"><b>发现并修复「插件重载后有一半任务不再运行」的问题</b><span>所有后台任务都是裸 create_task，没有持有引用。重载或退出时既不会取消也不会等待，旧任务和新任务并存或直接消失。修复后统一走 spawn_background 托管，加 _stopping 闸门，退出时按 cancel → gat</span></div><div class=\"m-cl-item\"><b>发现并修复「精力值一直停着不动」的问题</b><span>作息心跳挂在每小时一次的清理循环里，一天只跑 24 次，白天没人说话时精力冻住，也不会自然醒。修复后拆出独立心跳（默认 60 秒），内部按 last_tick 补算，漏拍和重启都能补齐。</span></div><div class=\"m-cl-item\"><b>发现并修复「状态只在内存里，重启就回退」的问题</b><span>night.state 只在有事件时才落盘。修复后每拍保存，疲劳轮次和起点一并持久化；醒来那一刻的睡眠阶段也从内存变量改成写 kv，重启后语气不会丢。</span></div><div class=\"m-cl-item\"><b>发现并修复「在别的群问起同一个人，她说记不得」的问题</b><span>召回只有「当前会话」和「公共」两层，没有「关于这个人」这一层。修复后引入三套稳定标识（user / session / actor），召回改成会话层、个人层、公共层三层。</span></div><div class=\"m-cl-item\"><b>发现并修复「问她『你还记得我吗』答不上来」的问题</b><span>这类问句里没有可用于关键词匹配的实词。修复后加元问题特判，按 about_ref 直接取高等级记忆；三层全空时再按 importance × decay 兜底，标记为弱相关。</span></div><div class=\"m-cl-item\"><b>发现并修复「记忆搜索工具永远返回没找到」的问题</b><span>工具走的是空主体检索，在候选层里等于「只查公共记忆」，而全库只有一条。修复后工具接 takes_event，用当前会话加发言人构造标识；拿不到事件时退成全库，私聊一律不碰。</span></div><div class=\"m-cl-item\"><b>发现并修复「跨会话开了 all 档也不生效」的问题</b><span>只做了三层候选，all 没有对应实现。修复后补全库层，并用 LIKE 粗筛——否则几千条里按重要度取前八百会把目标挤出去。</span></div><div class=\"m-cl-item\"><b>发现并修复「补完候选还是排不出来」的问题</b><span>候选池同质导致词频权重被拉平，含「你 / 还 / 吗」的条目反而排前。修复后按实词命中加权，排除虚词和「记得 / 知道」这类元词。</span></div><div class=\"m-cl-item\"><b>发现并修复「每 15 秒两条数据库报错，记忆抽取停摆」的问题</b><span>代码查的列在真实库里不存在，而重建迁移包在版本号判断里——真实库的版本号比代码里的高，迁移永远不执行。修复后迁移改成看实际表结构：列不在就补，不再比版本号。</span></div><div class=\"m-cl-item\"><b>发现并修复「迁移期间心跳和抽取全部 database is locked」的问题</b><span>迁移整段包了排他事务，连上库那一瞬间就抢写锁，而迁移要扫三万多行归档。修复后回到不包大事务的做法：结构变更先提交，回填每五百条分批提交，失败只记警告不阻塞启动。</span></div><div class=\"m-cl-item\"><b>发现并修复「another row available 之后连接状态错乱」的问题</b><span>读取查询从来没加过锁，只有写入加了。sqlite3 的连接不是线程安全的，一边取结果一边执行就会抛这个错，紧接着所有写操作都变成 locked。修复后读写共用同一把锁。</span></div><div class=\"m-cl-item\"><b>发现并修复「回填六千多条记忆全部判成 legacy」的问题</b><span>归档表的平台字段里混着三种值（正式平台名、默认名、空串），而判据要求平台集合唯一，永远不成立。修复后空串当没记录、默认名当默认值，实测解析成功从 0 变成 4906。</span></div></div></section>";
+
+  PAGES.changelog = {
+    title: "更新日志",
+    render: function () {
+      return Promise.resolve("<div class=\"m-page\">" + CHANGELOG_HTML + "</div>");
+    },
+  };
+
+
+  /* 永久记忆：mem_level=0 那一档，不衰减也不会被淡忘。
+     混在几万条里翻根本找不着，所以单独一页。 */
+  PAGES.permanent = {
+    title: "永久记忆",
+    render: function () {
+      return apiGet("memory/list", { level: 0, limit: 200 }).then(function (data) {
+        var items = data.items || [];
+        var total = num(data.total);
+        if (!items.length) {
+          return '<div class="m-page"><div class="m-empty"><b>还没有永久记忆</b>' +
+            '这一档不衰减、不会被淡忘，检索时永远排最前，只该放「绝不能忘」的事。<br>' +
+            '想留住某条，去记忆列表里把它改成 0 级。</div></div>';
+        }
+        var rows = items.map(function (row) {
+          var kw = (row.keywords || []).slice(0, 3).map(function (k) {
+            return '<span class="m-tag">' + esc(k) + '</span>';
+          }).join(" ");
+          return '<section class="m-card" style="margin-bottom:10px">' +
+            '<div style="font-size:13.5px;line-height:1.7">' + esc(row.text || "") + '</div>' +
+            '<div style="margin-top:8px;font-size:11.5px;color:var(--m-ink-4)">' +
+              txt(row.created_text, "") +
+              (num(row.hit_count) ? " · 命中 " + num(row.hit_count) + " 次" : "") +
+            "</div>" +
+            '<div class="m-btn-row" style="margin-top:10px">' + kw +
+              '<button class="m-btn" type="button" data-act="perm-unlock" data-id="' + esc(String(row.id)) + '">降成普通</button>' +
+            "</div>" +
+          "</section>";
+        }).join("");
+        return '<div class="m-page">' +
+          '<div class="m-empty" style="padding:6px 4px 12px;text-align:left;font-size:12px">' +
+            "共 " + items.length + " 条永久记忆" + (total ? " · 占记忆总数 " + (items.length / total * 100).toFixed(1) + "%" : "") +
+            "<br>这一档不会随时间和使用次数淡忘。" +
+          "</div>" + rows + "</div>";
+      });
+    },
+  };
+
   PAGES.diag = {
     title: "诊断",
     render: function () {
@@ -1509,7 +1711,7 @@
             '<section class="m-card m-card-pad" style="text-align:center;padding:26px 18px">' +
               '<img src="./logo.png" alt="" style="width:58px;height:58px;border-radius:16px;margin:0 auto 12px" />' +
               '<div style="font-family:var(--m-serif);font-size:21px;font-weight:600">从绫开始</div>' +
-              '<div style="margin-top:6px;font-size:12px;color:var(--m-ink-3)">把「会聊天」做到像人 · v' + txt(health.version, "1.1.1") + " 测试版</div>" +
+              '<div style="margin-top:6px;font-size:12px;color:var(--m-ink-3)">把「会聊天」做到像人 · v' + txt(health.version, "1.3.0") + " 测试版</div>" +
               '<div style="margin-top:12px;font-size:11.5px;color:var(--m-ink-4)">洛水 &amp; 望山 一起写的</div>' +
             "</section>" +
             '<div class="m-card">' +
@@ -1527,7 +1729,17 @@
 
   /* ------------------------------------------------------------------ 路由 */
   function openPage(name, params) {
-    if (!PAGES[name]) return;
+    if (!PAGES[name]) {
+      /* 静默 return 的后果：页面停在骨架，看起来就是"一直读取中"。
+         实际原因多半是浏览器还在用旧的 mobile.js（缓存没有版本参数），
+         那个版本里没有这个页面。把话说清楚，别再让人猜。 */
+      dom.main.innerHTML =
+        '<div class="m-page"><div class="m-empty"><b>这个页面没加载上</b>' +
+        "浏览器可能还在用旧版本的脚本（" + esc(String(name)) + "）。<br>" +
+        "下拉刷新试试；还不行就清一下这个页面的缓存。</div></div>";
+      stopProgress();
+      return;
+    }
     var entry = { name: name, params: params || {}, title: PAGES[name].title || "" };
     nav.stack.push(entry);
     paintTopbar();
@@ -1798,6 +2010,11 @@
         saveSettings();
         return;
 
+      /* 记忆等级：视觉切换由 openSheet 的 onOpen 接管，
+         这里补一个空 case，免得点击落到 default 被当成未接入。 */
+      case "mem-level":
+        return;
+
       /* 工具 */
       case "tool-run":
         node.classList.add("is-loading");
@@ -1856,7 +2073,58 @@
           toast(err.message || "读不到", "err");
         });
         return;
+
+      /* 发说说 */
+      case "perm-unlock": {
+        var pid = num(node.dataset.id);
+        if (!pid) return;
+        node.classList.add("is-loading");
+        apiPost("memory/level/set", { atom_id: pid, level: 3, reason: "从永久记忆页降级" }).then(function () {
+          node.classList.remove("is-loading");
+          toast("已降成「平常」", "ok");
+          openPage("permanent");
+        }).catch(function (err) {
+          node.classList.remove("is-loading");
+          toast(err.message || "没改成功", "err");
+        });
+        return;
+      }
+
+      case "qzone-publish": {
+        openSheet({
+          title: "发一条说说",
+          body:
+            '<textarea class="m-textarea" id="m-qz-text" style="min-height:160px" ' +
+            'placeholder="想说什么就写，别写成小作文"></textarea>' +
+            '<div class="m-hint" style="margin-top:8px">配图由她自己挑，不用在这里选。</div>',
+          foot: '<button class="m-btn is-primary" type="button" data-act="qzone-publish-do">发出去</button>',
+        });
+        return;
+      }
+      case "qzone-publish-do": {
+        var box = document.getElementById("m-qz-text");
+        var text = box ? String(box.value || "").trim() : "";
+        if (!text) {
+          toast("还没写内容", "err");
+          return;
+        }
+        node.classList.add("is-loading");
+        apiPost("qzone/publish", { content: text }).then(function () {
+          node.classList.remove("is-loading");
+          closeSheet();
+          toast("发出去了", "ok");
+          openPage("qzone");
+        }).catch(function (err) {
+          node.classList.remove("is-loading");
+          toast(err.message || "没发出去", "err");
+        });
+        return;
+      }
       default:
+        /* 走到这里说明这个按钮没有对应的处理分支——以前是静默 return，
+           表现就是「点了没反应」，而且根本不知道是哪一个。
+           现在直接把动作名报出来，谁的按钮一眼就能查到。 */
+        toast("这个按钮还没接上：" + String(node.dataset.act || ""), "err");
         return;
     }
   }
@@ -1987,6 +2255,11 @@
     dom.main.addEventListener("change", onControl);
     dom.sheetBody.addEventListener("click", onClick);
     dom.sheetFoot.addEventListener("click", onClick);
+    /* 弹层里也可能出现开关/输入框/下拉（比如空间页的设置项）。
+       只绑 onClick 的话，这些控件在弹层里点了、改了都不会被收集。 */
+    dom.sheetBody.addEventListener("click", onControl);
+    dom.sheetBody.addEventListener("input", onControl);
+    dom.sheetBody.addEventListener("change", onControl);
     if (dom.savedock) dom.savedock.addEventListener("click", onClick);
     dom.sheetWrap.addEventListener("click", function (event) {
       if (event.target === dom.sheetWrap) closeSheet();
@@ -2048,4 +2321,5 @@
   } else {
     boot();
   }
+
 })();

@@ -12,6 +12,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.web import request
 
+from ..core.contracts import level_of
 from ..memory.grade import BOOST, CAP, FLOOR, HARD, KNOWN_TAGS, LEVEL_NAMES, STRENGTH, TAG_LABELS
 
 
@@ -104,7 +105,7 @@ class MemoryV2Mixin:
                     "WHERE status='active' GROUP BY mem_level"
                 )
                 for row in rows:
-                    counts[int(row.get("mem_level") or 3)] = int(row.get("cnt") or 0)
+                    counts[level_of(row)] = int(row.get("cnt") or 0)
             except Exception:
                 counts = {}
             levels = []

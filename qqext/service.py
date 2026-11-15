@@ -15,6 +15,7 @@ from .avatar import AvatarService
 from .avatar_pool import AvatarPool
 from .qzone import QzoneBridge
 from .qzone_daily import QzoneDaily
+from .sticker_bridge import StickerBridge
 
 
 class QQExt:
@@ -25,6 +26,7 @@ class QQExt:
         self.qzone_daily = QzoneDaily(plugin)
         self.avatar = AvatarService(plugin)
         self.avatar_pool = AvatarPool(plugin)
+        self.sticker = StickerBridge(plugin)
         self._last_poke: dict[str, float] = {}
 
     # ================================================================ 底层
@@ -137,8 +139,28 @@ class QQExt:
             qzone = await self.qzone.status()
         except Exception as exc:
             qzone = {"mode": self.qzone.mode(), "available": False, "auth": {"ok": False}, "note": str(exc)[:120]}
+
+        # 模式 + 表情包库：这两个是「空间能不能用」的第一现场，
+        # 面板和 /绫 状态 都要能一眼看到，不能让人靠猜。
+        mode = str(self.config.str("qq_extra.qzone_behavior_mode", "off") or "off").strip().lower()
+        if mode not in ("off", "intent"):
+            mode = "off"
+        qzone["behavior_mode"] = mode
+        qzone["behavior_text"] = (
+            "通道已就绪 · 主动行为已关闭" if mode == "off" else "通道已就绪 · 主动行为已开启"
+        )
+
+        sticker: dict[str, Any] = {}
+        try:
+            sticker = await self.sticker.scan(force=False)
+            sticker["text"] = StickerBridge.describe(sticker)
+        except Exception as exc:
+            sticker = {"state": "error", "error": repr(exc)[:120],
+                       "text": StickerBridge.describe({"state": "error", "error": repr(exc)[:80]})}
+
         return {
             "qzone": qzone,
+            "sticker": sticker,
             "signature_write": self.config.bool("qq_extra.signature_auto_update", False),
             "poke": self.config.bool("qq_extra.poke_enabled", True),
             "profile_card": self.config.bool("qq_extra.profile_card_enabled", True),

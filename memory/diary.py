@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.memory_guard import memory_work
 from .perspective import SELF_SUBJECT, material_label, remember_action
 from ..core.exc import exc_brief
@@ -46,6 +47,8 @@ PROMPT = """现在是{day}的晚上。你是{name}{identity_line}，你要写一
 1. 第一人称，像晚上趴在被窝里写的，一共 {length} 字上下
 1.1 视角不能颠倒：「他答应给我买」不能写成「我答应给他买」；素材没写清谁做的，就模糊处理，别替自己认领
 2. 只能基于上面这些真实发生过的事来写，不要编造具体事件、不要编对话
+2.1 不要写任何数值型状态：精力多少、电量、进度、百分比、等级、分数。
+    累不累用感觉说（"精神是满的""有点乏""快撑不住了"），别写成读数
 3. 可以写感受、写没说完的话、写突然想起来的一件小事
 4. 分段自然，不要标题式的小标题，不要列表，不要 emoji
 5. 只输出 JSON：{{"title":"不超过 12 字","text":"正文","mood":"{mood_list} 里挑一个","tags":["两到四个字","再来一个"],"mention":true 或 false}}
@@ -67,12 +70,12 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 def day_key_of(ts: float | int | None = None) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(ts if ts else time.time()))
+    return clock.fmt("%Y-%m-%d", ts if ts else time.time())
 
 
 def _day_bounds(day_key: str) -> tuple[int, int]:
     try:
-        start = int(time.mktime(time.strptime(day_key, "%Y-%m-%d")))
+        start = clock.day_start(time.mktime(time.strptime(f"{day_key} 12:00", "%Y-%m-%d %H:%M")))
     except (TypeError, ValueError):
         start = int(time.time())
     return start, start + 86400 - 1
@@ -91,6 +94,27 @@ def _guess_mood(text: str) -> str:
         if any(word in text for word in words):
             return mood
     return "安静"
+
+
+def energy_feel(energy: float) -> str:
+    """把精力数值换成人在日记里会写的说法。
+
+    日记是写给自己看的东西，没人会在里面记「精力 100」。
+    这里只给感觉，不给读数——数值留在面板上。
+    """
+    try:
+        value = float(energy)
+    except (TypeError, ValueError):
+        return "精神还行"
+    if value >= 85:
+        return "精神是满的"
+    if value >= 65:
+        return "精神还不错"
+    if value >= 45:
+        return "有点乏"
+    if value >= 25:
+        return "挺累的"
+    return "快撑不住了"
 
 
 class Diary:
@@ -124,7 +148,7 @@ class Diary:
         if not self.enabled:
             return False
         now = now or time.time()
-        moment = time.localtime(now)
+        moment = clock.struct(now)
         day_key = day_key_of(now)
         if moment.tm_hour < self._hour():
             return False
@@ -166,12 +190,20 @@ class Diary:
 
     # ================================================================ 生成
     @memory_work
-    async def compose(self, day_key: str | None = None) -> dict[str, Any] | None:
+    async def compose(
+        self, day_key: str | None = None, *, force: bool = False
+    ) -> dict[str, Any] | None:
+        """写一篇日记。
+
+        `force=True` 表示「重写」：跳过「已有就返回旧文」的短路，
+        并且用 UPDATE 覆盖正文（`_insert` 是 `INSERT OR IGNORE`，直接插会被静默丢弃）。
+        置顶状态保留——重写内容不该把用户钉的那篇取消置顶。
+        """
         if not self.enabled:
             return None
         day_key = day_key or day_key_of()
         async with self._lock:
-            if await self.exists(day_key):
+            if not force and await self.exists(day_key):
                 return await self.get(day_key)
             bundle = await self._gather(day_key)
             if bundle is None:
@@ -183,7 +215,10 @@ class Diary:
             result = await self._compose_by_model(day_key, bundle)
             if result is None:
                 return None
-            diary_id = await self._insert(day_key, result, bundle)
+            if force and await self.exists(day_key):
+                diary_id = await self._replace(day_key, result, bundle)
+            else:
+                diary_id = await self._insert(day_key, result, bundle)
             if diary_id <= 0:
                 return None
             saved = await self.get(day_key)
@@ -196,7 +231,7 @@ class Diary:
             result["day_key"] = day_key
             await remember_action(
                 self.plugin, "diary", str(diary_id),
-                f"我在{time.strftime('%Y-%m-%d %H:%M')}写了{day_key}的日记；正文留在私人日记里。",
+                f"我在{clock.fmt('%Y-%m-%d %H:%M')}写了{day_key}的日记；正文留在私人日记里。",
                 private_text=f"我写的{day_key}日记（私人正文）：{str(result.get('text') or '')}",
                 result={"diary_id": diary_id, "day_key": day_key},
             )
@@ -340,7 +375,7 @@ class Diary:
         except Exception:
             return []
         yday = day_key_of(
-            time.mktime(time.strptime(day_key, "%Y-%m-%d")) - 3600
+            clock.day_start(time.mktime(time.strptime(f"{day_key} 12:00", "%Y-%m-%d %H:%M"))) - 3600
         )
         wanted = {day_key, yday}
         minimum = max(4, min(5, self.config.int("night.dream_mention_min_level", 4)))
@@ -365,7 +400,9 @@ class Diary:
             bits = []
             if state.sleep_kind:
                 bits.append("午睡过" if state.sleep_kind == "noon" else "夜里睡了一觉")
-            bits.append(f"精力 {float(state.energy):.0f}")
+            # 只给感觉，不给数字。
+            # 原来写的是「精力 100」，模型会原样抄进日记里，读起来像仪表盘读数。
+            bits.append(energy_feel(float(state.energy)))
             # 合格梦由 _dreams_for 单独提供，计数不能把低等级梦重新带进 prompt。
             return "，".join(bits)
         except Exception:
@@ -462,6 +499,33 @@ class Diary:
         row = await self.get(day_key)
         return int((row or {}).get("id") or 0)
 
+    async def _replace(self, day_key: str, result: dict[str, Any], bundle: dict[str, Any]) -> int:
+        """重写当天日记：覆盖正文，保留 pinned 和 id。"""
+        refs = [int(a.get("id") or 0) for a in bundle.get("atoms", []) if int(a.get("id") or 0)]
+        persona = self.config.persona_id
+        try:
+            await self.store.execute(
+                "UPDATE mem_diary SET created_at=?, title=?, text=?, mood=?, tags=?, refs=?, "
+                "affinity_subject=?, affinity_score=? WHERE persona_id=? AND day_key=?",
+                (
+                    int(time.time()),
+                    str(result.get("title") or ""),
+                    str(result.get("text") or ""),
+                    str(result.get("mood") or ""),
+                    json.dumps(result.get("tags") or [], ensure_ascii=False),
+                    json.dumps(refs, ensure_ascii=False),
+                    str(bundle.get("subject_key") or ""),
+                    float(bundle.get("score") or 0.0),
+                    persona,
+                    day_key,
+                ),
+            )
+        except Exception as exc:
+            logger.warning(f"[congling] 日记重写失败: {exc!r}")
+            return 0
+        row = await self.get(day_key)
+        return int((row or {}).get("id") or 0)
+
     async def exists(self, day_key: str) -> bool:
         row = await self.get(day_key)
         return bool(row)
@@ -530,7 +594,7 @@ class Diary:
                 value = default
             item[field] = value if isinstance(value, list) else default
         created = int(item.get("created_at") or 0)
-        item["created_text"] = time.strftime("%H:%M", time.localtime(created)) if created else ""
+        item["created_text"] = clock.fmt("%H:%M", created) if created else ""
         day_key = str(item.get("day_key") or "")
         try:
             stamp = time.strptime(day_key, "%Y-%m-%d")

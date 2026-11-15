@@ -16,6 +16,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..core import clock
 from ..core import paths
 from .forgetting import ForgettingCurve
 from ..core.exc import exc_brief
@@ -85,7 +86,7 @@ class Maintenance:
 
         # 业务日幂等：同一天被触发两次（重启、多实例、定时器抖动）会把衰减系数乘两次。
         # 用「人设 + 业务日 + phase」做标记，成功跑完才写，失败不落标。
-        day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+        day_key = clock.fmt("%Y-%m-%d", now)
         mark_key = f"maintenance:decay:{self.config.persona_id}:{day_key}"
         try:
             if await self.store.kv_get(mark_key, "") == "done":
@@ -163,7 +164,7 @@ class Maintenance:
             return
 
         now = int(time.time())
-        lt = time.localtime(now)
+        lt = clock.struct(now)
         hour = max(0, min(23, self.config.int("memory.reflect_hour", 4)))
         # 「到点之后」而不是「整点相等」：_housekeeping 每小时醒一次，
         # 一旦那一跳因为重启/长耗时被错过，按相等判断当天就永远不反思了。
@@ -249,7 +250,7 @@ class Maintenance:
         # 而 run_daily() 在启动时会被多个钩子各调一次，于是每次重启
         # 就连续写出两三份 39MB 的备份——目录里 7 份就是 271MB。
         now = int(time.time())
-        day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+        day_key = clock.fmt("%Y-%m-%d", now)
         mark_key = f"maintenance:backup:{self.config.persona_id}:{day_key}"
         try:
             if await self.store.kv_get(mark_key, "") == "done":
@@ -270,7 +271,7 @@ class Maintenance:
             "atoms": rows,
             "episodes": episodes,
         }
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = clock.fmt("%Y%m%d-%H%M%S")
         target = paths.backup_dir() / f"memory-{stamp}.json"
         try:
             target.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")

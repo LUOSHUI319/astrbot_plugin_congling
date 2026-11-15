@@ -64,8 +64,29 @@ class Commands:
                 lines.append(f"记忆 {count} 条")
             except Exception:
                 pass
+        # 安静：说了晚安之后这段时间不接话，但人还醒着。状态里要说清楚。
+        try:
+            if self.plugin.night is not None:
+                quiet = self.plugin.night.quiet_line()
+                if quiet:
+                    lines.append(quiet)
+        except Exception:
+            pass
         if self.plugin.capabilities is not None:
             lines.append(f"能力 {len(self.plugin.capabilities.caps)} 项")
+        # 空间模式 + 表情包库：这两个决定「她能不能发、能不能配图」，
+        # 状态里必须能看到，不能让人靠猜。
+        try:
+            if self.plugin.qqext is not None:
+                qq = await self.plugin.qqext.status()
+                qzone = qq.get("qzone") or {}
+                if qzone.get("behavior_text"):
+                    lines.append(str(qzone["behavior_text"]))
+                sticker = qq.get("sticker") or {}
+                if sticker.get("text"):
+                    lines.append(str(sticker["text"]))
+        except Exception:
+            pass
         yield_text = health["compat"]["yield"]
         yielding = [key for key, value in yield_text.items() if value]
         if yielding:

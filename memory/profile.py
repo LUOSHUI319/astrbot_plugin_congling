@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 from astrbot.api import logger
+from ..core import clock
 from ..core.memory_guard import memory_work
 from ..core.exc import exc_brief
 
@@ -196,8 +197,8 @@ class ProfileBook:
             "fields": self._loads(row.get("fields"), {}),
             "source_count": len(self._loads(row.get("source_atom_ids"), [])),
             "updated_at": int(row.get("updated_at") or 0),
-            "updated_text": time.strftime(
-                "%Y-%m-%d %H:%M", time.localtime(int(row.get("updated_at") or 0))
+            "updated_text": clock.fmt(
+                "%Y-%m-%d %H:%M", int(row.get("updated_at") or 0)
             ),
         }
 

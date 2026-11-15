@@ -73,6 +73,11 @@ def avatar_dir() -> Path:
     return _sub("avatar")
 
 
+def gallery_dir() -> Path:
+    """图库目录：生活图 / 表情存在这里，跟头像分开放，免得混成一坨。"""
+    return _sub("gallery")
+
+
 def plugin_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
